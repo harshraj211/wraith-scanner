@@ -78,7 +78,7 @@ The scanner supports **explicit operating modes** to separate ethical testing fr
 
 ### Setup
 ```bash
-git clone [https://github.com/harshraj211/vulnerability-scanner.git](https://github.com/harshraj211/vulnerability-scanner.git)
+git clone https://github.com/harshraj211/vulnerability-scanner.git
 cd vulnerability-scanner
 mkdir reports (in window powershell)
 mkdir -p reports (in linux)
@@ -86,12 +86,55 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
+**Command for Windows/powershell**
+🔹 Basic Scan
+python main.py --url http://example.com --output test_report.pdf (windows/powershell)
+
+🔹 Scan with Verbose Output
+python main.py --url http://example.com --verbose
+
+🔹 Scan with Custom Crawl Depth
+python main.py --url http://example.com --depth 3 --output report.pdf
+
+🔹 Scan with Custom Timeout
+python main.py --url http://example.com --timeout 20
+
+🔹 CTF Mode
+python main.py --url http://ctf-target.com --mode ctf
+
+🔹 Authenticated CTF Mode
+python main.py --url http://ctf-target.com --mode ctf-auth --username admin --password admin123
+
+**Command for 🐧 Linux / macOS**
+
+🔹 Basic Scan
+python main.py --url http://example.com --output test_report.pdf
+
+🔹 Scan with Verbose Output
+python main.py --url http://example.com --verbose
+
+🔹 Scan with Custom Crawl Depth
+python main.py --url http://example.com --depth 3 --output report.pdf
+
+🔹 Scan with Custom Timeout
+python main.py --url http://example.com --timeout 20
+
+🔹 CTF mode
+python main.py --url http://ctf-target.com --mode ctf
+
+🔹 Authenticated CTF mode
+python main.py --url http://ctf-target.com --mode ctf-auth --username admin --password admin123
+
+
+
+
+
 Optional editable install:
 pip install -e .
 
 📖 Usage
 CLI Mode
-python main.py --url [http://target.com](http://target.com)
+python main.py --url http://target.com
 
 Common options:
 --depth 3
@@ -116,7 +159,7 @@ A deliberately vulnerable test application is included.
 python test_app/vulnerable_app.py
 
 2. Scan it:
-python main.py --url [http://127.0.0.1:5000](http://127.0.0.1:5000) --output test_report.pdf
+python main.py --url http://127.0.0.1:5000 --output test_report.pdf
 
 🗂 Project Structure
 scanner/
@@ -159,5 +202,6 @@ test_app/                # Vulnerable test application
 Harsh Raj
 Cyber Security Student
 GitHub: https://github.com/harshraj211
+
 
 
