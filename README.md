@@ -80,6 +80,8 @@ The scanner supports **explicit operating modes** to separate ethical testing fr
 ```bash
 git clone [https://github.com/harshraj211/vulnerability-scanner.git](https://github.com/harshraj211/vulnerability-scanner.git)
 cd vulnerability-scanner
+mkdir reports (in window powershell)
+mkdir -p reports (in linux)
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -157,4 +159,5 @@ test_app/                # Vulnerable test application
 Harsh Raj
 Cyber Security Student
 GitHub: https://github.com/harshraj211
+
 
