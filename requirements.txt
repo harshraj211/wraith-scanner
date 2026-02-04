@@ -1,0 +1,62 @@
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+reportlab>=3.6.0
+colorama>=0.4.6
+flask>=2.3.0
+flask-cors>=4.0.0
+flask-socketio>=5.3.0
+```
+
+---
+
+### **3. Create `.gitignore`:**
+```
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Reports
+reports/
+*.pdf
+*.html
+*.json
+
+# Test data
+test.db
+
+# Node modules
+scanner-terminal/node_modules/
+scanner-terminal/build/
+
+# OS
+.DS_Store
+Thumbs.db
