@@ -97,13 +97,13 @@ pip install -r requirements.txt
 
 **Command for Windows/powershell**
 🔹 Basic Scan
-python main.py --url http://example.com --output test_report.pdf (windows/powershell)
+python main.py --url http://example.com --output reports\test_report.pdf (windows/powershell)
 
 🔹 Scan with Verbose Output
 python main.py --url http://example.com --verbose
 
 🔹 Scan with Custom Crawl Depth
-python main.py --url http://example.com --depth 3 --output report.pdf
+python main.py --url http://example.com --depth 3 --output reports\report.pdf
 
 🔹 Scan with Custom Timeout
 python main.py --url http://example.com --timeout 20
@@ -211,6 +211,7 @@ test_app/                # Vulnerable test application
 Harsh Raj
 Cyber Security Student
 GitHub: https://github.com/harshraj211
+
 
 
 
