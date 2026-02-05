@@ -82,6 +82,7 @@ class CSRFScanner:
                         "evidence": "No CSRF token found in form or page",
                         "confidence": 80,
                         "url": action,
+                        "exploitability": "Requires authenticated user and state-changing action"
                     })
             
             except requests.RequestException as exc:
