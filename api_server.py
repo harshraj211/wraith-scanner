@@ -20,6 +20,7 @@ from scanner.modules.path_traversal_scanner import PathTraversalScanner
 from scanner.modules.csrf_scanner import CSRFScanner
 from scanner.modules.wordpress_scanner import WordPressScanner
 from scanner.modules.flag_hunter import FlagHunter
+from scanner.utils.deduplication import deduplicate_and_group
 from scanner.utils.rate_limiter import get_rate_limiter
 from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
@@ -230,7 +231,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         
         report_filename = f"scan_{scan_id}.pdf"
         report_path = os.path.join(REPORTS_DIR, report_filename)
-        unique_findings = deduplicate_findings(all_findings)
+        unique_findings = deduplicate_and_group(all_findings)
         
         # Separate flags from vulnerabilities
         flags_found = [f for f in unique_findings if f.get('type') == 'flag']
