@@ -44,6 +44,46 @@ class FlagHunter:
                     print(f"   Context: {finding['context']}\n")
         
         return findings
+
+    def scan_headers(self, url: str, headers: Dict[str, str]) -> List[Dict]:
+        """Scan HTTP headers for flags."""
+        findings = []
+        for key, value in headers.items():
+            content = f"{key}: {value}"
+            for pattern in self.patterns:
+                matches = pattern.findall(content)
+                for match in matches:
+                    if match not in [f['flag'] for f in self.found_flags]:
+                        finding = {
+                            'type': 'flag',
+                            'flag': match,
+                            'url': url,
+                            'context': f"Header: {key}"
+                        }
+                        findings.append(finding)
+                        self.found_flags.append(finding)
+                        print(f"\n🚩 FLAG FOUND IN HEADER! {match}")
+        return findings
+
+    def scan_cookies(self, url: str, cookies: Dict[str, str]) -> List[Dict]:
+        """Scan cookies for flags."""
+        findings = []
+        for key, value in cookies.items():
+            content = f"{key}: {value}"
+            for pattern in self.patterns:
+                matches = pattern.findall(content)
+                for match in matches:
+                    if match not in [f['flag'] for f in self.found_flags]:
+                        finding = {
+                            'type': 'flag',
+                            'flag': match,
+                            'url': url,
+                            'context': f"Cookie: {key}"
+                        }
+                        findings.append(finding)
+                        self.found_flags.append(finding)
+                        print(f"\n🚩 FLAG FOUND IN COOKIE! {match}")
+        return findings
     
     def scan_file_content(self, filepath: str, content: str) -> List[Dict]:
         """Scan file contents for flags (comments, source code, etc.)."""
