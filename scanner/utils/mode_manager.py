@@ -34,7 +34,8 @@ class ModeManager:
             r'FLAG\{[^}]+\}',
             r'CTF\{[^}]+\}',
             r'htb\{[^}]+\}',
-            r'thm\{[^}]+\}'
+            r'thm\{[^}]+\}',
+            r'picoCTF\{[^}]+\}',
         ]
     
     def set_mode(self, mode: str) -> bool:
