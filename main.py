@@ -3,8 +3,6 @@
 Provides a simple command-line entry point that runs the crawler and
 multiple vulnerability scanners (SQLi, XSS, IDOR, Open Redirect), aggregates
 results, and emits a human-readable or machine-readable report.
-
-Now supports multiple scanning modes: scan, lab, ctf, ctf-auth
 """
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ import json
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
+import requests # Added for cookie handling
 
 # Optional colored output
 try:
@@ -40,6 +39,7 @@ from scanner.modules.csrf_scanner import CSRFScanner
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
+from scanner.utils.auth_manager import get_auth_manager # <--- Added Import
 
 
 SEVERITY_ORDER = {"sqli": 0, "xss": 1, "idor": 2, "open-redirect": 3}
@@ -88,7 +88,6 @@ def dedupe_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def severity_sort_key(item: Dict[str, Any]) -> int:
     t = item.get("type", "").lower()
-    # Map variants like 'reflected-xss' -> 'xss', 'open-redirect' -> 'open-redirect'
     if "xss" in t:
         key = "xss"
     elif "sqli" in t:
@@ -121,14 +120,12 @@ def generate_console_report(target: str, urls: List[str], forms: List[Dict[str, 
     
     lines.append("")
     
-    # Show flags first if found
     if flags:
         lines.append("🏁 FLAGS CAPTURED:")
         for flag in flags:
             lines.append(f"  {flag['flag']}")
         lines.append("")
     
-    # Show vulnerabilities
     vuln_findings = [f for f in findings if f.get('type') != 'flag']
     if vuln_findings:
         lines.append("VULNERABILITIES FOUND:")
@@ -158,10 +155,8 @@ def generate_json_report(target: str, urls: List[str], forms: List[Dict[str, Any
         "forms": forms,
         "vulnerabilities": [f for f in findings if f.get('type') != 'flag'],
     }
-    
     if flags:
         out["flags"] = flags
-    
     return json.dumps(out, indent=2)
 
 
@@ -171,7 +166,6 @@ def generate_txt_report(*args, **kwargs) -> str:
 
 def generate_html_report(target: str, urls: List[str], forms: List[Dict[str, Any]], findings: List[Dict[str, Any]], flags: Optional[List[Dict[str, str]]] = None) -> str:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Minimal inline CSS
     css = """
     body { font-family: Arial, sans-serif; padding: 20px; }
     .header { background:#222;color:#fff;padding:10px }
@@ -190,7 +184,6 @@ def generate_html_report(target: str, urls: List[str], forms: List[Dict[str, Any
     
     parts.append("</ul>")
     
-    # Show flags
     if flags:
         parts.append("<h2>🏁 Flags Captured</h2>")
         for flag in flags:
@@ -214,17 +207,25 @@ def save_output(path: str, content: str) -> None:
 def main() -> int:
     args = parse_args()
 
-    # Initialize mode manager
+    # Initialize managers
     mode_mgr = get_mode_manager()
+    auth_mgr = get_auth_manager() # <--- Initialize AuthManager
     
     # Set mode
     if not mode_mgr.set_mode(args.mode):
         print(Fore.RED + f"Invalid mode: {args.mode}" + Style.RESET_ALL)
         return 1
     
+    # --- UNIFIED SESSION SETUP ---
+    # Get the single shared session
+    session = auth_mgr.get_session()
+    session.headers.update({"User-Agent": "vuln-scanner/1.0"})
+
     # Set credentials if provided
     if args.username and args.password:
         mode_mgr.set_credentials(args.username, args.password)
+        # Automatically attempt basic auth if credentials are provided
+        auth_mgr.login_basic_auth(args.username, args.password)
     elif args.mode == 'ctf-auth':
         print(Fore.RED + "[!] ctf-auth mode requires --username and --password" + Style.RESET_ALL)
         return 1
@@ -232,7 +233,7 @@ def main() -> int:
     # Get mode configuration
     config = mode_mgr.get_mode_config()
     
-    # Override with command-line args if provided
+    # Override with command-line args
     if args.depth:
         config['max_depth'] = args.depth
     if args.timeout:
@@ -243,7 +244,6 @@ def main() -> int:
 
     banner()
     
-    # Display mode info
     print(f"\n{Fore.YELLOW}[*] Mode: {args.mode.upper()}{Style.RESET_ALL}")
     print(f"    Target: {args.url}")
     print(f"    Exploit: {'YES' if config['exploit'] else 'NO'}")
@@ -253,7 +253,11 @@ def main() -> int:
     print(f"    Timeout: {config['timeout']}s\n")
 
     print(Fore.MAGENTA + "CRAWLING" + Style.RESET_ALL)
-    crawler = WebCrawler(args.url, max_depth=config['max_depth'], timeout=config['timeout'])
+    
+    # --- PASS SESSION TO CRAWLER ---
+    # Crawler now uses the authenticated session
+    crawler = WebCrawler(args.url, max_depth=config['max_depth'], 
+                         timeout=config['timeout'], session=session)
     results = crawler.crawl()
 
     urls = results.get("urls", [])
@@ -278,112 +282,94 @@ def main() -> int:
     for u in urls:
         params = normalize_params_from_url(u)
         
-        # Hunt for flags if enabled
+        # --- HUNT FLAGS WITH SHARED SESSION ---
         if flag_hunter:
             try:
-                import requests
-                resp = requests.get(u, timeout=config['timeout'])
+                # Use SESSION instead of requests.get
+                # This sends the cookies found during crawling!
+                resp = session.get(u, timeout=config['timeout'])
+                
                 flags = flag_hunter.scan_response(u, resp.text)
                 all_findings.extend(flags)
                 
-                # Also check headers and cookies
+                # Check headers
                 flags_headers = flag_hunter.scan_headers(u, dict(resp.headers))
                 all_findings.extend(flags_headers)
                 
-                flags_cookies = flag_hunter.scan_cookies(u, requests.utils.dict_from_cookiejar(resp.cookies))
+                # Check cookies from the SHARED session
+                current_cookies = requests.utils.dict_from_cookiejar(session.cookies)
+                flags_cookies = flag_hunter.scan_cookies(u, current_cookies)
                 all_findings.extend(flags_cookies)
+                
             except Exception as exc:
                 if args.verbose:
                     print(f"[!] Flag hunting failed on {u}: {exc}")
         
         if params:
+            # SQLi
             try:
                 f = sqli.scan_url(u, params)
-                for item in f:
-                    item["url"] = u
+                for item in f: item["url"] = u
                 all_findings.extend(f)
-            except Exception as exc:  # keep scanning on error
-                err = f"SQLi scanner failed on {u}: {exc}"
-                print(err)
-                errors.append(err)
+            except Exception as exc:
+                errors.append(f"SQLi scanner failed on {u}: {exc}")
 
+            # XSS
             try:
                 f = xss.scan_url(u, params)
-                for item in f:
-                    item["url"] = u
+                for item in f: item["url"] = u
                 all_findings.extend(f)
             except Exception as exc:
-                err = f"XSS scanner failed on {u}: {exc}"
-                print(err)
-                errors.append(err)
+                errors.append(f"XSS scanner failed on {u}: {exc}")
 
+            # IDOR
             try:
                 f = idor.scan_url(u, params)
-                for item in f:
-                    item["url"] = u
+                for item in f: item["url"] = u
                 all_findings.extend(f)
             except Exception as exc:
-                err = f"IDOR scanner failed on {u}: {exc}"
-                print(err)
-                errors.append(err)
+                errors.append(f"IDOR scanner failed on {u}: {exc}")
 
-        # Redirect tests should run even if no params present (some endpoints accept redirect params)
+        # Redirect check
         try:
-            # extract query params (may be empty)
             qp = normalize_params_from_url(u)
             f = redir.scan_url(u, qp)
-            for item in f:
-                item["url"] = u
+            for item in f: item["url"] = u
             all_findings.extend(f)
         except Exception as exc:
-            err = f"Redirect scanner failed on {u}: {exc}"
-            print(err)
-            errors.append(err)
+            errors.append(f"Redirect scanner failed on {u}: {exc}")
 
     # Scan forms
     for form in forms:
         action = form.get("action")
         try:
             f = sqli.scan_form(form)
-            for item in f:
-                item["url"] = action
+            for item in f: item["url"] = action
             all_findings.extend(f)
         except Exception as exc:
-            err = f"SQLi scanner failed on form {action}: {exc}"
-            print(err)
-            errors.append(err)
+            errors.append(f"SQLi scanner failed on form {action}: {exc}")
 
         try:
             f = xss.scan_form(form)
-            for item in f:
-                item["url"] = action
+            for item in f: item["url"] = action
             all_findings.extend(f)
         except Exception as exc:
-            err = f"XSS scanner failed on form {action}: {exc}"
-            print(err)
-            errors.append(err)
+            errors.append(f"XSS scanner failed on form {action}: {exc}")
 
         try:
             f = redir.scan_url(action, normalize_params_from_url(action))
-            for item in f:
-                item["url"] = action
+            for item in f: item["url"] = action
             all_findings.extend(f)
         except Exception as exc:
-            err = f"Redirect scanner failed on form {action}: {exc}"
-            print(err)
-            errors.append(err)
+            errors.append(f"Redirect scanner failed on form {action}: {exc}")
 
-        # CSRF
         try:
             csrf_scanner = CSRFScanner()
             f = csrf_scanner.scan_form(form)
-            for item in f:
-                item["url"] = action
+            for item in f: item["url"] = action
             all_findings.extend(f)
         except Exception as exc:
-            err = f"CSRF scanner failed on form {action}: {exc}"
-            print(err)
-            errors.append(err)
+            errors.append(f"CSRF scanner failed on form {action}: {exc}")
 
     # Deduplicate and sort
     unique = dedupe_findings(all_findings)
@@ -396,20 +382,17 @@ def main() -> int:
 
     print(Fore.MAGENTA + "REPORTING" + Style.RESET_ALL)
     
-    # Display flags if found
     if flags_found:
         print(Fore.GREEN + f"\n🏁 FLAGS FOUND: {len(flags_found)}" + Style.RESET_ALL)
         for flag in flags_found:
             print(Fore.GREEN + f"  {flag['flag']}" + Style.RESET_ALL)
     
-    # Generate reports
     console = generate_console_report(args.url, urls, forms, unique, flags_found)
 
     if args.output:
         out = args.output
         try:
             if out.endswith(".pdf"):
-                # PDF doesn't support flags yet, just vulnerabilities
                 vuln_only = [f for f in unique if f.get('type') != 'flag']
                 generate_pdf_report(args.url, urls, forms, vuln_only, out)
                 print(Fore.GREEN + f"Saved PDF report to {out}" + Style.RESET_ALL)
