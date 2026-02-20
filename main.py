@@ -29,7 +29,7 @@ except Exception:
     
     class Style:
         RESET_ALL = ""
-
+from urllib.parse import urlparse, parse_qs
 from scanner.core.crawler import WebCrawler
 from scanner.modules.sqli_scanner import SQLiScanner
 from scanner.modules.xss_scanner import XSSScanner
@@ -78,7 +78,13 @@ def dedupe_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: Set[Tuple[str, str, str]] = set()
     out: List[Dict[str, Any]] = []
     for f in findings:
-        key = (f.get("type", ""), f.get("param", ""), f.get("url", f.get("action", "")))
+        raw_url = f.get("url", f.get("action", ""))
+        
+        # NEW FIX: Parse the URL and remove the query string for the dedupe key
+        parsed = urlparse(raw_url)
+        base_path = parsed.path 
+        
+        key = (f.get("type", ""), f.get("param", ""), base_path)
         if key in seen:
             continue
         seen.add(key)
