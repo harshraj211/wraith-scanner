@@ -25,6 +25,12 @@ from scanner.utils.rate_limiter import get_rate_limiter
 from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
+from scanner.modules.crypto_scanner import CryptoScanner
+from scanner.modules.ssrf_scanner import SSRFScanner
+from scanner.modules.xxe_scanner import XXEScanner
+from scanner.modules.ssti_scanner import SSTIScanner
+from scanner.modules.header_scanner import HeaderScanner
+from scanner.modules.component_scanner import ComponentScanner
 
 app = Flask(__name__)
 CORS(app)
@@ -132,8 +138,18 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         path = PathTraversalScanner(timeout=timeout, session=authenticated_session)
         csrf = CSRFScanner(timeout=timeout, session=authenticated_session)
         rate_limiter = get_rate_limiter()
+        crypto = CryptoScanner(timeout=timeout, session=authenticated_session)
+        ssrf = SSRFScanner(timeout=timeout, session=authenticated_session)
+        xxe = XXEScanner(timeout=timeout, session=authenticated_session)
+        ssti = SSTIScanner(timeout=timeout, session=authenticated_session)
+        header_scan = HeaderScanner(timeout=timeout, session=authenticated_session)
+        component_scan = ComponentScanner(timeout=timeout, session=authenticated_session)
         
         all_findings = wp_findings.copy()
+        all_findings.extend(header_scan.scan_url(target_url))
+        all_findings.extend(component_scan.scan_url(target_url))
+        all_findings.extend(component_scan.scan_base_url(target_url))
+        all_findings.extend(crypto.scan_url(target_url))
         
         emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (multi-threaded)...", "phase")
         
@@ -169,9 +185,10 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                 params = {k: v[0] for k, v in params.items() if v}
                 
                 if params:
-                    for scanner, name in [(sqli, 'SQL Injection'), (xss, 'XSS'), 
+                    for scanner, name in [(sqli, 'SQL Injection'), (xss, 'XSS'),
                                           (idor, 'IDOR'), (cmdi, 'Command Injection'),
-                                          (path, 'Path Traversal')]:
+                                          (path, 'Path Traversal'), (ssrf, 'SSRF'),
+                                          (ssti, 'SSTI'), (xxe, 'XXE')]:
                         vuln = scanner.scan_url(url, params)
                         for f in vuln:
                             f['url'] = url
@@ -209,7 +226,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             try:
                 emit_progress(scan_id, f"[{idx}/{total}] Scanning form: {action}", "info")
                 
-                for scanner in [sqli, xss, cmdi, path, csrf]:
+                for scanner in [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe]:
                     vuln = scanner.scan_form(form)
                     for f in vuln:
                         f['url'] = action
