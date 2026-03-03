@@ -36,6 +36,12 @@ from scanner.modules.xss_scanner import XSSScanner
 from scanner.modules.idor_scanner import IDORScanner
 from scanner.modules.redirect_scanner import RedirectScanner
 from scanner.modules.csrf_scanner import CSRFScanner
+from scanner.modules.crypto_scanner import CryptoScanner
+from scanner.modules.ssrf_scanner import SSRFScanner
+from scanner.modules.xxe_scanner import XXEScanner
+from scanner.modules.ssti_scanner import SSTIScanner
+from scanner.modules.header_scanner import HeaderScanner
+from scanner.modules.component_scanner import ComponentScanner
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
@@ -277,6 +283,29 @@ def main() -> int:
     xss = XSSScanner(timeout=config['timeout'])
     idor = IDORScanner(timeout=config['timeout'])
     redir = RedirectScanner(timeout=config['timeout'])
+    crypto = CryptoScanner(timeout=config['timeout'], session=session)
+    ssrf = SSRFScanner(timeout=config['timeout'], session=session)
+    xxe = XXEScanner(timeout=config['timeout'], session=session)
+    ssti = SSTIScanner(timeout=config['timeout'], session=session)
+    header_scan = HeaderScanner(timeout=config['timeout'], session=session)
+    component_scan = ComponentScanner(timeout=config['timeout'], session=session)
+
+    # One-time base URL checks
+    for finding in header_scan.scan_url(args.url):
+        finding['url'] = args.url
+        all_findings.append(finding)
+
+    for finding in component_scan.scan_url(args.url):
+        finding['url'] = args.url
+        all_findings.append(finding)
+
+    for finding in component_scan.scan_base_url(args.url):
+        finding['url'] = args.url
+        all_findings.append(finding)
+
+    for finding in crypto.scan_url(args.url):
+        finding['url'] = args.url
+        all_findings.append(finding)
 
     # Initialize flag hunter if in CTF mode
     flag_hunter = None
@@ -336,6 +365,30 @@ def main() -> int:
             except Exception as exc:
                 errors.append(f"IDOR scanner failed on {u}: {exc}")
 
+            # SSRF
+            try:
+                f = ssrf.scan_url(u, params)
+                for item in f: item["url"] = u
+                all_findings.extend(f)
+            except Exception as exc:
+                errors.append(f"SSRF scanner failed on {u}: {exc}")
+
+            # SSTI
+            try:
+                f = ssti.scan_url(u, params)
+                for item in f: item["url"] = u
+                all_findings.extend(f)
+            except Exception as exc:
+                errors.append(f"SSTI scanner failed on {u}: {exc}")
+
+            # XXE
+            try:
+                f = xxe.scan_url(u, params)
+                for item in f: item["url"] = u
+                all_findings.extend(f)
+            except Exception as exc:
+                errors.append(f"XXE scanner failed on {u}: {exc}")
+
         # Redirect check
         try:
             qp = normalize_params_from_url(u)
@@ -376,6 +429,34 @@ def main() -> int:
             all_findings.extend(f)
         except Exception as exc:
             errors.append(f"CSRF scanner failed on form {action}: {exc}")
+
+        try:
+            f = crypto.scan_form(form)
+            for item in f: item["url"] = action
+            all_findings.extend(f)
+        except Exception as exc:
+            errors.append(f"Crypto scanner failed on form {action}: {exc}")
+
+        try:
+            f = ssrf.scan_form(form)
+            for item in f: item["url"] = action
+            all_findings.extend(f)
+        except Exception as exc:
+            errors.append(f"SSRF scanner failed on form {action}: {exc}")
+
+        try:
+            f = ssti.scan_form(form)
+            for item in f: item["url"] = action
+            all_findings.extend(f)
+        except Exception as exc:
+            errors.append(f"SSTI scanner failed on form {action}: {exc}")
+
+        try:
+            f = xxe.scan_form(form)
+            for item in f: item["url"] = action
+            all_findings.extend(f)
+        except Exception as exc:
+            errors.append(f"XXE scanner failed on form {action}: {exc}")
 
     # Deduplicate and sort
     unique = dedupe_findings(all_findings)

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
@@ -9,134 +9,169 @@ import './App.css';
 
 const API_URL = 'http://localhost:5001';
 
+// ─────────────────────────────────────────────
+// ANSI color helpers — real escape chars, never raw \x1b strings
+// ─────────────────────────────────────────────
+const ESC = String.fromCharCode(27);
+const RESET = ESC + '[0m';
+const c = (code, text) => `${ESC}[${code}m${text}${RESET}`;
+
+// Pre-built color codes for VULN_META
+const RED    = ESC + '[1;31m';
+const YELLOW = ESC + '[1;33m';
+const DIM_YL = ESC + '[0;33m';
+const DIM    = ESC + '[0;37m';
+
+// ─────────────────────────────────────────────
+// Vulnerability type → display metadata
+// ─────────────────────────────────────────────
+const VULN_META = {
+  // A01 – Broken Access Control
+  'idor':                       { label: 'IDOR',              color: YELLOW, owasp: 'A01' },
+  'open-redirect':              { label: 'OPEN REDIRECT',     color: YELLOW, owasp: 'A01' },
+  'csrf':                       { label: 'CSRF',              color: YELLOW, owasp: 'A01' },
+
+  // A02 – Cryptographic Failures
+  'crypto-plaintext-http':      { label: 'PLAINTEXT HTTP',    color: RED,    owasp: 'A02' },
+  'crypto-missing-hsts':        { label: 'MISSING HSTS',      color: RED,    owasp: 'A02' },
+  'crypto-weak-hsts':           { label: 'WEAK HSTS',         color: DIM_YL, owasp: 'A02' },
+  'crypto-insecure-cookie':     { label: 'INSECURE COOKIE',   color: YELLOW, owasp: 'A02' },
+  'crypto-sensitive-data-exposure': { label: 'DATA EXPOSURE', color: RED,    owasp: 'A02' },
+  'crypto-mixed-content':       { label: 'MIXED CONTENT',     color: DIM_YL, owasp: 'A02' },
+  'crypto-weak-tls-version':    { label: 'WEAK TLS',          color: RED,    owasp: 'A02' },
+  'crypto-weak-cipher':         { label: 'WEAK CIPHER',       color: RED,    owasp: 'A02' },
+  'crypto-invalid-certificate': { label: 'INVALID CERT',      color: RED,    owasp: 'A02' },
+  'crypto-no-https-redirect':   { label: 'NO HTTPS REDIRECT', color: YELLOW, owasp: 'A02' },
+  'crypto-http-form-submission':{ label: 'HTTP FORM POST',    color: RED,    owasp: 'A02' },
+
+  // A03 – Injection
+  'error-based':                { label: 'SQLi (ERROR)',      color: RED,    owasp: 'A03' },
+  'time-based':                 { label: 'SQLi (TIME)',       color: RED,    owasp: 'A03' },
+  'reflected-xss':              { label: 'XSS (REFLECTED)',  color: RED,    owasp: 'A03' },
+  'command-injection':          { label: 'CMD INJECTION',    color: RED,    owasp: 'A03' },
+  'xxe':                        { label: 'XXE',              color: RED,    owasp: 'A03' },
+  'ssti':                       { label: 'SSTI',             color: RED,    owasp: 'A03' },
+
+  // A05 – Security Misconfiguration
+  'header-missing':             { label: 'MISSING HEADER',   color: DIM_YL, owasp: 'A05' },
+  'header-info-disclosure':     { label: 'HEADER LEAK',      color: DIM_YL, owasp: 'A05' },
+  'header-weak-csp':            { label: 'WEAK CSP',         color: YELLOW, owasp: 'A05' },
+  'header-cors-wildcard':       { label: 'CORS WILDCARD',    color: YELLOW, owasp: 'A05' },
+  'header-cors-reflect-origin': { label: 'CORS REFLECT',     color: RED,    owasp: 'A05' },
+
+  // A06 – Vulnerable Components
+  'vulnerable-component':       { label: 'VULN COMPONENT',   color: YELLOW, owasp: 'A06' },
+
+  // A05 / WordPress
+  'wordpress-xmlrpc':           { label: 'WP XML-RPC',       color: DIM_YL, owasp: 'A05' },
+  'wordpress-info-disclosure':  { label: 'WP INFO LEAK',     color: DIM_YL, owasp: 'A05' },
+  'wordpress-user-enum':        { label: 'WP USER ENUM',     color: DIM_YL, owasp: 'A05' },
+  'wordpress-directory-listing':{ label: 'WP DIR LISTING',   color: DIM_YL, owasp: 'A05' },
+
+  // A08 / Path Traversal
+  'path-traversal':             { label: 'PATH TRAVERSAL',   color: RED,    owasp: 'A08' },
+
+  // A10 – SSRF
+  'ssrf':                       { label: 'SSRF',             color: RED,    owasp: 'A10' },
+
+  // CTF
+  'flag':                       { label: '🏁 FLAG',          color: ESC + '[1;32m', owasp: '---' },
+};
+
+const OWASP_LABELS = {
+  'A01': c('38;5;208', '[A01-ACCESS]'),
+  'A02': c('38;5;196', '[A02-CRYPTO]'),
+  'A03': c('38;5;196', '[A03-INJECT]'),
+  'A05': c('38;5;220', '[A05-CONFIG]'),
+  'A06': c('38;5;208', '[A06-COMPON]'),
+  'A08': c('38;5;196', '[A08-INTEGR]'),
+  'A10': c('38;5;196', '[A10-SSRF]'),
+  '---': c('1;32',     '[CTF-FLAG]'),
+};
+
+function getVulnDisplay(type) {
+  const ltype = (type || '').toLowerCase();
+  // Exact match first
+  if (VULN_META[ltype]) return VULN_META[ltype];
+  // Prefix match
+  for (const key of Object.keys(VULN_META)) {
+    if (ltype.startsWith(key) || ltype.includes(key)) return VULN_META[key];
+  }
+  return { label: type.toUpperCase(), color: '\x1b[0;37m', owasp: '???' };
+}
+
 function App() {
   const terminalRef = useRef(null);
+  const termRef = useRef(null);
   const [terminal, setTerminal] = useState(null);
-  const [socket, setSocket] = useState(null);
-  const [currentScanId, setCurrentScanId] = useState(null);
   const [currentMode, setCurrentMode] = useState('scan');
   const [availableModes, setAvailableModes] = useState([]);
 
-  // Fetch available modes on mount
   useEffect(() => {
     axios.get(`${API_URL}/api/modes`)
-      .then(response => {
-        setAvailableModes(response.data.modes);
-      })
-      .catch(err => console.error('Failed to fetch modes:', err));
+      .then(r => setAvailableModes(r.data.modes))
+      .catch(() => {});
   }, []);
 
+  // ─── Terminal init ───
   useEffect(() => {
-    // Initialize terminal with professional theme
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
-      fontFamily: '"Fira Code", "Cascadia Code", Consolas, Monaco, "Courier New", monospace',
+      fontSize: 13,
+      fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
       theme: {
-        background: '#0c0c0c',
-        foreground: '#cccccc',
-        cursor: '#00ff00',
-        black: '#0c0c0c',
-        red: '#c50f1f',
-        green: '#13a10e',
-        yellow: '#c19c00',
-        blue: '#0037da',
-        magenta: '#881798',
-        cyan: '#3a96dd',
-        white: '#cccccc',
-        brightBlack: '#767676',
-        brightRed: '#e74856',
-        brightGreen: '#16c60c',
-        brightYellow: '#f9f1a5',
-        brightBlue: '#3b78ff',
-        brightMagenta: '#b4009e',
-        brightCyan: '#61d6d6',
-        brightWhite: '#f2f2f2',
+        background:    '#0a0e14',
+        foreground:    '#b3b1ad',
+        cursor:        '#e6b450',
+        cursorAccent:  '#0a0e14',
+        black:         '#0a0e14',
+        red:           '#ff3333',
+        green:         '#c2d94c',
+        yellow:        '#e6b450',
+        blue:          '#59c2ff',
+        magenta:       '#d2a6ff',
+        cyan:          '#95e6cb',
+        white:         '#b3b1ad',
+        brightBlack:   '#404040',
+        brightRed:     '#ff6666',
+        brightGreen:   '#d2e580',
+        brightYellow:  '#ffcc66',
+        brightBlue:    '#80d4ff',
+        brightMagenta: '#e0c0ff',
+        brightCyan:    '#b8f0de',
+        brightWhite:   '#ffffff',
       },
-      lineHeight: 1.2,
-      letterSpacing: 0,
-      scrollback: 1000,
+      lineHeight: 1.3,
+      scrollback: 5000,
     });
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
+    termRef.current = term;
 
-    // Professional banner
-    term.writeln('');
-    term.writeln('\x1b[1;32m┌─────────────────────────────────────────────────────────────┐\x1b[0m');
-    term.writeln('\x1b[1;32m│                                                             │\x1b[0m');
-    term.writeln('\x1b[1;32m│    ██╗   ██╗██╗   ██╗██╗     ███╗   ██╗███████╗ ██████╗   │\x1b[0m');
-    term.writeln('\x1b[1;32m│    ██║   ██║██║   ██║██║     ████╗  ██║██╔════╝██╔════╝   │\x1b[0m');
-    term.writeln('\x1b[1;32m│    ██║   ██║██║   ██║██║     ██╔██╗ ██║███████╗██║        │\x1b[0m');
-    term.writeln('\x1b[1;32m│    ╚██╗ ██╔╝██║   ██║██║     ██║╚██╗██║╚════██║██║        │\x1b[0m');
-    term.writeln('\x1b[1;32m│     ╚████╔╝ ╚██████╔╝███████╗██║ ╚████║███████║╚██████╗   │\x1b[0m');
-    term.writeln('\x1b[1;32m│      ╚═══╝   ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝   │\x1b[0m');
-    term.writeln('\x1b[1;32m│                                                             │\x1b[0m');
-    term.writeln('\x1b[1;32m│              \x1b[1;37mVulnerability Scanner v3.0\x1b[1;32m                  │\x1b[0m');
-    term.writeln('\x1b[1;32m│              \x1b[0;37mMulti-Mode Security Testing\x1b[1;32m                │\x1b[0m');
-    term.writeln('\x1b[1;32m│                                                             │\x1b[0m');
-    term.writeln('\x1b[1;32m└─────────────────────────────────────────────────────────────┘\x1b[0m');
-    term.writeln('');
-    term.writeln('\x1b[1;33m[*] Available Commands:\x1b[0m');
-    term.writeln('    \x1b[1;36mscan\x1b[0m <url>              Start vulnerability scan');
-    term.writeln('    \x1b[1;36mmode\x1b[0m <mode>             Switch scanning mode');
-    term.writeln('    \x1b[1;36mmodes\x1b[0m                   List available modes');
-    term.writeln('    \x1b[1;36mdownload\x1b[0m <scan_id>      Download PDF report');
-    term.writeln('    \x1b[1;36mstatus\x1b[0m <scan_id>        Check scan progress');
-    term.writeln('    \x1b[1;36mhelp\x1b[0m                   Display available commands');
-    term.writeln('    \x1b[1;36mclear\x1b[0m                  Clear terminal screen');
-    term.writeln('');
-    term.writeln(`\x1b[1;32m[✓] Current Mode:\x1b[0m ${currentMode.toUpperCase()}`);
-    term.writeln('\x1b[0;90m[i] Type "modes" to see all available modes\x1b[0m');
-    term.writeln('');
-    term.write('\x1b[1;32m┌──(\x1b[1;34mscanner\x1b[1;32m)-[\x1b[1;37m~\x1b[1;32m]\x1b[0m\n\x1b[1;32m└─$\x1b[0m ');
-
+    printBanner(term);
+    printPrompt(term);
     setTerminal(term);
 
-    // Connect WebSocket
+    // WebSocket
     const ws = io(API_URL);
-    
     ws.on('connect', () => {
-      console.log('WebSocket connected');
+      term.writeln(c('0;90', '[ws] connected to api server'));
     });
 
-    ws.on('scan_progress', (data) => {
-      const { message, type } = data;
-      let prefix = '';
-      let color = '\x1b[0m';
-
-      if (type === 'phase') {
-        prefix = '[+]';
-        color = '\x1b[1;35m';
-      } else if (type === 'success') {
-        prefix = '[✓]';
-        color = '\x1b[1;32m';
-      } else if (type === 'warning') {
-        prefix = '[!]';
-        color = '\x1b[1;33m';
-      } else if (type === 'error') {
-        prefix = '[✗]';
-        color = '\x1b[1;31m';
-      } else {
-        prefix = '[*]';
-        color = '\x1b[0;37m';
-      }
-
-      term.writeln(`${color}${prefix} ${message}\x1b[0m`);
+    ws.on('scan_progress', ({ message, type }) => {
+      const line = formatProgressLine(message, type);
+      term.writeln(line);
     });
 
     ws.on('disconnect', () => {
-      term.writeln('\x1b[1;31m[✗] WebSocket connection lost\x1b[0m');
+      term.writeln(c('1;31', '[ws] connection lost'));
     });
 
-    setSocket(ws);
-
-    // Handle window resize
     const handleResize = () => fitAddon.fit();
     window.addEventListener('resize', handleResize);
 
@@ -147,197 +182,327 @@ function App() {
     };
   }, []);
 
-  const executeCommand = async (command) => {
-    const parts = command.split(' ');
-    const cmd = parts[0].toLowerCase();
-    const args = parts.slice(1);
-
-    try {
-      if (cmd === 'scan') {
-        if (args.length === 0) {
-          terminal.writeln('\x1b[1;31m[✗] Error: URL parameter required\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Usage: scan <target_url>\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Example: scan http://example.com\x1b[0m');
-          return;
-        }
-
-        const url = args[0];
-        terminal.writeln(`\x1b[1;36m[*] Initiating scan: ${url}\x1b[0m`);
-        terminal.writeln(`\x1b[1;36m[*] Mode: ${currentMode.toUpperCase()}\x1b[0m`);
-        terminal.writeln('');
-        
-        const response = await axios.post(`${API_URL}/api/scan`, { 
-          url,
-          mode: currentMode 
-        });
-        const scanId = response.data.scan_id;
-        
-        setCurrentScanId(scanId);
-        terminal.writeln(`\x1b[1;32m[✓] Scan ID: \x1b[1;37m${scanId}\x1b[0m`);
-        terminal.writeln('\x1b[0;90m[i] Real-time updates will appear below...\x1b[0m');
-        terminal.writeln('');
-      }
-      else if (cmd === 'mode') {
-        if (args.length === 0) {
-          terminal.writeln('\x1b[1;31m[✗] Error: Mode parameter required\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Usage: mode <mode_name>\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Available: scan, lab, ctf, ctf-auth\x1b[0m');
-          return;
-        }
-
-        const newMode = args[0].toLowerCase();
-        const validModes = ['scan', 'lab', 'ctf', 'ctf-auth'];
-        
-        if (!validModes.includes(newMode)) {
-          terminal.writeln(`\x1b[1;31m[✗] Invalid mode: ${newMode}\x1b[0m`);
-          terminal.writeln(`\x1b[0;37m    Valid modes: ${validModes.join(', ')}\x1b[0m`);
-          return;
-        }
-
-        // Show warning for dangerous modes
-        if (newMode === 'ctf' || newMode === 'ctf-auth') {
-          terminal.writeln('');
-          terminal.writeln('\x1b[1;31m' + '='.repeat(60) + '\x1b[0m');
-          terminal.writeln('\x1b[1;31m⚠️  EXPLOITATION MODE\x1b[0m');
-          terminal.writeln('\x1b[1;31m' + '='.repeat(60) + '\x1b[0m');
-          terminal.writeln('\x1b[1;33mThis mode performs ACTIVE EXPLOITATION.\x1b[0m');
-          terminal.writeln('\x1b[1;33mUse ONLY on CTFs, labs, and authorized targets.\x1b[0m');
-          terminal.writeln('\x1b[1;31m' + '='.repeat(60) + '\x1b[0m');
-          terminal.writeln('');
-        }
-
-        setCurrentMode(newMode);
-        terminal.writeln(`\x1b[1;32m[✓] Mode changed to: ${newMode.toUpperCase()}\x1b[0m`);
-        
-        // Get mode description
-        const modeInfo = availableModes.find(m => m.name === newMode);
-        if (modeInfo) {
-          terminal.writeln(`\x1b[0;37m    ${modeInfo.description}\x1b[0m`);
-        }
-      }
-      else if (cmd === 'modes') {
-        terminal.writeln('\x1b[1;33m[*] Available Scanning Modes:\x1b[0m');
-        terminal.writeln('');
-        
-        availableModes.forEach(mode => {
-          const indicator = mode.name === currentMode ? '\x1b[1;32m►\x1b[0m' : ' ';
-          terminal.writeln(`${indicator} \x1b[1;36m${mode.name.padEnd(12)}\x1b[0m ${mode.description}`);
-          mode.features.forEach(feature => {
-            terminal.writeln(`    \x1b[0;90m• ${feature}\x1b[0m`);
-          });
-          terminal.writeln('');
-        });
-        
-        terminal.writeln(`\x1b[1;32m[✓] Current mode: ${currentMode.toUpperCase()}\x1b[0m`);
-        terminal.writeln('\x1b[0;37m    Use: mode <name> to switch\x1b[0m');
-      }
-      else if (cmd === 'download') {
-        if (args.length === 0) {
-          terminal.writeln('\x1b[1;31m[✗] Error: Scan ID required\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Usage: download <scan_id>\x1b[0m');
-          return;
-        }
-
-        const scanId = args[0];
-        terminal.writeln(`\x1b[1;36m[*] Downloading report: ${scanId}\x1b[0m`);
-        
-        window.open(`${API_URL}/api/download/${scanId}`, '_blank');
-        terminal.writeln('\x1b[1;32m[✓] Report download initiated\x1b[0m');
-      }
-      else if (cmd === 'status') {
-        if (args.length === 0) {
-          terminal.writeln('\x1b[1;31m[✗] Error: Scan ID required\x1b[0m');
-          terminal.writeln('\x1b[0;37m    Usage: status <scan_id>\x1b[0m');
-          return;
-        }
-
-        const scanId = args[0];
-        terminal.writeln(`\x1b[1;36m[*] Retrieving scan status...\x1b[0m`);
-        
-        const response = await axios.get(`${API_URL}/api/scan/${scanId}`);
-        const data = response.data;
-        
-        terminal.writeln('');
-        terminal.writeln(`\x1b[1;37m    Scan ID:            \x1b[0m${data.scan_id}`);
-        terminal.writeln(`\x1b[1;37m    Target:             \x1b[0m${data.target}`);
-        terminal.writeln(`\x1b[1;37m    Mode:               \x1b[0m${(data.mode || 'scan').toUpperCase()}`);
-        terminal.writeln(`\x1b[1;37m    Status:             \x1b[0m${data.status}`);
-        terminal.writeln(`\x1b[1;37m    Vulnerabilities:    \x1b[0m${data.total_vulnerabilities || 0}`);
-        
-        if (data.total_flags !== undefined) {
-          terminal.writeln(`\x1b[1;37m    Flags Captured:     \x1b[1;33m${data.total_flags} 🏁\x1b[0m`);
-        }
-        
-        terminal.writeln('');
-      }
-      else if (cmd === 'clear' || cmd === 'cls') {
-        terminal.clear();
-      }
-      else if (cmd === 'help') {
-        terminal.writeln('\x1b[1;33m[*] Available Commands:\x1b[0m');
-        terminal.writeln('    \x1b[1;36mscan\x1b[0m <url>              Start vulnerability scan');
-        terminal.writeln('    \x1b[1;36mmode\x1b[0m <mode>             Switch scanning mode');
-        terminal.writeln('    \x1b[1;36mmodes\x1b[0m                   List available modes');
-        terminal.writeln('    \x1b[1;36mdownload\x1b[0m <scan_id>      Download PDF report');
-        terminal.writeln('    \x1b[1;36mstatus\x1b[0m <scan_id>        Check scan progress');
-        terminal.writeln('    \x1b[1;36mhelp\x1b[0m                   Display available commands');
-        terminal.writeln('    \x1b[1;36mclear\x1b[0m                  Clear terminal screen');
-      }
-      else {
-        terminal.writeln(`\x1b[1;31m[✗] Unknown command: ${cmd}\x1b[0m`);
-        terminal.writeln('\x1b[0;90m[i] Type "help" for available commands\x1b[0m');
-      }
-    } catch (error) {
-      terminal.writeln(`\x1b[1;31m[✗] Error: ${error.message}\x1b[0m`);
-      if (error.response) {
-        terminal.writeln(`\x1b[0;90m    Status: ${error.response.status}\x1b[0m`);
-      }
-    }
-  };
-
+  // ─── Input handler ───
   useEffect(() => {
     if (!terminal) return;
+    let line = '';
 
-    let currentLine = '';
-
-    const handleData = async (data) => {
+    const disposable = terminal.onData(async (data) => {
       const code = data.charCodeAt(0);
-
-      if (code === 13) { // Enter
+      if (code === 13) {
         terminal.writeln('');
-        const command = currentLine.trim();
-        
-        if (command) {
-          await executeCommand(command);
-        }
-        
-        currentLine = '';
-        terminal.write('\x1b[1;32m┌──(\x1b[1;34mscanner\x1b[1;32m)-[\x1b[1;37m~\x1b[1;32m]\x1b[0m\n\x1b[1;32m└─$\x1b[0m ');
-      }
-      else if (code === 127) { // Backspace
-        if (currentLine.length > 0) {
-          currentLine = currentLine.slice(0, -1);
+        const cmd = line.trim();
+        if (cmd) await executeCommand(cmd, terminal, currentMode, setCurrentMode, availableModes);
+        line = '';
+        printPrompt(terminal);
+      } else if (code === 127) {
+        if (line.length > 0) {
+          line = line.slice(0, -1);
           terminal.write('\b \b');
         }
-      }
-      else if (code >= 32) { // Printable
-        currentLine += data;
+      } else if (code >= 32) {
+        line += data;
         terminal.write(data);
       }
-    };
+    });
 
-    const disposable = terminal.onData(handleData);
-    
-    return () => {
-      disposable.dispose();
-    };
-  }, [terminal]);
+    return () => disposable.dispose();
+  }, [terminal, currentMode, availableModes]);
 
   return (
     <div className="App">
+      <div className="titlebar">
+        <div className="titlebar-dots">
+          <span className="dot dot-red" />
+          <span className="dot dot-yellow" />
+          <span className="dot dot-green" />
+        </div>
+        <span className="titlebar-title">vulnscan — terminal</span>
+        <span className="titlebar-mode">MODE: {currentMode.toUpperCase()}</span>
+      </div>
       <div ref={terminalRef} className="terminal-container" />
     </div>
   );
+}
+
+// ─────────────────────────────────────────────
+// Banner
+// ─────────────────────────────────────────────
+function printBanner(term) {
+  const w = (str) => term.writeln(str);
+  const div = c('0;90', ' ' + '─'.repeat(73));
+
+  w('');
+  w(c('38;5;196', ' ██╗   ██╗██╗   ██╗██╗     ███╗   ██╗███████╗ ██████╗ █████╗ ███╗   ██╗'));
+  w(c('38;5;202', ' ██║   ██║██║   ██║██║     ████╗  ██║██╔════╝██╔════╝██╔══██╗████╗  ██║'));
+  w(c('38;5;208', ' ██║   ██║██║   ██║██║     ██╔██╗ ██║███████╗██║     ███████║██╔██╗ ██║'));
+  w(c('38;5;214', ' ╚██╗ ██╔╝██║   ██║██║     ██║╚██╗██║╚════██║██║     ██╔══██║██║╚██╗██║'));
+  w(c('38;5;220', '  ╚████╔╝ ╚██████╔╝███████╗██║ ╚████║███████║╚██████╗██║  ██║██║ ╚████║'));
+  w(c('38;5;226', '   ╚═══╝   ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝'));
+  w('');
+  w(div);
+  w(
+    c('0;37', '  Multi-Mode Web Vulnerability Scanner') +
+    c('38;5;240', '  │') +
+    c('0;37', '  OWASP Top 10 Coverage') +
+    c('38;5;240', '  │') +
+    c('38;5;220', '  v3.1')
+  );
+  w(div);
+  w('');
+  w(c('38;5;220', ' OWASP Coverage:'));
+
+  const owaspRows = [
+    ['A01', 'Broken Access Control',      'IDOR · CSRF · Open Redirect'],
+    ['A02', 'Cryptographic Failures',     'TLS · HSTS · Cookies · Data Exposure'],
+    ['A03', 'Injection',                  'SQLi · XSS · CMDi · XXE · SSTI'],
+    ['A05', 'Security Misconfiguration',  'Headers · CORS · CSP · WordPress'],
+    ['A06', 'Vulnerable Components',      'Library CVEs · Version Disclosure'],
+    ['A08', 'Software & Data Integrity',  'Path Traversal'],
+    ['A10', 'SSRF',                       'Internal · Cloud Metadata · LAN'],
+  ];
+
+  owaspRows.forEach(([code, name, items]) => {
+    const codeClr = (code === 'A02' || code === 'A03' || code === 'A10') ? '38;5;196' : '38;5;208';
+    w(
+      '  ' + c(codeClr, code) +
+      c('0;90', ' │') +
+      c('0;37', ' ' + name.padEnd(32)) +
+      c('0;90', items)
+    );
+  });
+
+  w('');
+  w(div);
+  w(
+    c('38;5;245', '  Commands: ') +
+    c('38;5;220', 'scan') + c('38;5;245', ' <url>  ') +
+    c('38;5;220', 'mode') + c('38;5;245', ' <mode>  ') +
+    c('38;5;220', 'modes') + c('38;5;245', '  ') +
+    c('38;5;220', 'status') + c('38;5;245', ' <id>  ') +
+    c('38;5;220', 'download') + c('38;5;245', ' <id>  ') +
+    c('38;5;220', 'help') + c('38;5;245', '  ') +
+    c('38;5;220', 'clear')
+  );
+  w('');
+}
+
+// ─────────────────────────────────────────────
+// Prompt
+// ─────────────────────────────────────────────
+function printPrompt(term) {
+  term.write(
+    c('38;5;196', '┌──(') +
+    c('38;5;208', 'scanner') +
+    c('38;5;196', ')-[') +
+    c('38;5;220', '~') +
+    c('38;5;196', ']') +
+    '\r\n' +
+    c('38;5;196', '└─$') +
+    ' '
+  );
+}
+
+// ─────────────────────────────────────────────
+// Progress line formatter
+// ─────────────────────────────────────────────
+function formatProgressLine(message, type) {
+  const vulnMatch = message.match(/Found (.+?) in ['"](.+?)['"]/i)
+                 || message.match(/Found (.+?)$/i);
+
+  if (type === 'warning' && vulnMatch) {
+    const rawType = vulnMatch[1] || '';
+    const meta = getVulnDisplay(rawType);
+    const owaspTag = OWASP_LABELS[meta.owasp] || '';
+    return (
+      '  ' + meta.color + '[VULN] ' + meta.label.padEnd(20) + RESET +
+      ' ' + owaspTag +
+      ' ' + c('0;90', message)
+    );
+  }
+
+  if (message.includes('FLAG FOUND') || message.includes('🏁')) {
+    return c('1;32', '  ████  ' + message + '  ████');
+  }
+
+  switch (type) {
+    case 'phase':
+      return '\r\n' + c('38;5;245', ' ───') + c('38;5;220', ' ' + message + ' ') + c('38;5;245', '───');
+    case 'success':
+      return '  ' + c('38;5;154', '[✓]') + c('0;37', ' ' + message);
+    case 'error':
+      return '  ' + c('38;5;196', '[✗]') + c('0;37', ' ' + message);
+    case 'info':
+    default:
+      return '  ' + c('38;5;240', '[·]') + c('38;5;245', ' ' + message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Command executor
+// ─────────────────────────────────────────────
+async function executeCommand(command, term, currentMode, setCurrentMode, availableModes) {
+  const parts = command.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+
+  try {
+    switch (cmd) {
+
+      case 'scan': {
+        if (!args[0]) {
+          term.writeln(c('38;5;196', '[✗]') + ' URL required — usage: ' + c('38;5;220', 'scan') + ' <url>');
+          return;
+        }
+        const url = args[0];
+        const depthIdx = args.indexOf('--depth');
+        const timeoutIdx = args.indexOf('--timeout');
+        const depth   = depthIdx   >= 0 ? parseInt(args[depthIdx + 1])   : undefined;
+        const timeout = timeoutIdx >= 0 ? parseInt(args[timeoutIdx + 1]) : undefined;
+
+        term.writeln('');
+        term.writeln(c('38;5;220', '[»] Target:') + '  ' + c('0;37', url));
+        term.writeln(c('38;5;220', '[»] Mode:')   + '    ' + c('0;37', currentMode.toUpperCase()));
+        if (depth)   term.writeln(c('38;5;220', '[»] Depth:')   + '   ' + c('0;37', String(depth)));
+        if (timeout) term.writeln(c('38;5;220', '[»] Timeout:') + ' '  + c('0;37', timeout + 's'));
+        term.writeln('');
+
+        const payload = { url, mode: currentMode };
+        if (depth)   payload.depth = depth;
+        if (timeout) payload.timeout = timeout;
+
+        const resp = await axios.post(`${API_URL}/api/scan`, payload);
+        const scanId = resp.data.scan_id;
+
+        term.writeln(c('38;5;154', '[✓]') + ' Scan started — ID: ' + c('38;5;220', scanId));
+        term.writeln(c('38;5;240', '    run ') + c('38;5;245', 'status ' + scanId) + c('38;5;240', ' to check · ') + c('38;5;245', 'download ' + scanId) + c('38;5;240', ' for PDF'));
+        term.writeln('');
+        break;
+      }
+
+      case 'mode': {
+        if (!args[0]) {
+          term.writeln(c('38;5;196', '[✗]') + ' Mode required — usage: ' + c('38;5;220', 'mode') + ' <scan|lab|ctf|ctf-auth>');
+          return;
+        }
+        const newMode = args[0].toLowerCase();
+        const valid = ['scan', 'lab', 'ctf', 'ctf-auth'];
+        if (!valid.includes(newMode)) {
+          term.writeln(c('38;5;196', '[✗]') + ' Invalid mode "' + c('0;37', newMode) + '". Valid: ' + c('38;5;220', valid.join('  ')));
+          return;
+        }
+        if (newMode === 'ctf' || newMode === 'ctf-auth') {
+          term.writeln('');
+          term.writeln(c('38;5;196', ' ╔══════════════════════════════════════════╗'));
+          term.writeln(c('38;5;196', ' ║  ⚠  EXPLOITATION MODE — AUTHORIZED USE  ║'));
+          term.writeln(c('38;5;196', ' ╚══════════════════════════════════════════╝'));
+          term.writeln(c('38;5;208', '  Use only on CTF platforms, your own labs,'));
+          term.writeln(c('38;5;208', '  or systems with explicit written permission.'));
+          term.writeln('');
+        }
+        setCurrentMode(newMode);
+        const info = availableModes.find(m => m.name === newMode);
+        term.writeln(c('38;5;154', '[✓]') + ' Mode → ' + c('38;5;220', newMode.toUpperCase()));
+        if (info) term.writeln(c('38;5;240', '    ' + info.description));
+        break;
+      }
+
+      case 'modes': {
+        term.writeln('');
+        term.writeln(c('38;5;220', ' Available Modes') + c('38;5;240', ' ────────────────────────────────────'));
+        term.writeln('');
+
+        const modeColorMap = { scan: '154', lab: '220', ctf: '208', 'ctf-auth': '196' };
+        const allModes = availableModes.length ? availableModes : [
+          { name: 'scan',     description: 'Safe detection only (default)',  features: ['No exploitation', 'Production-safe'] },
+          { name: 'lab',      description: 'Controlled lab testing',         features: ['Can exploit', 'Deeper crawl'] },
+          { name: 'ctf',      description: 'CTF flag hunting',               features: ['Flag detection', 'Very aggressive'] },
+          { name: 'ctf-auth', description: 'Authenticated CTF mode',         features: ['Requires creds', 'Flag hunting'] },
+        ];
+
+        allModes.forEach(m => {
+          const col = modeColorMap[m.name] || '245';
+          const active = m.name === currentMode ? '  ' + c('38;5;154', '◄ active') : '';
+          term.writeln('  ' + c('38;5;' + col, m.name.padEnd(12)) + c('0;37', ' ' + m.description) + active);
+          (m.features || []).forEach(f => term.writeln(c('38;5;240', '               · ' + f)));
+        });
+        term.writeln('');
+        break;
+      }
+
+      case 'status': {
+        if (!args[0]) {
+          term.writeln(c('38;5;196', '[✗]') + ' Scan ID required — usage: ' + c('38;5;220', 'status') + ' <id>');
+          return;
+        }
+        const resp = await axios.get(`${API_URL}/api/scan/${args[0]}`);
+        const d = resp.data;
+        const statusColor = d.status === 'completed' ? '154' : d.status === 'failed' ? '196' : '220';
+
+        term.writeln('');
+        term.writeln(c('38;5;220', ' Scan Status') + c('38;5;240', ' ──────────────────────────────────────'));
+        term.writeln('  ' + c('38;5;245', 'ID        ') + c('0;37', d.scan_id));
+        term.writeln('  ' + c('38;5;245', 'Target    ') + c('0;37', d.target));
+        term.writeln('  ' + c('38;5;245', 'Mode      ') + c('38;5;220', (d.mode || 'scan').toUpperCase()));
+        term.writeln('  ' + c('38;5;245', 'Status    ') + c('38;5;' + statusColor, d.status));
+        term.writeln('  ' + c('38;5;245', 'Vulns     ') + c('38;5;196', String(d.total_vulnerabilities || 0)));
+        if (d.total_flags) term.writeln('  ' + c('38;5;245', 'Flags     ') + c('38;5;154', d.total_flags + ' 🏁'));
+        term.writeln('');
+        if (d.status === 'completed') {
+          term.writeln(c('38;5;240', '  run ') + c('38;5;245', 'download ' + d.scan_id) + c('38;5;240', ' for PDF report'));
+        }
+        break;
+      }
+
+      case 'download': {
+        if (!args[0]) {
+          term.writeln(c('38;5;196', '[✗]') + ' Scan ID required — usage: ' + c('38;5;220', 'download') + ' <id>');
+          return;
+        }
+        window.open(`${API_URL}/api/download/${args[0]}`, '_blank');
+        term.writeln(c('38;5;154', '[✓]') + ' PDF download initiated for ' + c('38;5;220', args[0]));
+        break;
+      }
+
+      case 'help': {
+        term.writeln('');
+        term.writeln(c('38;5;220', ' Commands') + c('38;5;240', ' ──────────────────────────────────────────'));
+        const cmds = [
+          ['scan <url>',              'Start a vulnerability scan'],
+          ['scan <url> --depth 3',    'Scan with custom crawl depth'],
+          ['scan <url> --timeout 20', 'Scan with custom timeout (seconds)'],
+          ['mode <mode>',             'Switch scanning mode'],
+          ['modes',                   'List all available modes'],
+          ['status <id>',             'Check scan progress and results'],
+          ['download <id>',           'Download PDF vulnerability report'],
+          ['help',                    'Show this help'],
+          ['clear',                   'Clear terminal'],
+        ];
+        cmds.forEach(([cmd2, desc]) => {
+          term.writeln('  ' + c('38;5;220', cmd2.padEnd(28)) + c('38;5;245', ' ' + desc));
+        });
+        term.writeln('');
+        term.writeln(c('38;5;240', ' OWASP Coverage: A01 A02 A03 A05 A06 A08 A10'));
+        term.writeln('');
+        break;
+      }
+
+      case 'clear':
+      case 'cls': {
+        term.clear();
+        printBanner(term);
+        break;
+      }
+
+      default:
+        term.writeln(c('38;5;196', '[✗]') + ' Unknown command: ' + c('0;37', cmd) + ' — type ' + c('38;5;220', 'help') + ' for commands');
+    }
+  } catch (err) {
+    term.writeln(c('38;5;196', '[✗]') + ' ' + err.message);
+    if (err.response?.data?.error) {
+      term.writeln(c('38;5;240', '    ' + err.response.data.error));
+    }
+  }
 }
 
 export default App;

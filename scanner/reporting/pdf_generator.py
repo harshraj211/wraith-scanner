@@ -77,6 +77,47 @@ VULN_DESCRIPTIONS = {
         "CSRF tricks authenticated users into performing unwanted actions on a web application. "
         "Attackers can force users to change passwords, transfer funds, or perform other state-changing operations without their knowledge.",
     ),
+    "crypto": (
+        "Cryptographic Failures",
+        "Cryptographic Failures occur when sensitive data is transmitted or stored without adequate "
+        "encryption. This includes using HTTP instead of HTTPS, weak TLS configurations, missing HSTS, "
+        "insecure cookie flags, and sensitive data exposed in responses. Attackers can intercept traffic "
+        "via man-in-the-middle attacks or extract credentials from unprotected responses.",
+    ),
+    "ssrf": (
+        "Server-Side Request Forgery (SSRF)",
+        "SSRF vulnerabilities allow attackers to induce the server to make HTTP requests to arbitrary "
+        "internal or external URLs. This can expose internal services, cloud metadata endpoints "
+        "(AWS/GCP/Azure), or be used to bypass firewalls and access controls. In cloud environments "
+        "this is critical — metadata APIs can expose IAM credentials.",
+    ),
+    "xxe": (
+        "XML External Entity Injection (XXE)",
+        "XXE vulnerabilities arise when XML input containing a reference to an external entity is "
+        "processed by a weakly configured XML parser. Attackers can use XXE to read local files, "
+        "perform SSRF, or in some cases execute remote code. Even blind XXE can exfiltrate data "
+        "via out-of-band DNS or HTTP callbacks.",
+    ),
+    "ssti": (
+        "Server-Side Template Injection (SSTI)",
+        "SSTI occurs when user input is embedded directly into a server-side template without sanitization. "
+        "Depending on the template engine (Jinja2, Twig, Freemarker, etc.), this can lead to full remote "
+        "code execution on the server, making it one of the most critical injection vulnerabilities.",
+    ),
+    "header": (
+        "Security Misconfiguration — Missing HTTP Headers",
+        "Missing or misconfigured HTTP security headers leave applications vulnerable to a range of attacks. "
+        "Without Content-Security-Policy, XSS attacks are easier to execute. Without X-Frame-Options, "
+        "clickjacking is possible. Without HSTS, SSL stripping attacks are feasible. These are quick wins "
+        "that significantly reduce attack surface.",
+    ),
+    "vulnerable-component": (
+        "Vulnerable and Outdated Components",
+        "Using components with known vulnerabilities exposes the application to public exploits. "
+        "Outdated JavaScript libraries, server software, and frameworks often have well-documented CVEs "
+        "with readily available proof-of-concept exploits. Attackers actively scan for version disclosures "
+        "to identify targets.",
+    ),
 }
 
 REMEDIATIONS = {
@@ -120,6 +161,56 @@ REMEDIATIONS = {
         "Verify origin and referer headers",
         "Require re-authentication for sensitive actions",
     ],
+    "crypto": [
+        "Enforce HTTPS everywhere: redirect all HTTP traffic to HTTPS",
+        "Add HSTS header: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload",
+        "Set cookie flags: Set-Cookie: session=...; Secure; HttpOnly; SameSite=Strict",
+        "Disable TLS 1.0 and 1.1 — require TLS 1.2 minimum, prefer TLS 1.3",
+        "Never return sensitive data (passwords, tokens, PII) in API responses",
+        "Use strong cipher suites: TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256",
+    ],
+    "ssrf": [
+        "Validate and whitelist all URLs before the server fetches them",
+        "Block requests to private IP ranges (10.x, 172.16.x, 192.168.x, 169.254.x)",
+        "Disable unused URL schemes (file://, dict://, gopher://)",
+        "Use a dedicated egress proxy that enforces allowlists",
+        "In cloud environments, restrict access to metadata endpoints via IMDSv2 (AWS)",
+        "Never return raw server-fetch responses directly to the client",
+    ],
+    "xxe": [
+        "Disable external entity processing in your XML parser:",
+        "  Java: factory.setFeature('http://xml.org/sax/features/external-general-entities', false)",
+        "  Python: use defusedxml library instead of stdlib xml",
+        "  PHP: libxml_disable_entity_loader(true)",
+        "Use JSON instead of XML where possible",
+        "Validate and sanitize all XML input before parsing",
+        "Apply least-privilege to the process running the XML parser",
+    ],
+    "ssti": [
+        "Never pass raw user input to template render functions",
+        "Use sandboxed template environments: Jinja2 SandboxedEnvironment",
+        "Validate and sanitize input before using in templates",
+        "Use logic-less templates (Mustache, Handlebars) where possible",
+        "Implement a strict allowlist of permitted template variables",
+        "Run template rendering in a separate low-privilege process",
+    ],
+    "header": [
+        "Add Content-Security-Policy: default-src 'self'; script-src 'self'",
+        "Add X-Content-Type-Options: nosniff",
+        "Add X-Frame-Options: DENY",
+        "Add Referrer-Policy: strict-origin-when-cross-origin",
+        "Add Permissions-Policy: geolocation=(), microphone=(), camera=()",
+        "Remove Server, X-Powered-By, X-AspNet-Version headers",
+        "Configure CORS explicitly — never use Access-Control-Allow-Origin: *",
+    ],
+    "vulnerable-component": [
+        "Maintain an inventory of all third-party components and their versions",
+        "Subscribe to security advisories (GitHub Advisories, NVD, Snyk)",
+        "Use dependency scanning tools: npm audit, pip-audit, OWASP Dependency-Check",
+        "Update dependencies regularly — automate with Dependabot or Renovate",
+        "Remove unused dependencies entirely",
+        "Pin dependency versions and verify integrity (SRI hashes for CDN assets)",
+    ],
 } 
 
 OWASP_MAPPING = {
@@ -130,6 +221,26 @@ OWASP_MAPPING = {
     "command-injection": "A03:2021 – Injection",
     "path-traversal": "A01:2021 – Broken Access Control",
     "csrf": "A01:2021 – Broken Access Control",
+    "crypto-plaintext-http": "A02:2021 – Cryptographic Failures",
+    "crypto-missing-hsts": "A02:2021 – Cryptographic Failures",
+    "crypto-weak-hsts": "A02:2021 – Cryptographic Failures",
+    "crypto-insecure-cookie": "A02:2021 – Cryptographic Failures",
+    "crypto-sensitive-data-exposure": "A02:2021 – Cryptographic Failures",
+    "crypto-mixed-content": "A02:2021 – Cryptographic Failures",
+    "crypto-weak-tls-version": "A02:2021 – Cryptographic Failures",
+    "crypto-weak-cipher": "A02:2021 – Cryptographic Failures",
+    "crypto-invalid-certificate": "A02:2021 – Cryptographic Failures",
+    "crypto-no-https-redirect": "A02:2021 – Cryptographic Failures",
+    "crypto-http-form-submission": "A02:2021 – Cryptographic Failures",
+    "ssrf": "A10:2021 – Server-Side Request Forgery",
+    "xxe": "A03:2021 – Injection",
+    "ssti": "A03:2021 – Injection",
+    "header-missing": "A05:2021 – Security Misconfiguration",
+    "header-info-disclosure": "A05:2021 – Security Misconfiguration",
+    "header-weak-csp": "A05:2021 – Security Misconfiguration",
+    "header-cors-wildcard": "A05:2021 – Security Misconfiguration",
+    "header-cors-reflect-origin": "A05:2021 – Security Misconfiguration",
+    "vulnerable-component": "A06:2021 – Vulnerable and Outdated Components",
 }
 
 CWE_MAPPING = {
@@ -140,6 +251,21 @@ CWE_MAPPING = {
     "command-injection": "CWE-78: OS Command Injection",
     "path-traversal": "CWE-22: Path Traversal",
     "csrf": "CWE-352: Cross-Site Request Forgery",
+    "crypto-plaintext-http": "CWE-319: Cleartext Transmission of Sensitive Information",
+    "crypto-missing-hsts": "CWE-319: Cleartext Transmission of Sensitive Information",
+    "crypto-insecure-cookie": "CWE-614: Sensitive Cookie Without Secure Attribute",
+    "crypto-sensitive-data-exposure": "CWE-200: Exposure of Sensitive Information",
+    "crypto-weak-tls-version": "CWE-326: Inadequate Encryption Strength",
+    "crypto-weak-cipher": "CWE-327: Use of Broken Cryptographic Algorithm",
+    "crypto-invalid-certificate": "CWE-295: Improper Certificate Validation",
+    "crypto-mixed-content": "CWE-319: Cleartext Transmission of Sensitive Information",
+    "ssrf": "CWE-918: Server-Side Request Forgery",
+    "xxe": "CWE-611: Improper Restriction of XML External Entity Reference",
+    "ssti": "CWE-94: Improper Control of Code Generation",
+    "header-missing": "CWE-693: Protection Mechanism Failure",
+    "header-weak-csp": "CWE-693: Protection Mechanism Failure",
+    "header-cors-reflect-origin": "CWE-942: Overly Permissive Cross-domain Whitelist",
+    "vulnerable-component": "CWE-1035: Using Components with Known Vulnerabilities",
 }
 
 SEVERITY_COLORS = { 
@@ -603,10 +729,58 @@ def generate_pdf_report(target: str, urls: List[str], forms: List[Dict[str, Any]
             cwe = "CWE-352: CSRF"
             desc = VULN_DESCRIPTIONS.get("csrf", ("CSRF", ""))[1]
             rems = REMEDIATIONS.get("csrf", [])
+        elif 'crypto' in vtype:
+            kind = "Cryptographic Failure"
+            owasp = OWASP_MAPPING.get(vtype, "A02:2021 – Cryptographic Failures")
+            cwe = CWE_MAPPING.get(vtype, "CWE-319: Cleartext Transmission")
+            desc = VULN_DESCRIPTIONS["crypto"][1]
+            rems = REMEDIATIONS["crypto"]
+        elif 'ssrf' in vtype:
+            kind = "Server-Side Request Forgery (SSRF)"
+            owasp = "A10:2021 – Server-Side Request Forgery"
+            cwe = "CWE-918: Server-Side Request Forgery"
+            desc = VULN_DESCRIPTIONS["ssrf"][1]
+            rems = REMEDIATIONS["ssrf"]
+        elif 'xxe' in vtype:
+            kind = "XML External Entity Injection (XXE)"
+            owasp = "A03:2021 – Injection"
+            cwe = "CWE-611: Improper Restriction of XML External Entity Reference"
+            desc = VULN_DESCRIPTIONS["xxe"][1]
+            rems = REMEDIATIONS["xxe"]
+        elif 'ssti' in vtype:
+            kind = "Server-Side Template Injection (SSTI)"
+            owasp = "A03:2021 – Injection"
+            cwe = "CWE-94: Improper Control of Code Generation"
+            desc = VULN_DESCRIPTIONS["ssti"][1]
+            rems = REMEDIATIONS["ssti"]
+        elif 'header' in vtype:
+            kind = "Security Misconfiguration — HTTP Header"
+            owasp = OWASP_MAPPING.get(vtype, "A05:2021 – Security Misconfiguration")
+            cwe = CWE_MAPPING.get(vtype, "CWE-693: Protection Mechanism Failure")
+            desc = VULN_DESCRIPTIONS["header"][1]
+            rems = REMEDIATIONS["header"]
+        elif 'vulnerable-component' in vtype:
+            kind = "Vulnerable and Outdated Component"
+            owasp = "A06:2021 – Vulnerable and Outdated Components"
+            cwe = "CWE-1035: Using Components with Known Vulnerabilities"
+            desc = VULN_DESCRIPTIONS["vulnerable-component"][1]
+            rems = REMEDIATIONS["vulnerable-component"]
 
         param = f.get('param', 'unknown')
+        # Truncate long param lists for display
+        raw_params = f.get('param', 'N/A') or 'N/A'
+        param_list = [p.strip() for p in raw_params.split(',')]
+        if len(param_list) > 4:
+            display_params = ', '.join(param_list[:4]) + f'  (+{len(param_list)-4} more)'
+        else:
+            display_params = ', '.join(param_list)
+
         url_path = urlparse(f.get('url', '')).path or 'unknown'
-        title = f"{kind} - Parameter: {param} ({url_path})"
+        # Keep title short — don't put full param list in heading
+        short_param = param_list[0] if param_list else param
+        if len(param_list) > 1:
+            short_param += f' +{len(param_list)-1}'
+        title = f"{kind} — {short_param} ({url_path[:40]})"
         
         cvss_data = calculate_cvss(f.get('type', ''), f.get('confidence', 0))
         
@@ -614,19 +788,37 @@ def generate_pdf_report(target: str, urls: List[str], forms: List[Dict[str, Any]
         story.append(Spacer(1, 6))
 
         # --- ADDED: At A Glance Box ---
+        cell_style = ParagraphStyle(
+            "CellStyle",
+            parent=normal,
+            fontSize=9,
+            leading=12,
+            wordWrap='CJK',
+        )
+        label_style = ParagraphStyle(
+            "LabelStyle",
+            parent=normal,
+            fontSize=9,
+            leading=12,
+            fontName="Helvetica-Bold",
+        )
+
         glance_data = [
-            ["Severity", cvss_data['severity']],
-            ["CVSS Score", str(cvss_data['score'])],
-            ["Affected URL", urlparse(f.get('url', '')).path or 'N/A'],
-            ["Parameters", f.get('param', 'N/A')],
-            ["Authentication", "Not Required" if "unauthenticated" in desc.lower() else "Unknown"]
+            [Paragraph("Severity",       label_style), Paragraph(cvss_data['severity'], cell_style)],
+            [Paragraph("CVSS Score",     label_style), Paragraph(str(cvss_data['score']), cell_style)],
+            [Paragraph("Affected URL",   label_style), Paragraph((urlparse(f.get('url', '')).path or 'N/A')[:60], cell_style)],
+            [Paragraph("Parameters",     label_style), Paragraph(display_params, cell_style)],
+            [Paragraph("Authentication", label_style), Paragraph("Not Required" if "unauthenticated" in desc.lower() else "Unknown", cell_style)],
         ]
         glance_table = Table(glance_data, colWidths=[1.5*inch, 3.5*inch])
         glance_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (0, -1), colors.lightblue),
-            ("GRID", (0, 0), (-1, -1), 1, colors.black),
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("VALIGN", (0, 0), (-1, -1), "TOP")
+            ("BACKGROUND",     (0, 0), (0, -1), colors.lightblue),
+            ("GRID",           (0, 0), (-1, -1), 1, colors.black),
+            ("VALIGN",         (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING",     (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING",  (0, 0), (-1, -1), 5),
+            ("LEFTPADDING",    (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING",   (0, 0), (-1, -1), 6),
         ]))
         story.append(glance_table)
         story.append(Spacer(1, 12))
@@ -658,22 +850,38 @@ def generate_pdf_report(target: str, urls: List[str], forms: List[Dict[str, Any]
         story.append(Spacer(1, 6))
 
         # Technical details table
+        # Helper to wrap long strings into Paragraph for proper word-wrap
+        def wrap(text, style=normal):
+            return Paragraph(str(text or 'N/A'), style)
+
         affected_params_count = f.get('affected_params_count', 1)
+        # Truncate param list for tech table too
+        param_display = ', '.join(param_list[:6])
+        if len(param_list) > 6:
+            param_display += f' (+{len(param_list)-6} more)'
+
         tech_rows = [
-            ["Affected Parameters", f"{f.get('param', 'N/A')} ({affected_params_count} parameter(s))"],
-            ["Vulnerable URL", f.get("url", f.get("action", ""))],
-            ["Payload Used", f.get("payload", "")],
-            ["Evidence Context", _clean_evidence(f.get("evidence", ""))],
-            ["Confidence", f"{f.get('confidence', 0)}%"],
-            ["CVSS Score", f"{cvss_data['score']} ({cvss_data['severity']})"],
-            ["CVSS Vector", cvss_data['vector']],
+            [wrap("<b>Affected Parameters</b>"), wrap(f"{param_display} ({affected_params_count} parameter(s))")],
+            [wrap("<b>Vulnerable URL</b>"),      wrap(f.get("url", f.get("action", "")))],
+            [wrap("<b>Payload Used</b>"),        wrap(f.get("payload", ""))],
+            [wrap("<b>Evidence Context</b>"),    wrap(_clean_evidence(f.get("evidence", "")))],
+            [wrap("<b>Confidence</b>"),          wrap(f"{f.get('confidence', 0)}%")],
+            [wrap("<b>CVSS Score</b>"),          wrap(f"{cvss_data['score']} ({cvss_data['severity']})")],
+            [wrap("<b>CVSS Vector</b>"),         wrap(cvss_data['vector'])],
         ]
         if f.get("original_value"):
-            tech_rows.append(["Original Value", f.get("original_value")])
+            tech_rows.append([wrap("<b>Original Value</b>"), wrap(f.get("original_value"))])
         if f.get("redirect_method"):
-            tech_rows.append(["Redirect Method", f.get("redirect_method")])
-        tech_table = Table(tech_rows, colWidths=[2 * inch, 4 * inch])
-        tech_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black), ("BACKGROUND", (0, 0), (0, 0), colors.lightgrey)]))
+            tech_rows.append([wrap("<b>Redirect Method</b>"), wrap(f.get("redirect_method"))])
+
+        tech_table = Table(tech_rows, colWidths=[2*inch, 4*inch])
+        tech_table.setStyle(TableStyle([
+            ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
+            ("VALIGN",     (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
         story.append(tech_table)
         story.append(Spacer(1, 6))
 
