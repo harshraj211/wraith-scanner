@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import subprocess
+import json
 from typing import Optional, Dict
 from urllib.parse import urlparse
 
@@ -224,6 +225,72 @@ class GitHubManager:
 		if self.token and self.token in url:
 			return url.replace(self.token, '***')
 		return url
+
+
+def detect_tech_stack(repo_path: str) -> Dict[str, object]:
+	"""Detect primary language/frameworks from repository contents."""
+	stack = {
+		'primary_language': 'unknown',
+		'frameworks': [],
+		'has_package_json': False,
+		'has_requirements': False,
+		'has_composer': False,
+		'has_pom': False,
+	}
+
+	files_in_root = set(os.listdir(repo_path)) if os.path.isdir(repo_path) else set()
+	files_lower = {f.lower() for f in files_in_root}
+
+	if 'package.json' in files_lower:
+		stack['has_package_json'] = True
+		try:
+			pkg_path = os.path.join(repo_path, 'package.json')
+			with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as file_obj:
+				pkg = json.load(file_obj)
+			deps = {}
+			deps.update(pkg.get('dependencies', {}))
+			deps.update(pkg.get('devDependencies', {}))
+			dep_keys = {k.lower() for k in deps}
+			if 'express' in dep_keys:
+				stack['frameworks'].append('express')
+			if 'react' in dep_keys:
+				stack['frameworks'].append('react')
+			if 'next' in dep_keys:
+				stack['frameworks'].append('nextjs')
+			if 'vue' in dep_keys:
+				stack['frameworks'].append('vue')
+			stack['primary_language'] = 'javascript'
+		except Exception:
+			stack['primary_language'] = 'javascript'
+
+	if 'requirements.txt' in files_lower or 'setup.py' in files_lower:
+		stack['has_requirements'] = True
+		if stack['primary_language'] == 'unknown':
+			stack['primary_language'] = 'python'
+		req_path = os.path.join(repo_path, 'requirements.txt')
+		try:
+			with open(req_path, 'r', encoding='utf-8', errors='ignore') as req_file:
+				content = req_file.read().lower()
+			if 'django' in content:
+				stack['frameworks'].append('django')
+			if 'flask' in content:
+				stack['frameworks'].append('flask')
+			if 'fastapi' in content:
+				stack['frameworks'].append('fastapi')
+		except Exception:
+			pass
+
+	if 'composer.json' in files_lower:
+		stack['has_composer'] = True
+		if stack['primary_language'] == 'unknown':
+			stack['primary_language'] = 'php'
+
+	if 'pom.xml' in files_lower or 'build.gradle' in files_lower:
+		stack['has_pom'] = True
+		if stack['primary_language'] == 'unknown':
+			stack['primary_language'] = 'java'
+
+	return stack
 
 
 # Global instance

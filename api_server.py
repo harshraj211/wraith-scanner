@@ -31,12 +31,24 @@ from scanner.modules.xxe_scanner import XXEScanner
 from scanner.modules.ssti_scanner import SSTIScanner
 from scanner.modules.header_scanner import HeaderScanner
 from scanner.modules.component_scanner import ComponentScanner
-from scanner.utils.github_manager import get_github_manager
-from scanner.modules.sast_scanner import SASTScanner
+from scanner.modules.semgrep_scanner import SemgrepScanner
+from scanner.utils.github_manager import get_github_manager, detect_tech_stack
 from scanner.reporting.pdf_generator_sast_patch import (
     _render_sast_finding, _render_sast_summary,
     SAST_VULN_DESCRIPTIONS, SAST_OWASP_MAPPING, SAST_CWE_MAPPING
 )
+
+
+def _check_semgrep():
+    import shutil
+    if shutil.which("semgrep"):
+        print("[✓] Semgrep found — SAST engine ready")
+    else:
+        print("[!] Semgrep not installed — SAST scanning will fail")
+        print("    Install with: pip install semgrep")
+
+
+_check_semgrep()
 
 app = Flask(__name__)
 CORS(app)
@@ -335,7 +347,7 @@ def scan_repo():
 
     def run_sast(scan_id, repo_url, token, branch):
         try:
-            emit_progress(scan_id, f"Starting SAST scan: {repo_url}", "phase")
+            emit_progress(scan_id, f"Starting Semgrep SAST scan: {repo_url}", "phase")
 
             github_mgr = get_github_manager()
 
@@ -347,85 +359,87 @@ def scan_repo():
             repo_path = github_mgr.clone_repo(repo_url, branch=branch)
 
             if not repo_path:
-                emit_progress(scan_id, "Failed to clone repository — check URL and token", "error")
-                active_scans[scan_id] = {'status': 'failed', 'error': 'Clone failed'}
+                emit_progress(scan_id, "Failed to clone repository", "error")
+                active_scans[scan_id] = {"status": "failed", "error": "Clone failed"}
                 return
 
-            emit_progress(scan_id, "Building file tree...", "info")
-            file_tree = github_mgr.get_file_tree(repo_path)
-            total_files = len(file_tree['all'])
-            emit_progress(scan_id, f"Found {total_files} files to analyze", "success")
-
-            # Language breakdown in terminal
-            for lang in ('python', 'javascript', 'php', 'java', 'ruby', 'go'):
-                n = len(file_tree.get(lang, []))
-                if n:
-                    emit_progress(scan_id, f"  {lang}: {n} files", "info")
-
+            # Detect tech stack for ruleset selection
             emit_progress(scan_id, "Detecting tech stack...", "info")
+            from scanner.modules.semgrep_scanner import SemgrepScanner
+            from scanner.utils.github_manager import detect_tech_stack
 
-            sast = SASTScanner()
+            stack = detect_tech_stack(repo_path)
+            lang = stack.get("primary_language", "unknown")
+            fws = ", ".join(stack.get("frameworks", [])) or "none"
+            emit_progress(scan_id, f"Stack: {lang} | frameworks: {fws}", "success")
 
-            # Patch print → websocket progress
+            # Run Semgrep
+            emit_progress(scan_id, "Running Semgrep AST analysis...", "phase")
+            emit_progress(scan_id, "Rulesets: p/default + p/owasp-top-ten + p/secrets + custom rules", "info")
+
+            scanner = SemgrepScanner()
+
+            # Patch print → websocket
             import builtins
-            original_print = builtins.print
+            orig_print = builtins.print
+
             def patched_print(*args, **kwargs):
-                msg = ' '.join(str(a) for a in args)
-                emit_progress(scan_id, msg.strip(), "info")
-                original_print(*args, **kwargs)
+                msg = " ".join(str(a) for a in args).strip()
+                if msg:
+                    emit_progress(scan_id, msg, "info")
+                orig_print(*args, **kwargs)
+
             builtins.print = patched_print
 
             try:
-                findings = sast.scan_repo(repo_path, file_tree)
+                findings = scanner.scan_repo(repo_path, tech_stack=stack)
             finally:
-                builtins.print = original_print
+                builtins.print = orig_print
 
-            stack = sast.stack  # tech stack detected during scan
-
-            emit_progress(scan_id, f"Tech stack: {stack.get('primary_language','unknown')} | {', '.join(stack.get('frameworks',[]) or ['no framework detected'])}", "success")
-
-            # Progress summary by category
+            # Category summary
             cats = {
                 'secret': len([f for f in findings if f.get('category') == 'secret']),
                 'code': len([f for f in findings if f.get('category') == 'code']),
                 'dependency': len([f for f in findings if f.get('category') == 'dependency']),
                 'config': len([f for f in findings if f.get('category') == 'config']),
             }
-            emit_progress(scan_id, f"Findings: {cats['secret']} secrets · {cats['code']} code · {cats['dependency']} deps · {cats['config']} config", "warning")
+            emit_progress(
+                scan_id,
+                f"Findings: {cats['secret']} secrets · {cats['code']} code · "
+                f"{cats['dependency']} deps · {cats['config']} config",
+                "warning" if findings else "success"
+            )
 
+            # Generate PDF
             emit_progress(scan_id, "Generating PDF report...", "phase")
             report_filename = f"sast_{scan_id}.pdf"
             report_path = os.path.join(REPORTS_DIR, report_filename)
 
-            for f in findings:
-                f['scan_type'] = 'SAST'
-
-            # Build PDF with SAST-aware rendering
             _generate_sast_pdf(repo_url, findings, stack, report_path)
 
             github_mgr.cleanup()
 
             active_scans[scan_id] = {
-                'status': 'completed',
-                'target': repo_url,
-                'mode': 'sast',
-                'scan_type': 'SAST',
-                'findings': findings,
-                'report_path': report_path,
-                'total_vulnerabilities': len(findings),
-                'total_flags': 0,
-                'tech_stack': stack,
-                'summary': cats,
+                "status": "completed",
+                "target": repo_url,
+                "mode": "sast",
+                "scan_type": "SAST (Semgrep)",
+                "findings": findings,
+                "report_path": report_path,
+                "total_vulnerabilities": len(findings),
+                "total_flags": 0,
+                "tech_stack": stack,
+                "summary": cats,
             }
 
-            emit_progress(scan_id, f"SAST scan complete — {len(findings)} total issues found", "success")
-            emit_progress(scan_id, f"PDF saved: sast_{scan_id}.pdf", "success")
+            emit_progress(scan_id, f"Semgrep scan complete — {len(findings)} issues found", "success")
+            emit_progress(scan_id, f"Run: download {scan_id}", "info")
 
         except Exception as e:
             import traceback
             emit_progress(scan_id, f"SAST error: {str(e)}", "error")
             emit_progress(scan_id, traceback.format_exc()[:300], "error")
-            active_scans[scan_id] = {'status': 'failed', 'error': str(e)}
+            active_scans[scan_id] = {"status": "failed", "error": str(e)}
 
     thread = threading.Thread(target=run_sast, args=(scan_id, repo_url, token, branch))
     thread.daemon = True
