@@ -29,6 +29,7 @@ from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from scanner.utils.cvss_calculator import calculate_cvss
+from scanner.reporting.pdf_generator_sast_patch import _render_sast_finding
 
 
 # Register a default font for clarity (Helvetica is usually available)
@@ -686,6 +687,10 @@ def generate_pdf_report(target: str, urls: List[str], forms: List[Dict[str, Any]
 
     # Detailed findings pages
     for idx, f in enumerate(findings, 1):
+        if f.get('scan_type') == 'SAST':
+            story += _render_sast_finding(f, styles, normal, heading, None)
+            continue
+
         vtype = f.get("type", "").lower()
         kind = "Other"
         owasp = ""

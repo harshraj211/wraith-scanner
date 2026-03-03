@@ -471,6 +471,9 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
           ['scan <url>',              'Start a vulnerability scan'],
           ['scan <url> --depth 3',    'Scan with custom crawl depth'],
           ['scan <url> --timeout 20', 'Scan with custom timeout (seconds)'],
+          ['scanrepo <url>',              'SAST scan a GitHub repository'],
+          ['scanrepo <url> --token xxx',  'Scan private repo with GitHub token'],
+          ['scanrepo <url> --branch dev', 'Scan a specific branch'],
           ['mode <mode>',             'Switch scanning mode'],
           ['modes',                   'List all available modes'],
           ['status <id>',             'Check scan progress and results'],
@@ -491,6 +494,39 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
       case 'cls': {
         term.clear();
         printBanner(term);
+        break;
+      }
+
+      case 'scanrepo': {
+        if (!args[0]) {
+          term.writeln(c('38;5;196', '[✗]') + ' Repo URL required — usage: ' + c('38;5;220', 'scanrepo') + ' <github-url> [--token ghp_xxx] [--branch main]');
+          return;
+        }
+        const repoUrl = args[0];
+        const tokenIdx  = args.indexOf('--token');
+        const branchIdx = args.indexOf('--branch');
+        const token  = tokenIdx  >= 0 ? args[tokenIdx + 1]  : undefined;
+        const branch = branchIdx >= 0 ? args[branchIdx + 1] : undefined;
+
+        term.writeln('');
+        term.writeln(c('38;5;220', '[»] Repo:')   + '    ' + c('0;37', repoUrl));
+        term.writeln(c('38;5;220', '[»] Mode:')   + '    ' + c('0;37', 'SAST (Static Analysis)'));
+        if (branch) term.writeln(c('38;5;220', '[»] Branch:') + '  ' + c('0;37', branch));
+        if (token)  term.writeln(c('38;5;220', '[»] Token:')  + '   ' + c('0;37', token.slice(0, 8) + '...'));
+        term.writeln('');
+        term.writeln(c('38;5;245', '  Scanning for: secrets · dangerous functions · vulnerable deps · misconfigs'));
+        term.writeln('');
+
+        const payload = { url: repoUrl };
+        if (token)  payload.token  = token;
+        if (branch) payload.branch = branch;
+
+        const resp = await axios.post(`${API_URL}/api/scan/repo`, payload);
+        const scanId = resp.data.scan_id;
+
+        term.writeln(c('38;5;154', '[✓]') + ' SAST scan started — ID: ' + c('38;5;220', scanId));
+        term.writeln(c('38;5;240', '    run ') + c('38;5;245', 'status ' + scanId) + c('38;5;240', ' to check · ') + c('38;5;245', 'download ' + scanId) + c('38;5;240', ' for PDF'));
+        term.writeln('');
         break;
       }
 

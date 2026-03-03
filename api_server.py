@@ -31,6 +31,12 @@ from scanner.modules.xxe_scanner import XXEScanner
 from scanner.modules.ssti_scanner import SSTIScanner
 from scanner.modules.header_scanner import HeaderScanner
 from scanner.modules.component_scanner import ComponentScanner
+from scanner.utils.github_manager import get_github_manager
+from scanner.modules.sast_scanner import SASTScanner
+from scanner.reporting.pdf_generator_sast_patch import (
+    _render_sast_finding, _render_sast_summary,
+    SAST_VULN_DESCRIPTIONS, SAST_OWASP_MAPPING, SAST_CWE_MAPPING
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -311,6 +317,154 @@ def start_scan():
         'mode': scan_mode,
         'message': 'Scan started successfully'
     })
+
+
+@app.route('/api/scan/repo', methods=['POST'])
+def scan_repo():
+    """SAST scan of a GitHub repository."""
+    data = request.json
+    repo_url = data.get('url')
+    token = data.get('token')
+    branch = data.get('branch')
+
+    if not repo_url:
+        return jsonify({'error': 'url is required'}), 400
+
+    scan_id = str(uuid.uuid4())[:8]
+    active_scans[scan_id] = {'status': 'running', 'target': repo_url, 'mode': 'sast'}
+
+    def run_sast(scan_id, repo_url, token, branch):
+        try:
+            emit_progress(scan_id, f"Starting SAST scan: {repo_url}", "phase")
+
+            github_mgr = get_github_manager()
+
+            if token:
+                github_mgr.set_token(token)
+                emit_progress(scan_id, "GitHub token configured", "success")
+
+            emit_progress(scan_id, "Cloning repository...", "phase")
+            repo_path = github_mgr.clone_repo(repo_url, branch=branch)
+
+            if not repo_path:
+                emit_progress(scan_id, "Failed to clone repository — check URL and token", "error")
+                active_scans[scan_id] = {'status': 'failed', 'error': 'Clone failed'}
+                return
+
+            emit_progress(scan_id, "Building file tree...", "info")
+            file_tree = github_mgr.get_file_tree(repo_path)
+            total_files = len(file_tree['all'])
+            emit_progress(scan_id, f"Found {total_files} files to analyze", "success")
+
+            # Language breakdown in terminal
+            for lang in ('python', 'javascript', 'php', 'java', 'ruby', 'go'):
+                n = len(file_tree.get(lang, []))
+                if n:
+                    emit_progress(scan_id, f"  {lang}: {n} files", "info")
+
+            emit_progress(scan_id, "Detecting tech stack...", "info")
+
+            sast = SASTScanner()
+
+            # Patch print → websocket progress
+            import builtins
+            original_print = builtins.print
+            def patched_print(*args, **kwargs):
+                msg = ' '.join(str(a) for a in args)
+                emit_progress(scan_id, msg.strip(), "info")
+                original_print(*args, **kwargs)
+            builtins.print = patched_print
+
+            try:
+                findings = sast.scan_repo(repo_path, file_tree)
+            finally:
+                builtins.print = original_print
+
+            stack = sast.stack  # tech stack detected during scan
+
+            emit_progress(scan_id, f"Tech stack: {stack.get('primary_language','unknown')} | {', '.join(stack.get('frameworks',[]) or ['no framework detected'])}", "success")
+
+            # Progress summary by category
+            cats = {
+                'secret': len([f for f in findings if f.get('category') == 'secret']),
+                'code': len([f for f in findings if f.get('category') == 'code']),
+                'dependency': len([f for f in findings if f.get('category') == 'dependency']),
+                'config': len([f for f in findings if f.get('category') == 'config']),
+            }
+            emit_progress(scan_id, f"Findings: {cats['secret']} secrets · {cats['code']} code · {cats['dependency']} deps · {cats['config']} config", "warning")
+
+            emit_progress(scan_id, "Generating PDF report...", "phase")
+            report_filename = f"sast_{scan_id}.pdf"
+            report_path = os.path.join(REPORTS_DIR, report_filename)
+
+            for f in findings:
+                f['scan_type'] = 'SAST'
+
+            # Build PDF with SAST-aware rendering
+            _generate_sast_pdf(repo_url, findings, stack, report_path)
+
+            github_mgr.cleanup()
+
+            active_scans[scan_id] = {
+                'status': 'completed',
+                'target': repo_url,
+                'mode': 'sast',
+                'scan_type': 'SAST',
+                'findings': findings,
+                'report_path': report_path,
+                'total_vulnerabilities': len(findings),
+                'total_flags': 0,
+                'tech_stack': stack,
+                'summary': cats,
+            }
+
+            emit_progress(scan_id, f"SAST scan complete — {len(findings)} total issues found", "success")
+            emit_progress(scan_id, f"PDF saved: sast_{scan_id}.pdf", "success")
+
+        except Exception as e:
+            import traceback
+            emit_progress(scan_id, f"SAST error: {str(e)}", "error")
+            emit_progress(scan_id, traceback.format_exc()[:300], "error")
+            active_scans[scan_id] = {'status': 'failed', 'error': str(e)}
+
+    thread = threading.Thread(target=run_sast, args=(scan_id, repo_url, token, branch))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'scan_id': scan_id, 'status': 'started', 'mode': 'sast'})
+
+
+def _generate_sast_pdf(repo_url: str, findings: list, stack: dict, output_path: str):
+    """
+    Generate a SAST-specific PDF report.
+    Uses _render_sast_finding() for clean findings — no fake HTTP evidence.
+    """
+    from reportlab.platypus import SimpleDocTemplate, Spacer, Paragraph, HRFlowable
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from scanner.reporting.pdf_generator_sast_patch import (
+        _render_sast_finding, _render_sast_summary
+    )
+
+    doc = SimpleDocTemplate(output_path, pagesize=A4,
+                            rightMargin=0.75*inch, leftMargin=0.75*inch,
+                            topMargin=0.75*inch, bottomMargin=0.75*inch)
+    styles = getSampleStyleSheet()
+    normal = styles['Normal']
+    heading = styles['Heading2']
+
+    story = []
+
+    # Cover / summary section
+    story += _render_sast_summary(findings, repo_url, stack, styles, normal, heading)
+
+    # Individual findings — SAST renderer only (no fake HTTP blocks)
+    for f in findings:
+        story += _render_sast_finding(f, styles, normal, heading, None)
+
+    doc.build(story)
 
 
 @app.route('/api/scan/<scan_id>', methods=['GET'])
