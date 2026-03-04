@@ -13,6 +13,9 @@ node_modules/
 # Environment
 .env
 
+# Reports
+reports/
+
 # OS
 .DS_Store
 Thumbs.db

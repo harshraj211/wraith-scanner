@@ -10,9 +10,8 @@ import shutil
 import subprocess
 import json as _json
 from datetime import datetime
-import concurrent.futures
-from urllib.parse import urlparse, parse_qs
 
+from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
 from scanner.core.crawler import WebCrawler
 from scanner.modules.sqli_scanner import SQLiScanner
 from scanner.modules.xss_scanner import XSSScanner
@@ -22,9 +21,7 @@ from scanner.modules.cmdi_scanner import CMDIScanner
 from scanner.modules.path_traversal_scanner import PathTraversalScanner
 from scanner.modules.csrf_scanner import CSRFScanner
 from scanner.modules.wordpress_scanner import WordPressScanner
-from scanner.modules.flag_hunter import FlagHunter
 from scanner.utils.deduplication import deduplicate_and_group
-from scanner.utils.rate_limiter import get_rate_limiter
 from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
@@ -121,11 +118,6 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                     else:
                         emit_progress(scan_id, "Authentication failed, continuing without auth", "warning")
 
-        flag_hunter = None
-        if mode_mgr.should_hunt_flags():
-            flag_hunter = FlagHunter(mode_mgr.get_flag_patterns())
-            emit_progress(scan_id, "🏁 Flag hunting enabled!", "success")
-
         emit_progress(scan_id, "Checking for WordPress/CMS...", "phase")
         wp_scanner = WordPressScanner(timeout=timeout)
         wp_findings = wp_scanner.scan_url(target_url)
@@ -148,7 +140,6 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         cmdi = CMDIScanner(timeout=timeout, session=authenticated_session)
         path = PathTraversalScanner(timeout=timeout, session=authenticated_session)
         csrf = CSRFScanner(timeout=timeout, session=authenticated_session)
-        rate_limiter = get_rate_limiter()
         crypto = CryptoScanner(timeout=timeout, session=authenticated_session)
         ssrf = SSRFScanner(timeout=timeout, session=authenticated_session)
         xxe = XXEScanner(timeout=timeout, session=authenticated_session)
@@ -163,83 +154,27 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         all_findings.extend(crypto.scan_url(target_url))
 
         emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (multi-threaded)...", "phase")
+        engine = AsyncScanEngine(
+            max_concurrent=30 if mode_config['aggressive'] else 15,
+            timeout=timeout,
+        )
+        url_param_pairs = build_url_param_pairs(urls)
+        dast_scanners = [sqli, xss, idor, cmdi, path, ssrf, ssti, xxe, redir]
+        all_findings.extend(
+            engine.scan_urls_sync(
+                url_param_pairs,
+                dast_scanners,
+                progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
+            )
+        )
 
-        def scan_single_url(url_data):
-            url, idx, total = url_data
-            findings = []
-            try:
-                emit_progress(scan_id, f"[{idx}/{total}] Scanning: {url}", "info")
-
-                if flag_hunter:
-                    try:
-                        import requests
-                        resp = requests.get(url, timeout=timeout)
-                        flags = flag_hunter.scan_response(url, resp.text)
-                        if flags:
-                            for flag in flags:
-                                emit_progress(scan_id, f"🏁 FLAG FOUND: {flag['flag']}", "success")
-                        findings.extend(flags)
-                    except Exception:
-                        pass
-
-                parsed = urlparse(url)
-                params = parse_qs(parsed.query)
-                params = {k: v[0] for k, v in params.items() if v}
-
-                if params:
-                    for scanner, name in [(sqli, 'SQL Injection'), (xss, 'XSS'),
-                                          (idor, 'IDOR'), (cmdi, 'Command Injection'),
-                                          (path, 'Path Traversal'), (ssrf, 'SSRF'),
-                                          (ssti, 'SSTI'), (xxe, 'XXE')]:
-                        vuln = scanner.scan_url(url, params)
-                        for f in vuln:
-                            f['url'] = url
-                            emit_progress(scan_id, f"✓ Found {f['type']} in '{f['param']}'", "warning")
-                        findings.extend(vuln)
-
-                vuln = redir.scan_url(url, params or {})
-                for f in vuln:
-                    f['url'] = url
-                    emit_progress(scan_id, f"✓ Found {f['type']}", "warning")
-                findings.extend(vuln)
-
-                domain = urlparse(url).netloc
-                rate_limiter.wait(domain)
-
-            except Exception as e:
-                emit_progress(scan_id, f"Error scanning {url}: {str(e)}", "error")
-
-            return findings
-
-        max_workers = 10 if mode_config['aggressive'] else 5
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            url_data = [(url, idx+1, len(urls)) for idx, url in enumerate(urls)]
-            results_iter = executor.map(scan_single_url, url_data)
-            for findings in results_iter:
-                all_findings.extend(findings)
-
-        def scan_single_form(form_data):
-            form, idx, total = form_data
-            findings = []
-            action = form.get('action', '')
-            try:
-                emit_progress(scan_id, f"[{idx}/{total}] Scanning form: {action}", "info")
-                for scanner in [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe]:
-                    vuln = scanner.scan_form(form)
-                    for f in vuln:
-                        f['url'] = action
-                        emit_progress(scan_id, f"✓ Found {f['type']}", "warning")
-                    findings.extend(vuln)
-            except Exception as e:
-                emit_progress(scan_id, f"Error scanning form: {str(e)}", "error")
-            return findings
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            form_data = [(form, idx+1, len(forms)) for idx, form in enumerate(forms)]
-            results_iter = executor.map(scan_single_form, form_data)
-            for findings in results_iter:
-                all_findings.extend(findings)
+        all_findings.extend(
+            engine.scan_forms_sync(
+                forms,
+                [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe],
+                progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
+            )
+        )
 
         # Stored XSS sweep (checks all URLs for markers injected during scan)
         stored_xss = xss.check_stored(urls, session=authenticated_session)
@@ -385,19 +320,62 @@ def scan_repo():
             else:
                 emit_progress(scan_id, "Running Semgrep AST analysis...", "phase")
 
-                # Language-specific rulesets
-                lang_rulesets = {
-                    "javascript": ["p/javascript", "p/nodejs"],
-                    "typescript": ["p/typescript", "p/nodejs"],
-                    "python":     ["p/python", "p/django", "p/flask"],
-                    "java":       ["p/java", "p/spring"],
-                    "php":        ["p/php"],
-                    "go":         ["p/golang"],
-                    "ruby":       ["p/ruby"],
+                # Check login status — p/ requires semgrep login, r/ does not
+                import subprocess as _sp
+                _utf8_env = {**os.environ, "PYTHONUTF8": "1"}
+
+                def _semgrep_logged_in():
+                    try:
+                        r = _sp.run(
+                            [shutil.which("semgrep"), "show", "identity"],
+                            capture_output=True, text=True, timeout=15,
+                            env=_utf8_env,
+                        )
+                        # identity info is printed to stderr
+                        output = (r.stdout + r.stderr).lower()
+                        return r.returncode == 0 and "logged in" in output
+                    except Exception:
+                        return False
+
+                open_rulesets = {
+                    "javascript": ["r/javascript", "r/nodejs"],
+                    "typescript": ["r/typescript", "r/nodejs"],
+                    "python":     ["r/python"],
+                    "php":        ["r/php"],
+                    "java":       ["r/java"],
+                    "go":         ["r/go"],
+                    "ruby":       ["r/ruby"],
                 }
-                base_rulesets  = ["p/default", "p/owasp-top-ten", "p/secrets"]
-                extra_rulesets = lang_rulesets.get(lang.lower(), [])
-                all_rulesets   = base_rulesets + extra_rulesets
+
+                if _semgrep_logged_in():
+                    lang_rulesets = {
+                        "javascript": ["p/javascript", "p/nodejs"],
+                        "typescript": ["p/typescript", "p/nodejs"],
+                        "python":     ["p/python", "p/django", "p/flask"],
+                        "java":       ["p/java", "p/spring"],
+                        "php":        ["p/php"],
+                        "go":         ["p/golang"],
+                        "ruby":       ["p/ruby"],
+                    }
+                    base_rulesets  = ["p/default", "p/owasp-top-ten", "p/secrets"]
+                    extra_rulesets = lang_rulesets.get(lang.lower(), [])
+                    emit_progress(scan_id, "Semgrep authenticated — using p/ registry", "info")
+                else:
+                    base_rulesets  = ["r/generic.secrets"]
+                    extra_rulesets = open_rulesets.get(lang.lower(), [])
+                    emit_progress(scan_id,
+                        "Semgrep not logged in — using r/ open registry (no login needed). "
+                        "For full coverage run: semgrep login", "warning")
+
+                all_rulesets = base_rulesets + extra_rulesets
+
+                # Write custom rules to temp file (always works, no login)
+                import os as _os
+                custom_rules_path = _os.path.join(repo_path, ".vulnscan_rules.yaml")
+                with open(custom_rules_path, "w") as _f:
+                    from scanner.modules.semgrep_scanner import CUSTOM_RULES
+                    _f.write(CUSTOM_RULES)
+                all_rulesets.insert(0, custom_rules_path)  # custom rules first
 
                 semgrep_cmd = (
                     ["semgrep", "--json", "--quiet", "--timeout=30"]
@@ -414,6 +392,7 @@ def scan_repo():
                         capture_output=True,
                         text=True,
                         timeout=300,
+                        env=_utf8_env,
                     )
 
                     raw_output = result.stdout.strip()
@@ -427,18 +406,42 @@ def scan_repo():
                         semgrep_results = semgrep_data.get("results", [])
                         semgrep_errors  = semgrep_data.get("errors",  [])
 
-                        for err in semgrep_errors[:3]:
-                            emit_progress(scan_id,
-                                f"Semgrep error: {err.get('message', '?')}", "warning")
+                        # Only show non-Pro-engine errors to the user
+                        shown_errors = 0
+                        for err in semgrep_errors:
+                            msg = err.get('message', '')
+                            # Suppress noisy "Pro engine" warnings — user can't fix these
+                            if 'pro engine' in msg.lower() or 'pro only' in msg.lower():
+                                continue
+                            if shown_errors < 3:
+                                emit_progress(scan_id,
+                                    f"Semgrep error: {msg}", "warning")
+                                shown_errors += 1
 
                         emit_progress(scan_id,
                             f"Semgrep: {len(semgrep_results)} raw findings", "info")
 
                         sev_map = {"ERROR": "High", "WARNING": "Medium", "INFO": "Low"}
 
+                        # Confidence mapping from Semgrep metadata
+                        _conf_map = {"HIGH": 90, "MEDIUM": 70, "LOW": 40}
+                        skipped_low = 0
+
                         for r in semgrep_results:
-                            meta = r.get("extra", {})
+                            meta     = r.get("extra", {})
+                            metadata = meta.get("metadata", {})
                             severity = meta.get("severity", "WARNING").upper()
+
+                            # Use Semgrep's own confidence if available
+                            raw_conf = metadata.get("confidence", "MEDIUM").upper()
+                            confidence = _conf_map.get(raw_conf, 70)
+
+                            # Filter out INFO/LOW severity with LOW confidence
+                            # (format-string noise, console.log concatenations, etc.)
+                            if severity == "INFO" and confidence < 60:
+                                skipped_low += 1
+                                continue
+
                             findings.append({
                                 "type":       r.get("check_id", "semgrep-finding"),
                                 "category":   "code",
@@ -447,11 +450,16 @@ def scan_repo():
                                 "code":       meta.get("lines", "").strip()[:200],
                                 "message":    meta.get("message", ""),
                                 "severity":   sev_map.get(severity, "Medium"),
-                                "confidence": 85,
-                                "cwe":        meta.get("metadata", {}).get("cwe", ""),
-                                "owasp":      meta.get("metadata", {}).get("owasp", ""),
+                                "confidence": confidence,
+                                "cwe":        metadata.get("cwe", ""),
+                                "owasp":      metadata.get("owasp", ""),
                                 "source":     "semgrep",
                             })
+
+                        if skipped_low:
+                            emit_progress(scan_id,
+                                f"Filtered {skipped_low} low-confidence noise findings",
+                                "info")
 
                         semgrep_count = len(findings)
                         emit_progress(scan_id,
@@ -464,6 +472,12 @@ def scan_repo():
                         f"Failed to parse Semgrep JSON: {e}", "error")
                 except Exception as e:
                     emit_progress(scan_id, f"Semgrep subprocess error: {e}", "error")
+
+                # Clean up custom rules file
+                try:
+                    _os.remove(custom_rules_path)
+                except Exception:
+                    pass
 
             # ── PHASE 2: SASTScanner — secrets + deps ONLY ─────────────────
             emit_progress(scan_id, "Running secrets/dependency scanner...", "phase")

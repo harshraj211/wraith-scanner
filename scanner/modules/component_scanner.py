@@ -29,12 +29,18 @@ KNOWN_LIBRARIES = [
     ('Drupal',       r'Drupal[/ ](\d+\.\d+\.?\d*)',          '10.1.0', 'Drupalgeddon variants'),
 ]
 
-# Common paths to check for version disclosure
+# Paths to check for version disclosure (framework-agnostic only)
 VERSION_PATHS = [
-    '/readme.html', '/readme.txt', '/CHANGELOG.md',
-    '/wp-includes/version.php', '/RELEASE-NOTES',
-    '/package.json', '/composer.json',
+    '/readme.txt', '/CHANGELOG.md', '/RELEASE-NOTES',
+    '/package.json',
 ]
+
+# CMS-specific paths — only checked when CMS fingerprint is present
+WORDPRESS_PATHS = [
+    '/wp-includes/version.php', '/wp-login.php',
+    '/readme.html',             # WP ships one by default
+]
+PHP_PATHS = ['/composer.json']
 
 
 class ComponentScanner:
@@ -71,19 +77,80 @@ class ComponentScanner:
         return []  # Component checks are URL-level
 
     def scan_base_url(self, base_url: str) -> List[Dict[str, Any]]:
-        """Check common version-disclosure paths on the base domain."""
+        """Check common version-disclosure paths on the base domain.
+
+        Guards against SPA catch-all routing: if a probed path returns
+        the same HTML shell as the main page, it's a client-side 200
+        and NOT a real file — skip it.
+        """
         findings = []
         from urllib.parse import urlparse
         parsed = urlparse(base_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        for path in VERSION_PATHS:
+        # ── Fingerprint main page to detect SPA catch-all routing ──
+        main_body_hash = None
+        spa_marker = None   # robust SPA shell indicator
+        _SPA_MARKERS = [
+            '<app-root',         # Angular
+            'id="root"',         # React
+            'id="__next"',       # Next.js
+            'id="app"',          # Vue
+            'data-reactroot',    # React (older)
+        ]
+        try:
+            main_resp = self.session.get(base_url, timeout=self.timeout)
+            if main_resp.status_code == 200 and main_resp.text:
+                main_body_hash = hash(main_resp.text[:3000])
+                for marker in _SPA_MARKERS:
+                    if marker in main_resp.text:
+                        spa_marker = marker
+                        break
+        except requests.RequestException:
+            pass
+
+        # Detect WordPress to decide whether to probe WP-specific paths
+        is_wordpress = False
+        try:
+            resp = self.session.get(base_url, timeout=self.timeout)
+            body = (resp.text or '')[:5000].lower()
+            headers_blob = ' '.join(f'{k}: {v}' for k, v in resp.headers.items()).lower()
+            is_wordpress = any(sig in body or sig in headers_blob for sig in [
+                'wp-content', 'wp-includes', 'wordpress', 'wp-json',
+            ])
+        except requests.RequestException:
+            pass
+
+        paths_to_check = list(VERSION_PATHS)
+        if is_wordpress:
+            paths_to_check.extend(WORDPRESS_PATHS)
+            paths_to_check.extend(PHP_PATHS)
+
+        for path in paths_to_check:
             check_url = origin + path
             try:
                 resp = self.session.get(check_url, timeout=self.timeout)
-                if resp.status_code == 200 and resp.text:
-                    version_findings = self._extract_versions(check_url, resp.text)
-                    findings.extend(version_findings)
+                if resp.status_code != 200 or not resp.text:
+                    continue
+
+                # SPA catch-all guard (hash comparison)
+                if main_body_hash is not None:
+                    if hash(resp.text[:3000]) == main_body_hash:
+                        continue
+
+                # SPA catch-all guard (marker detection — catches
+                # Angular/React/Vue/Next shells even when nonces/tokens
+                # cause hash mismatches)
+                if spa_marker and spa_marker in resp.text:
+                    continue
+
+                # Only extract from text-like responses
+                ct = resp.headers.get('Content-Type', '').lower()
+                if not any(t in ct for t in ('text/', 'json', 'xml')):
+                    continue
+
+                version_findings = self._extract_versions(check_url, resp.text)
+                findings.extend(version_findings)
             except requests.RequestException:
                 pass
 

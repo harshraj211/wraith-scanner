@@ -1,8 +1,8 @@
 """
-semgrep_scanner.py — AST-based SAST using Semgrep engine
+semgrep_scanner.py -- AST-based SAST using Semgrep engine
 
 Replaces sast_scanner.py entirely for code flow analysis.
-Uses Semgrep's OCaml AST parser — understands variable scope, cross-file
+Uses Semgrep's OCaml AST parser -- understands variable scope, cross-file
 imports, taint flows, and ignores comments natively.
 
 FIX: _build_rulesets() was returning ["auto"] which silently returns 0
@@ -36,9 +36,9 @@ def _find_semgrep():
 SEMGREP_BIN = _find_semgrep()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Ruleset config
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # Requires semgrep login (semgrep.dev registry)
 BASE_RULESETS = [
@@ -47,7 +47,7 @@ BASE_RULESETS = [
     "p/secrets",
 ]
 
-# Language-specific rulesets — also require login
+# Language-specific rulesets -- also require login
 LANG_RULESETS = {
     "javascript": ["p/javascript", "p/nodejs", "p/react", "p/express"],
     "typescript": ["p/typescript", "p/nodejs"],
@@ -58,7 +58,7 @@ LANG_RULESETS = {
     "go":         ["p/golang"],
 }
 
-# Open registry rulesets — NO login required (r/ prefix)
+# Open registry rulesets -- NO login required (r/ prefix)
 # Used as fallback when not authenticated
 OPEN_RULESETS = {
     "javascript": ["r/javascript", "r/nodejs"],
@@ -70,7 +70,7 @@ OPEN_RULESETS = {
     "go":         ["r/go"],
 }
 
-# Open registry base rules — work without login
+# Open registry base rules -- work without login
 OPEN_BASE_RULESETS = [
     "r/generic.secrets",
     "r/generic.ci",
@@ -117,14 +117,14 @@ RULE_TYPE_MAP = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Custom YAML rules — local, no login needed
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Custom YAML rules -- local, no login needed
+# -----------------------------------------------------------------------------
 
 CUSTOM_RULES = """
 rules:
 
-  # ── Express: req.query/body/params → res.send/json (Reflected XSS) ────────
+  # -- Express: req.query/body/params -> res.send/json (Reflected XSS) --------
   - id: custom-express-reflected-xss
     patterns:
       - pattern: res.$METHOD(..., <... req.$OBJ.$PARAM ...>, ...)
@@ -144,7 +144,7 @@ rules:
       cwe: "CWE-79"
       category: xss
 
-  # ── Express: req.query/body → db.query / pool.query (SQLi) ─────────────────
+  # -- Express: req.query/body -> db.query / pool.query (SQLi) -----------------
   - id: custom-express-sqli
     patterns:
       - pattern: |
@@ -163,7 +163,7 @@ rules:
       cwe: "CWE-89"
       category: sqli
 
-  # ── Express: req.query → fs.readFile (Path Traversal) ─────────────────────
+  # -- Express: req.query -> fs.readFile (Path Traversal) ---------------------
   - id: custom-express-path-traversal
     patterns:
       - pattern: |
@@ -182,7 +182,7 @@ rules:
       cwe: "CWE-22"
       category: path-traversal
 
-  # ── Express: naive .replace() path sanitization (bypassable with ....// ) ──
+  # -- Express: naive .replace() path sanitization (bypassable with ....// ) --
   - id: custom-path-replace-bypass
     pattern: $X.replace(/\.\.\//g, "")
     message: >
@@ -195,9 +195,13 @@ rules:
       cwe: "CWE-22"
       category: path-traversal
 
-  # ── Env var with hardcoded fallback ─────────────────────────────────────────
+  # -- Env var with hardcoded fallback (only flag if var name suggests a secret) -
   - id: custom-env-fallback-secret
-    pattern: process.env.$VAR || "$SECRET"
+    patterns:
+      - pattern: process.env.$VAR || "$SECRET"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i).*(SECRET|KEY|TOKEN|PASS|AUTH|CREDENTIAL|PRIVATE).*
     message: >
       Hardcoded fallback secret for $VAR. If the environment variable is not set,
       the hardcoded value will be used. Remove the fallback and make the env var required.
@@ -208,7 +212,7 @@ rules:
       cwe: "CWE-798"
       category: secret
 
-  # ── Express: DB lookup with user ID — no ownership check (IDOR) ────────────
+  # -- Express: DB lookup with user ID -- no ownership check (IDOR) ------------
   - id: custom-express-idor
     pattern: $MODEL.findById(req.$OBJ.$FIELD)
     message: >
@@ -222,7 +226,7 @@ rules:
       cwe: "CWE-639"
       category: idor
 
-  # ── Python: f-string in SQL execute ─────────────────────────────────────────
+  # -- Python: f-string in SQL execute -----------------------------------------
   - id: custom-python-sqli-fstring
     pattern: $CURSOR.execute(f"...")
     message: >
@@ -235,7 +239,7 @@ rules:
       cwe: "CWE-89"
       category: sqli
 
-  # ── Python: subprocess shell=True ───────────────────────────────────────────
+  # -- Python: subprocess shell=True -------------------------------------------
   - id: custom-python-subprocess-shell
     pattern: subprocess.$FUNC(..., shell=True, ...)
     message: >
@@ -248,7 +252,7 @@ rules:
       cwe: "CWE-78"
       category: cmdi
 
-  # ── Python: yaml.load without Loader (RCE) ──────────────────────────────────
+  # -- Python: yaml.load without Loader (RCE) ----------------------------------
   - id: custom-python-yaml-load
     pattern: yaml.load($DATA)
     message: >
@@ -261,7 +265,7 @@ rules:
       cwe: "CWE-502"
       category: rce
 
-  # ── Hardcoded password in object literal ────────────────────────────────────
+  # -- Hardcoded password in object literal ------------------------------------
   - id: custom-hardcoded-password-object
     pattern: |
       {password: "$PASS", ...}
@@ -275,11 +279,11 @@ rules:
       cwe: "CWE-798"
       category: secret
 
-  # ── atob() with hardcoded base64 (encoded credentials) ─────────────────────
+  # -- atob() with hardcoded base64 (encoded credentials) ---------------------
   - id: custom-atob-hardcoded
     pattern: atob("$B64")
     message: >
-      atob() called with a hardcoded base64 string — likely obfuscated credentials.
+      atob() called with a hardcoded base64 string -- likely obfuscated credentials.
       Never store credentials in source code even when encoded.
     languages: [javascript]
     severity: ERROR
@@ -288,7 +292,7 @@ rules:
       cwe: "CWE-798"
       category: secret
 
-  # ── Math.random() used for security token ───────────────────────────────────
+  # -- Math.random() used for security token -----------------------------------
   - id: custom-math-random-security
     patterns:
       - pattern: Math.random()
@@ -309,7 +313,7 @@ rules:
       cwe: "CWE-338"
       category: crypto
 
-  # ── eval() with any input ───────────────────────────────────────────────────
+  # -- eval() with any input ---------------------------------------------------
   - id: custom-eval-usage
     pattern: eval($X)
     message: >
@@ -322,7 +326,7 @@ rules:
       cwe: "CWE-94"
       category: rce
 
-  # ── Express: res.redirect with user input (Open Redirect) ──────────────────
+  # -- Express: res.redirect with user input (Open Redirect) ------------------
   - id: custom-express-open-redirect
     pattern: res.redirect(<... req.$OBJ.$FIELD ...>)
     message: >
@@ -335,7 +339,7 @@ rules:
       cwe: "CWE-601"
       category: redirect
 
-  # ── Express: axios/fetch with user input (SSRF) ─────────────────────────────
+  # -- Express: axios/fetch with user input (SSRF) -----------------------------
   - id: custom-express-ssrf
     patterns:
       - pattern-either:
@@ -355,18 +359,18 @@ rules:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SemgrepScanner
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class SemgrepScanner:
     """
     AST-based SAST scanner powered by Semgrep.
 
     Ruleset priority:
-      1. Local custom rules  (always — no login needed)
+      1. Local custom rules  (always -- no login needed)
       2. p/ registry         (if logged into semgrep.dev)
-      3. r/ open registry    (fallback — no login needed)
+      3. r/ open registry    (fallback -- no login needed)
       4. --config auto       (last resort)
     """
 
@@ -380,41 +384,40 @@ class SemgrepScanner:
         bin_path = SEMGREP_BIN or _find_semgrep()
         if bin_path and os.path.isfile(bin_path):
             self._semgrep_bin = bin_path
-            print(f"[✓] Semgrep found: {bin_path}")
+            print(f"[[+]] Semgrep found: {bin_path}")
             return True
-        print(f"[✗] Semgrep not found in PATH or {os.path.dirname(sys.executable)}")
+        print(f"[[x]] Semgrep not found in PATH or {os.path.dirname(sys.executable)}")
         return False
 
     def _is_semgrep_logged_in(self) -> bool:
         """
         Check if the user is authenticated to semgrep.dev.
         Cached after first call.
-        p/ rulesets require login — r/ rulesets do not.
+        p/ rulesets require login -- r/ rulesets do not.
         """
         if self._logged_in is not None:
             return self._logged_in
 
+        _utf8_env = {**os.environ, "PYTHONUTF8": "1"}
         try:
             result = subprocess.run(
-                [self._semgrep_bin, "whoami"],
+                [self._semgrep_bin, "show", "identity"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=15,
+                env=_utf8_env,
             )
-            # Logged in: exit 0 and output contains a username/email
-            # Not logged in: output contains "anonymous" or "not logged in"
-            stdout = result.stdout.lower()
+            # 'semgrep show identity' prints identity info to stderr
+            output = (result.stdout + result.stderr).lower()
             logged_in = (
                 result.returncode == 0
-                and "anonymous" not in stdout
-                and "not logged" not in stdout
-                and len(stdout.strip()) > 0
+                and "logged in" in output
             )
             self._logged_in = logged_in
             if logged_in:
-                print(f"[✓] Semgrep authenticated — p/ rulesets available")
+                print(f"[[+]] Semgrep authenticated -- p/ rulesets available")
             else:
-                print(f"[!] Semgrep not logged in — using r/ open rulesets")
+                print(f"[!] Semgrep not logged in -- using r/ open rulesets")
                 print(f"    For full coverage: semgrep login")
         except Exception:
             self._logged_in = False
@@ -438,7 +441,7 @@ class SemgrepScanner:
             return []
 
         if not os.path.isdir(repo_path):
-            print(f"[✗] Repo path does not exist: {repo_path}")
+            print(f"[[x]] Repo path does not exist: {repo_path}")
             return []
 
         # Write custom rules to temp file in repo dir
@@ -461,7 +464,7 @@ class SemgrepScanner:
         # Cleanup
         self._cleanup_rules()
 
-        print(f"[✓] Semgrep complete: {len(self.findings)} findings")
+        print(f"[[+]] Semgrep complete: {len(self.findings)} findings")
         return self.findings
 
     def _build_rulesets(self, tech_stack: Optional[Dict]) -> Optional[List[str]]:
@@ -473,33 +476,33 @@ class SemgrepScanner:
           2. p/ registry rules      (only if logged into semgrep.dev)
           3. r/ open registry rules (fallback if not logged in)
 
-        Returns None if no rulesets available — caller uses --config auto.
+        Returns None if no rulesets available -- caller uses --config auto.
         """
         rulesets = []
         lang = (tech_stack or {}).get("primary_language", "").lower() if tech_stack else ""
 
-        # 1. Local custom rules — always works
+        # 1. Local custom rules -- always works
         if self._rules_path and os.path.exists(self._rules_path):
             rulesets.append(self._rules_path)
             print(f"[*] Custom rules: {self._rules_path}")
 
         if self._is_semgrep_logged_in():
-            # 2a. Authenticated — use full p/ registry
+            # 2a. Authenticated -- use full p/ registry
             rulesets.extend(BASE_RULESETS)
             lang_specific = LANG_RULESETS.get(lang, [])
             if lang_specific:
                 print(f"[*] Language-specific rulesets for '{lang}': {lang_specific}")
                 rulesets.extend(lang_specific)
         else:
-            # 2b. Not authenticated — use r/ open registry (no login required)
+            # 2b. Not authenticated -- use r/ open registry (no login required)
             rulesets.extend(OPEN_BASE_RULESETS)
             lang_specific = OPEN_RULESETS.get(lang, [])
             if lang_specific:
                 print(f"[*] Open registry rulesets for '{lang}': {lang_specific}")
                 rulesets.extend(lang_specific)
             elif not rulesets:
-                # No language match and no custom rules — return None → use auto
-                print(f"[!] No language-specific open rulesets for '{lang}' — falling back to auto")
+                # No language match and no custom rules -- return None -> use auto
+                print(f"[!] No language-specific open rulesets for '{lang}' -- falling back to auto")
                 return None
 
         return rulesets if rulesets else None
@@ -509,9 +512,9 @@ class SemgrepScanner:
 
         # Build --config flags
         if not rulesets:
-            # Last resort fallback — auto may need login but worth trying
+            # Last resort fallback -- auto may need login but worth trying
             config_flags = ["--config", "auto"]
-            print("[!] No rulesets available — trying --config auto as last resort")
+            print("[!] No rulesets available -- trying --config auto as last resort")
         else:
             config_flags = []
             for r in rulesets:
@@ -537,6 +540,7 @@ class SemgrepScanner:
                 text=True,
                 check=False,   # Semgrep exits non-zero when it finds issues
                 timeout=300,
+                env={**os.environ, "PYTHONUTF8": "1"},
             )
 
             # Always try stdout first
@@ -551,7 +555,7 @@ class SemgrepScanner:
                         print("[!] Semgrep authentication required for these rulesets.")
                         print("    Run: semgrep login")
                     elif "no rules" in stderr.lower():
-                        print("[!] No rules matched — check ruleset names")
+                        print("[!] No rules matched -- check ruleset names")
                 return {"results": [], "errors": []}
 
             data = json.loads(raw)
@@ -568,19 +572,19 @@ class SemgrepScanner:
             return data
 
         except subprocess.TimeoutExpired:
-            print("[✗] Semgrep timed out after 5 minutes")
+            print("[[x]] Semgrep timed out after 5 minutes")
             return {"results": [], "errors": []}
         except json.JSONDecodeError as e:
-            print(f"[✗] Failed to parse Semgrep JSON: {e}")
+            print(f"[[x]] Failed to parse Semgrep JSON: {e}")
             if 'result' in dir() and result.stdout:
                 print(f"    Raw output (first 300 chars): {result.stdout[:300]}")
             return {"results": [], "errors": []}
         except Exception as e:
-            print(f"[✗] Semgrep execution error: {e}")
+            print(f"[[x]] Semgrep execution error: {e}")
             return {"results": [], "errors": []}
 
     def _parse_results(self, semgrep_data: Dict, repo_path: str) -> None:
-        """Map Semgrep JSON schema → scanner's unified finding format."""
+        """Map Semgrep JSON schema -> scanner's unified finding format."""
 
         results = semgrep_data.get("results", [])
 
@@ -643,7 +647,7 @@ class SemgrepScanner:
                 print(f"[!] Failed to parse finding: {e}")
                 continue
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # -- Helpers --------------------------------------------------------------
 
     def _write_custom_rules(self, repo_path: str) -> Optional[str]:
         """Write custom YAML rules to a temp file in the repo dir."""

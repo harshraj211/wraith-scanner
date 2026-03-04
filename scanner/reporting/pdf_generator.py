@@ -182,6 +182,57 @@ REMEDIATIONS = {
     ],
 }
 
+# Per-header remediation — keyed by the finding's 'param' field (the header name).
+# Falls back to the generic REMEDIATIONS["header"] if the header isn't listed.
+HEADER_REMEDIATION_MAP = {
+    "Access-Control-Allow-Origin": [
+        "Replace the wildcard (*) with an explicit allowlist of trusted origins",
+        "Example: Access-Control-Allow-Origin: https://yourdomain.com",
+        "Never combine credentials: true with a wildcard origin",
+        "On public APIs that intentionally serve any caller, document the decision and downgrade to Informational",
+    ],
+    "Content-Security-Policy": [
+        "Define a strict CSP: default-src 'self'; script-src 'self'; style-src 'self'",
+        "Remove 'unsafe-inline' and 'unsafe-eval' from all directives",
+        "Use nonce-based or hash-based CSP for inline scripts",
+        "Deploy in report-only mode first (Content-Security-Policy-Report-Only) to avoid breaking pages",
+    ],
+    "X-Content-Type-Options": [
+        "Add the header: X-Content-Type-Options: nosniff",
+        "This prevents browsers from MIME-sniffing responses away from the declared Content-Type",
+    ],
+    "X-Frame-Options": [
+        "Add the header: X-Frame-Options: DENY (or SAMEORIGIN if iframing is needed)",
+        "Alternatively use CSP frame-ancestors directive: frame-ancestors 'none'",
+    ],
+    "Referrer-Policy": [
+        "Add the header: Referrer-Policy: strict-origin-when-cross-origin",
+        "This prevents leaking full URLs in the Referer header to third parties",
+    ],
+    "Permissions-Policy": [
+        "Add a Permissions-Policy header restricting sensitive browser features",
+        "Example: Permissions-Policy: camera=(), microphone=(), geolocation=()",
+    ],
+    "X-XSS-Protection": [
+        "Add X-XSS-Protection: 0 (modern recommendation) — rely on CSP instead",
+        "Legacy browsers: X-XSS-Protection: 1; mode=block",
+    ],
+    "Server": [
+        "Suppress version information — e.g. ServerTokens Prod (Apache), server_tokens off (nginx)",
+        "On cloud platforms (Vercel, Cloudflare) the provider name alone is low risk",
+    ],
+    "X-Powered-By": [
+        "Remove the X-Powered-By header entirely in your framework config",
+        "Express.js: app.disable('x-powered-by')  |  PHP: expose_php = Off",
+    ],
+    "X-AspNet-Version": [
+        "Remove the X-AspNet-Version header via web.config: <httpRuntime enableVersionHeader=\"false\" />",
+    ],
+    "X-Generator": [
+        "Remove the X-Generator header — it discloses the CMS/framework in use",
+    ],
+}
+
 OWASP_MAPPING = {
     "sqli": "A03:2021 – Injection",
     "xss": "A03:2021 – Injection",
@@ -208,14 +259,21 @@ CWE_MAPPING = {
     "ssrf": "CWE-918: Server-Side Request Forgery",
     "xxe": "CWE-611: Improper Restriction of XML External Entity Reference",
     "ssti": "CWE-94: Improper Control of Code Generation",
+    "header-info-disclosure-versioned": "CWE-200: Exposure of Sensitive Information",
+    "header-info-disclosure-generic": "CWE-200: Exposure of Sensitive Information",
+    "header-weak-csp": "CWE-693: Protection Mechanism Failure",
+    "header-cors-wildcard": "CWE-942: CORS Misconfiguration",
+    "header-cors-wildcard-public": "CWE-942: CORS Misconfiguration",
+    "header-cors-reflect-origin": "CWE-942: CORS Misconfiguration",
     "vulnerable-component": "CWE-1035: Using Components with Known Vulnerabilities",
 }
 
 SEVERITY_COLORS = {
-    "critical": colors.HexColor("#CC0000"),
-    "high":     colors.HexColor("#FF8C00"),
-    "medium":   colors.HexColor("#FFD700"),
-    "low":      colors.HexColor("#8FB339"),
+    "critical":      colors.HexColor("#CC0000"),
+    "high":          colors.HexColor("#FF8C00"),
+    "medium":        colors.HexColor("#FFD700"),
+    "low":           colors.HexColor("#8FB339"),
+    "informational": colors.HexColor("#6CB4EE"),
 }
 
 SCANNER_VERSION = "vuln-scanner/1.0"
@@ -255,7 +313,9 @@ def _page_footer(canvas, doc, target_url):
 
 
 def _severity_from_cvss(cvss_score: float) -> str:
-    if cvss_score >= 9.0:
+    if cvss_score <= 0.0:
+        return "informational"
+    elif cvss_score >= 9.0:
         return "critical"
     elif cvss_score >= 7.0:
         return "high"
@@ -290,10 +350,43 @@ def _clean_evidence(evidence: str) -> str:
     return clean[:200] + "..." if len(clean) > 200 else clean
 
 
+def _is_passive_finding(vuln_type: str) -> bool:
+    """Return True for findings discovered by inspecting responses, not injecting payloads."""
+    passive_prefixes = (
+        'header-', 'crypto-missing', 'crypto-weak', 'crypto-insecure',
+        'crypto-no-https', 'crypto-invalid', 'vulnerable-component',
+    )
+    return any(vuln_type.startswith(p) for p in passive_prefixes)
+
+
 def _get_http_evidence_block(finding: Dict[str, Any]) -> str:
     url     = finding.get('url', '')
     param   = finding.get('param', '')
     payload = finding.get('payload', '')
+    vtype   = finding.get('type', '').lower()
+
+    # --- Passive / header findings: show clean request + response headers ---
+    if _is_passive_finding(vtype):
+        request_block = (
+            f"GET {url} HTTP/1.1\n"
+            f"Host: {urlparse(url).netloc}\n"
+            f"User-Agent: vuln-scanner/1.0\n"
+            f"Accept: */*\n"
+        )
+        evidence = finding.get('evidence', '')
+        # Build a response that shows relevant headers, not injected params
+        if 'header' in vtype:
+            response_block = (
+                f"HTTP/1.1 200 OK\n"
+                f"{param}: {_clean_evidence(evidence)}\n"
+                f"\n(Relevant response header shown above)\n"
+            )
+        else:
+            response_snippet = _clean_evidence(evidence) if evidence else "Indicator detected in response"
+            response_block = f"HTTP/1.1 200 OK\n\n{response_snippet}\n"
+        return f"REQUEST:\n{request_block}\nRESPONSE (excerpt):\n{response_block}"
+
+    # --- Active / injection findings: show the injected request ---
     request_block = (
         f"GET {url}?{param}={payload} HTTP/1.1\n"
         f"Host: {urlparse(url).netloc}\n"
@@ -334,6 +427,27 @@ def _get_reproduction_steps(vuln_type: str, url: str, param: str, payload: str) 
             f"2. Inject command payload in '{param}': {payload}",
             "3. Measure response time (expect delay)",
             "4. Confirm command execution via timing",
+        ]
+    elif 'header' in vuln_type.lower() or 'cors' in vuln_type.lower():
+        return [
+            "1. Send a request to the endpoint using: curl -I " + url,
+            "2. Inspect the HTTP response headers returned by the server",
+            f"3. Verify the presence/value of the '{param}' header",
+            "4. Compare against OWASP Secure Headers recommendations",
+        ]
+    elif 'crypto' in vuln_type.lower():
+        return [
+            "1. Open the URL in a browser and inspect the connection security (lock icon)",
+            f"2. Check for: {param}",
+            "3. Use an SSL/TLS analyser (e.g. ssllabs.com) for detailed protocol checks",
+            "4. Verify HSTS and cookie Secure flags in browser developer tools",
+        ]
+    elif 'component' in vuln_type.lower():
+        return [
+            "1. Inspect HTTP response headers or page source for version banners",
+            f"2. Identified component/version: {param}",
+            "3. Cross-reference the version against CVE databases (NVD, Snyk, OSV)",
+            "4. Upgrade to the latest patched version",
         ]
     else:
         return [
@@ -488,7 +602,7 @@ def generate_pdf_report(
     story.append(Paragraph(summary, normal))
     story.append(Spacer(1, 12))
 
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "informational": 0}
     for f in findings:
         cvss_data = calculate_cvss(f.get("type", ""), f.get("confidence", 0))
         sev       = _severity_from_cvss(cvss_data['score'])
@@ -499,7 +613,8 @@ def generate_pdf_report(
          ["Critical", str(counts["critical"])],
          ["High",     str(counts["high"])],
          ["Medium",   str(counts["medium"])],
-         ["Low",      str(counts["low"])]],
+         ["Low",      str(counts["low"])],
+         ["Informational", str(counts["informational"])]],
     )
     risk_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.darkblue),
@@ -515,7 +630,7 @@ def generate_pdf_report(
     story.append(Spacer(1, 6))
     max_count = max(counts.values()) if any(counts.values()) else 1
     bars_data = []
-    for severity in ["critical", "high", "medium", "low"]:
+    for severity in ["critical", "high", "medium", "low", "informational"]:
         count      = counts[severity]
         bar_length = int((count / max_count) * 30) if max_count > 0 else 0
         bar        = "█" * bar_length
@@ -680,11 +795,22 @@ def generate_pdf_report(
             desc  = VULN_DESCRIPTIONS["ssti"][1]
             rems  = REMEDIATIONS["ssti"]
         elif "header" in vtype:
-            kind  = "Security Misconfiguration — HTTP Header"
-            owasp = OWASP_MAPPING.get(vtype, "A05:2021 – Security Misconfiguration")
+            if 'generic' in vtype or 'wildcard-public' in vtype:
+                kind = "Informational \u2014 HTTP Header"
+            elif 'cors' in vtype:
+                kind = "CORS Misconfiguration"
+            elif 'csp' in vtype:
+                kind = "Weak Content Security Policy"
+            elif 'versioned' in vtype:
+                kind = "Server Version Disclosure"
+            else:
+                kind = "Security Misconfiguration \u2014 Missing HTTP Header"
+            owasp = OWASP_MAPPING.get(vtype, "A05:2021 \u2013 Security Misconfiguration")
             cwe   = CWE_MAPPING.get(vtype, "CWE-693: Protection Mechanism Failure")
             desc  = VULN_DESCRIPTIONS["header"][1]
-            rems  = REMEDIATIONS["header"]
+            # Dynamic per-header remediation instead of generic block
+            header_param = f.get('param', '')
+            rems  = HEADER_REMEDIATION_MAP.get(header_param, REMEDIATIONS["header"])
         elif "vulnerable-component" in vtype:
             kind  = "Vulnerable and Outdated Component"
             owasp = "A06:2021 – Vulnerable and Outdated Components"
@@ -713,10 +839,19 @@ def generate_pdf_report(
         cell_style  = ParagraphStyle("CellStyle", parent=normal, fontSize=9, leading=12, wordWrap='CJK')
         label_style = ParagraphStyle("LabelStyle", parent=normal, fontSize=9, leading=12, fontName="Helvetica-Bold")
 
+        affected_urls = f.get('affected_urls', [])
+        is_consolidated = len(affected_urls) > 1
+
+        if is_consolidated:
+            affected_label = f"{len(affected_urls)} URLs affected"
+        else:
+            affected_label = (urlparse(f.get('url', '')).path or 'N/A')[:60]
+
         glance_data = [
             [Paragraph("Severity",       label_style), Paragraph(cvss_data['severity'], cell_style)],
             [Paragraph("CVSS Score",     label_style), Paragraph(str(cvss_data['score']), cell_style)],
-            [Paragraph("Affected URL",   label_style), Paragraph((urlparse(f.get('url', '')).path or 'N/A')[:60], cell_style)],
+            [Paragraph("Affected URL" + ("s" if is_consolidated else ""),
+                        label_style), Paragraph(affected_label, cell_style)],
             [Paragraph("Parameters",     label_style), Paragraph(display_params, cell_style)],
             [Paragraph("Authentication", label_style), Paragraph("Not Required", cell_style)],
         ]
@@ -762,9 +897,18 @@ def generate_pdf_report(
         if len(param_list) > 6:
             param_display += f' (+{len(param_list)-6} more)'
 
+        # Build URL display — consolidated passive findings list all affected URLs
+        if is_consolidated:
+            urls_display = '<br/>'.join(u[:80] for u in affected_urls[:8])
+            if len(affected_urls) > 8:
+                urls_display += f'<br/>(+{len(affected_urls) - 8} more)'
+            url_row = [wrap("<b>Affected URLs</b>"), wrap(urls_display)]
+        else:
+            url_row = [wrap("<b>Vulnerable URL</b>"), wrap(f.get("url", f.get("action", "")))]
+
         tech_rows = [
             [wrap("<b>Affected Parameters</b>"), wrap(param_display)],
-            [wrap("<b>Vulnerable URL</b>"),      wrap(f.get("url", f.get("action", "")))],
+            url_row,
             [wrap("<b>Payload Used</b>"),        wrap(f.get("payload", ""))],
             [wrap("<b>Evidence Context</b>"),    wrap(_clean_evidence(f.get("evidence", "")))],
             [wrap("<b>Confidence</b>"),          wrap(f"{f.get('confidence', 0)}%")],

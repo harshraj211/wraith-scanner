@@ -107,23 +107,35 @@ def calculate_cvss(vuln_type: str, confidence: int, auth_required: bool = False)
             "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
         },
         "header-missing": {
-            "score": 5.3,
-            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+            "score": 4.0,
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N"
         },
         "header-info-disclosure": {
-            "score": 5.3,
+            "score": 4.3,
             "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
         },
+        "header-info-disclosure-versioned": {
+            "score": 4.3,
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        },
+        "header-info-disclosure-generic": {
+            "score": 0.0,
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        },
         "header-weak-csp": {
-            "score": 6.1,
+            "score": 5.4,
             "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
         },
         "header-cors-wildcard": {
-            "score": 6.5,
-            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N"
+            "score": 4.3,
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"
+        },
+        "header-cors-wildcard-public": {
+            "score": 0.0,
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N"
         },
         "header-cors-reflect-origin": {
-            "score": 9.1,
+            "score": 8.1,
             "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
         },
         "vulnerable-component": {
@@ -153,7 +165,9 @@ def calculate_cvss(vuln_type: str, confidence: int, auth_required: bool = False)
         adjusted_score *= 0.8
     
     # Map CVSS score to correct severity (dynamically calculated)
-    if adjusted_score >= 9.0:
+    if adjusted_score <= 0.0:
+        severity = "INFORMATIONAL"
+    elif adjusted_score >= 9.0:
         severity = "CRITICAL"
     elif adjusted_score >= 7.0:
         severity = "HIGH"

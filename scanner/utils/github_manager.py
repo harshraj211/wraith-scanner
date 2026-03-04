@@ -228,7 +228,11 @@ class GitHubManager:
 
 
 def detect_tech_stack(repo_path: str) -> Dict[str, object]:
-	"""Detect primary language/frameworks from repository contents."""
+	"""Detect primary language/frameworks from repository contents.
+
+	Walks up to 3 directories deep so monorepos (e.g. frontend/ + functions/)
+	are correctly fingerprinted instead of returning 'unknown'.
+	"""
 	stack = {
 		'primary_language': 'unknown',
 		'frameworks': [],
@@ -238,57 +242,91 @@ def detect_tech_stack(repo_path: str) -> Dict[str, object]:
 		'has_pom': False,
 	}
 
-	files_in_root = set(os.listdir(repo_path)) if os.path.isdir(repo_path) else set()
-	files_lower = {f.lower() for f in files_in_root}
+	SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'venv', '.venv',
+				 'dist', 'build', '.next', 'coverage', 'vendor', 'bower_components'}
+	MAX_DEPTH = 3
 
-	if 'package.json' in files_lower:
-		stack['has_package_json'] = True
-		try:
-			pkg_path = os.path.join(repo_path, 'package.json')
-			with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as file_obj:
-				pkg = json.load(file_obj)
-			deps = {}
-			deps.update(pkg.get('dependencies', {}))
-			deps.update(pkg.get('devDependencies', {}))
-			dep_keys = {k.lower() for k in deps}
-			if 'express' in dep_keys:
-				stack['frameworks'].append('express')
-			if 'react' in dep_keys:
-				stack['frameworks'].append('react')
-			if 'next' in dep_keys:
-				stack['frameworks'].append('nextjs')
-			if 'vue' in dep_keys:
-				stack['frameworks'].append('vue')
-			stack['primary_language'] = 'javascript'
-		except Exception:
-			stack['primary_language'] = 'javascript'
+	# Counters for language heuristic when no manifest found
+	lang_scores: Dict[str, int] = {}
 
-	if 'requirements.txt' in files_lower or 'setup.py' in files_lower:
-		stack['has_requirements'] = True
-		if stack['primary_language'] == 'unknown':
-			stack['primary_language'] = 'python'
-		req_path = os.path.join(repo_path, 'requirements.txt')
-		try:
-			with open(req_path, 'r', encoding='utf-8', errors='ignore') as req_file:
-				content = req_file.read().lower()
-			if 'django' in content:
-				stack['frameworks'].append('django')
-			if 'flask' in content:
-				stack['frameworks'].append('flask')
-			if 'fastapi' in content:
-				stack['frameworks'].append('fastapi')
-		except Exception:
-			pass
+	for root, dirs, files in os.walk(repo_path):
+		# Enforce max depth
+		rel_depth = root.replace(repo_path, '').count(os.sep)
+		if rel_depth >= MAX_DEPTH:
+			dirs.clear()
+			continue
+		dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
 
-	if 'composer.json' in files_lower:
-		stack['has_composer'] = True
-		if stack['primary_language'] == 'unknown':
-			stack['primary_language'] = 'php'
+		files_lower = {f.lower() for f in files}
 
-	if 'pom.xml' in files_lower or 'build.gradle' in files_lower:
-		stack['has_pom'] = True
-		if stack['primary_language'] == 'unknown':
-			stack['primary_language'] = 'java'
+		# ── package.json ──────────────────────────────────────────────
+		if 'package.json' in files_lower:
+			stack['has_package_json'] = True
+			try:
+				pkg_path = os.path.join(root, 'package.json')
+				with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as fh:
+					pkg = json.load(fh)
+				deps = {}
+				deps.update(pkg.get('dependencies', {}))
+				deps.update(pkg.get('devDependencies', {}))
+				dep_keys = {k.lower() for k in deps}
+
+				fw_map = {
+					'express': 'express', 'koa': 'koa', 'fastify': 'fastify',
+					'react': 'react', 'next': 'nextjs', 'vue': 'vue',
+					'@angular/core': 'angular', 'svelte': 'svelte',
+					'firebase-functions': 'firebase', 'firebase-admin': 'firebase',
+				}
+				for key, fw in fw_map.items():
+					if key in dep_keys and fw not in stack['frameworks']:
+						stack['frameworks'].append(fw)
+
+				# Check for monorepo workspaces
+				workspaces = pkg.get('workspaces', [])
+				if isinstance(workspaces, dict):
+					workspaces = workspaces.get('packages', [])
+				if workspaces:
+					stack.setdefault('workspaces', []).extend(workspaces)
+
+				lang_scores['javascript'] = lang_scores.get('javascript', 0) + 3
+			except Exception:
+				lang_scores['javascript'] = lang_scores.get('javascript', 0) + 1
+
+		# ── Python manifests ──────────────────────────────────────────
+		if 'requirements.txt' in files_lower or 'setup.py' in files_lower or 'pyproject.toml' in files_lower:
+			stack['has_requirements'] = True
+			req_path = os.path.join(root, 'requirements.txt')
+			try:
+				with open(req_path, 'r', encoding='utf-8', errors='ignore') as fh:
+					content = fh.read().lower()
+				for fw in ('django', 'flask', 'fastapi', 'tornado', 'pyramid'):
+					if fw in content and fw not in stack['frameworks']:
+						stack['frameworks'].append(fw)
+			except Exception:
+				pass
+			lang_scores['python'] = lang_scores.get('python', 0) + 3
+
+		# ── PHP ───────────────────────────────────────────────────────
+		if 'composer.json' in files_lower:
+			stack['has_composer'] = True
+			lang_scores['php'] = lang_scores.get('php', 0) + 3
+
+		# ── Java / Kotlin ─────────────────────────────────────────────
+		if 'pom.xml' in files_lower or 'build.gradle' in files_lower:
+			stack['has_pom'] = True
+			lang_scores['java'] = lang_scores.get('java', 0) + 3
+
+		# ── Go ────────────────────────────────────────────────────────
+		if 'go.mod' in files_lower:
+			lang_scores['go'] = lang_scores.get('go', 0) + 3
+
+		# ── Ruby ──────────────────────────────────────────────────────
+		if 'gemfile' in files_lower:
+			lang_scores['ruby'] = lang_scores.get('ruby', 0) + 3
+
+	# Pick primary language by highest score
+	if lang_scores:
+		stack['primary_language'] = max(lang_scores, key=lang_scores.get)
 
 	return stack
 

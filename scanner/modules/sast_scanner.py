@@ -1,20 +1,19 @@
 """
-sast_scanner.py — Secrets & Dependency Scanner
+sast_scanner.py -- Secrets & Dependency Scanner
 ================================================
 INTENTIONALLY LIMITED SCOPE:
-  - Secret/credential detection (regex is fine for literal string patterns)
+  - Secret/credential detection (regex for literal string patterns)
   - Dependency CVE matching via Google OSV API (replaces hardcoded dict)
-  - Misconfiguration detection (.env, debug flags, hardcoded IPs)
+  - Misconfiguration detection
 
-TaintAnalyzer has been REMOVED — it generated false positives because
-regex cannot understand code context. All code flow analysis is handled
-exclusively by semgrep_scanner.py (AST-based).
-
-OSV API: https://osv.dev/docs/
-  - No API key required
-  - Covers npm, PyPI, Maven, Go, RubyGems, NuGet, Cargo, etc.
-  - Updated in real-time from GitHub Advisory Database + NVD
-  - Replaces the hardcoded 17-package VULNERABLE_DEPS dict
+KEY FIXES vs previous version:
+  - Skips frontend-only package.json (React CRA, Vite, Next.js) -- these
+    were causing OSV 400 errors (react-scripts, xterm, socket.io-client
+    aren't server-side packages we need to scan)
+  - _clean_version() strips ^ ~ >= < BEFORE validation and query
+  - _is_valid_version() rejects *, latest, git SHAs, URLs, .x wildcards
+  - Falls back to individual /v1/query if batch /v1/querybatch returns 400
+  - SKIP_DEP_DIRS covers scanner-terminal and all common UI directories
 """
 from __future__ import annotations
 
@@ -25,11 +24,12 @@ import time
 import requests
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
+requests.packages.urllib3.disable_warnings()
 
 # ---------------------------------------------------------------------------
-# Secret patterns — regex is appropriate here (literal string matching)
+# Secret patterns
 # ---------------------------------------------------------------------------
 
 SECRET_PATTERNS: List[Tuple[str, str, int]] = [
@@ -54,9 +54,7 @@ SECRET_PATTERNS: List[Tuple[str, str, int]] = [
     (r'(?i)jwt[_-]?secret\s*=\s*["\'][^"\']{8,}["\']',              "jwt-secret",            90),
     (r'(?i)encryption[_-]?key\s*=\s*["\'][^"\']{8,}["\']',          "encryption-key",        88),
     (r'(?i)stripe[_-]?secret\s*=\s*["\']sk_live_[^"\']{20,}["\']',  "stripe-live-key",       99),
-    (r'(?i)stripe[_-]?key\s*=\s*["\']sk_live_[^"\']{20,}["\']',     "stripe-live-key",       99),
     (r'AIza[0-9A-Za-z\-_]{35}',                                      "google-api-key",        99),
-    (r'(?i)twilio[_-]?token\s*=\s*["\'][^"\']{20,}["\']',           "twilio-token",          95),
     (r'(?i)sendgrid[_-]?key\s*=\s*["\']SG\.[^"\']{40,}["\']',      "sendgrid-key",          99),
 ]
 
@@ -65,15 +63,14 @@ SECRET_PATTERNS: List[Tuple[str, str, int]] = [
 # ---------------------------------------------------------------------------
 
 MISCONFIG_PATTERNS: List[Tuple[str, str, int]] = [
-    (r'(?i)debug\s*=\s*true',                           "debug-mode-enabled",      80),
-    (r'(?i)DEBUG\s*=\s*True',                           "django-debug-enabled",    85),
-    (r'(?i)allow_all_origins\s*=\s*true',               "cors-allow-all",          75),
-    (r'0\.0\.0\.0',                                     "bind-all-interfaces",     65),
-    (r'(?i)verify\s*=\s*false',                         "ssl-verify-disabled",     85),
-    (r'(?i)check_hostname\s*=\s*false',                 "ssl-hostname-check-off",  85),
+    (r'(?i)debug\s*=\s*true',                            "debug-mode-enabled",     80),
+    (r'(?i)DEBUG\s*=\s*True',                            "django-debug-enabled",   85),
+    (r'(?i)allow_all_origins\s*=\s*true',                "cors-allow-all",         75),
+    (r'0\.0\.0\.0',                                      "bind-all-interfaces",    65),
+    (r'(?i)verify\s*=\s*false',                          "ssl-verify-disabled",    85),
+    (r'(?i)check_hostname\s*=\s*false',                  "ssl-hostname-check-off", 85),
     (r'(?i)secret[_-]?key\s*=\s*["\']django-insecure',  "django-insecure-key",    95),
-    (r'(?i)NODE_ENV\s*=\s*["\']?development',           "node-dev-mode",           70),
-    (r'(?i)log_level\s*=\s*["\']?debug',                "debug-logging",           60),
+    (r'(?i)NODE_ENV\s*=\s*["\']?development',            "node-dev-mode",          70),
 ]
 
 SCANNABLE_EXTENSIONS = {
@@ -82,118 +79,255 @@ SCANNABLE_EXTENSIONS = {
     ".conf", ".config", ".ini", ".toml", ".sh", ".bash",
 }
 
-SKIP_FILES = {
-    "package-lock.json", "yarn.lock", "poetry.lock",
-    ".min.js", ".bundle.js",
-}
-
+SKIP_FILES      = {"package-lock.json", "yarn.lock", "poetry.lock"}
 MAX_FILE_SIZE_MB = 2
 
+# ---------------------------------------------------------------------------
+# Directories to skip entirely for dependency scanning
+# scanner-terminal is YOUR React UI -- scanning it causes OSV 400 errors
+# ---------------------------------------------------------------------------
+
+SKIP_DEP_DIRS = {
+    "node_modules", ".git", "venv", "__pycache__",
+    "dist", "build", ".next", ".nuxt", ".output",
+    # Your scanner's React UI -- not a scan target
+    "scanner-terminal",
+    # Other common frontend dir names
+    "client", "frontend", "ui", "web", "webapp",
+    "app-ui", "dashboard", "static",
+}
+
+# If package.json has any of these it's a pure frontend app, skip it
+FRONTEND_MARKERS = {
+    "react-scripts", "vite", "@vitejs/plugin-react",
+    "vue-cli-service", "@angular/cli", "next", "nuxt",
+    "gatsby", "@sveltejs/kit", "parcel",
+}
 
 # ---------------------------------------------------------------------------
-# OSV API client
+# OSV API helpers
 # ---------------------------------------------------------------------------
 
 OSV_BATCH_URL  = "https://api.osv.dev/v1/querybatch"
 OSV_SINGLE_URL = "https://api.osv.dev/v1/query"
 
-# Ecosystem names per OSV spec
-ECOSYSTEM_MAP = {
-    "npm":   "npm",
-    "pip":   "PyPI",
-    "pipfile": "PyPI",
-    "cargo": "crates.io",
-    "gem":   "RubyGems",
-    "maven": "Maven",
-    "go":    "Go",
-    "nuget": "NuGet",
-}
 
-# Severity derived from CVSS score in OSV response
+def _clean_version(raw: str) -> str:
+    """Strip semver range operators so OSV receives a clean version.
+    Examples: ^1.2.3 -> 1.2.3  |  >=2.0.0 -> 2.0.0  |  ~1.2 -> 1.2
+    """
+    return re.sub(r'^[\^~><=! ]+', '', (raw or "").strip())
+
+
+def _is_valid_version(v: str) -> bool:
+    """Return True only for concrete version strings OSV will accept."""
+    if not v:
+        return False
+    # Reject non-version keywords
+    if v.lower() in {"*", "latest", "next", "canary", "beta", "alpha",
+                     "x", "stable", "lts", "current", ""}:
+        return False
+    # Reject 40-char git SHAs
+    if re.match(r'^[0-9a-f]{40}$', v):
+        return False
+    # Reject URLs and special refs
+    if v.startswith(("http://", "https://", "git+", "git://",
+                     "file:", "github:", "bitbucket:", "gitlab:")):
+        return False
+    # Reject leftover range operators
+    if re.match(r'^[\^~><=!]', v):
+        return False
+    # Reject wildcard segments: 1.x  1.2.X
+    if re.search(r'\.[xX](\.|$)', v) or v.endswith(('.x', '.X')):
+        return False
+    # Must start with a digit
+    if not re.match(r'^\d', v):
+        return False
+    return True
+
+
+def _is_frontend_package_json(pkg_file: Path) -> bool:
+    """Return True if package.json belongs to a frontend-only app."""
+    try:
+        data     = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore"))
+        all_deps = {
+            **data.get("dependencies",    {}),
+            **data.get("devDependencies", {}),
+        }
+        scripts = data.get("scripts", {})
+
+        if any(m in all_deps for m in FRONTEND_MARKERS):
+            return True
+
+        start_cmd = " ".join([
+            scripts.get("start", ""),
+            scripts.get("dev",   ""),
+        ])
+        if any(t in start_cmd for t in
+               ["react-scripts", "vite", "ng serve", "vue-cli-service", "next dev"]):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _osv_severity(vuln: Dict) -> str:
-    """Extract highest severity from OSV vulnerability object."""
     scores = []
     for sev in vuln.get("severity", []):
-        score_str = sev.get("score", "")
-        # CVSS v3 vector strings contain the score at the end: CVSS:3.1/AV:N/.../9.8
         try:
-            score = float(score_str.split("/")[-1])
-            scores.append(score)
+            scores.append(float(sev.get("score", "").split("/")[-1]))
         except (ValueError, AttributeError):
             pass
-    # Also check database_specific.severity
     db_sev = vuln.get("database_specific", {}).get("severity", "").upper()
     if scores:
-        top = max(scores)
-        if top >= 9.0: return "Critical"
-        if top >= 7.0: return "High"
-        if top >= 4.0: return "Medium"
+        t = max(scores)
+        if t >= 9.0: return "Critical"
+        if t >= 7.0: return "High"
+        if t >= 4.0: return "Medium"
         return "Low"
-    # Fall back to string severity
-    mapping = {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low"}
-    return mapping.get(db_sev, "Medium")
+    return {"CRITICAL": "Critical", "HIGH": "High",
+            "MEDIUM": "Medium", "LOW": "Low"}.get(db_sev, "Medium")
 
 
 def _osv_cves(vuln: Dict) -> List[str]:
-    """Extract CVE IDs from OSV aliases."""
-    aliases = vuln.get("aliases", [])
-    return [a for a in aliases if a.startswith("CVE-")]
+    return [a for a in vuln.get("aliases", []) if a.startswith("CVE-")]
 
 
-def query_osv_batch(packages: List[Dict[str, str]]) -> List[List[Dict]]:
+def _osv_fix_version(vuln: Dict, ecosystem: str) -> Optional[str]:
+    for affected in vuln.get("affected", []):
+        if affected.get("package", {}).get("ecosystem", "").lower() != ecosystem.lower():
+            continue
+        for rng in affected.get("ranges", []):
+            if rng.get("type") in ("SEMVER", "ECOSYSTEM"):
+                for event in rng.get("events", []):
+                    if event.get("fixed"):
+                        return event["fixed"]
+    return None
+
+
+def _osv_batch(packages: List[Dict]) -> Optional[List[List[Dict]]]:
+    """Try batch query. Returns None on any error so caller can fallback."""
+    queries = [
+        {
+            "version": p["version"],
+            "package": {
+                "name":      p["name"],
+                "ecosystem": p["ecosystem"],
+            },
+        }
+        for p in packages
+    ]
+    try:
+        resp = requests.post(OSV_BATCH_URL,
+                             json={"queries": queries},
+                             timeout=30,
+                             headers={"Content-Type": "application/json"})
+        if resp.status_code == 400:
+            print(f"[SASTScanner] OSV batch 400 -- falling back to individual queries")
+            print(f"[SASTScanner] Sample query: {json.dumps(queries[0])[:150]}")
+            return None
+        resp.raise_for_status()
+        return [r.get("vulns", []) for r in resp.json().get("results", [])]
+    except requests.exceptions.Timeout:
+        print("[SASTScanner] OSV batch timeout")
+        return None
+    except requests.exceptions.ConnectionError:
+        print("[SASTScanner] OSV unreachable")
+        return None
+    except Exception as e:
+        print(f"[SASTScanner] OSV batch error: {e}")
+        return None
+
+
+def _osv_individual(packages: List[Dict]) -> List[List[Dict]]:
+    """Query OSV one package at a time (fallback for 400 errors)."""
+    results = []
+    for p in packages:
+        try:
+            resp = requests.post(
+                OSV_SINGLE_URL,
+                json={"version": p["version"],
+                      "package": {"name": p["name"], "ecosystem": p["ecosystem"]}},
+                timeout=15,
+                headers={"Content-Type": "application/json"},
+            )
+            vulns = resp.json().get("vulns", []) if resp.status_code == 200 else []
+            if vulns:
+                print(f"[SASTScanner] {p['name']}@{p['version']}: {len(vulns)} vuln(s)")
+            results.append(vulns)
+        except Exception:
+            results.append([])
+        time.sleep(0.1)
+    return results
+
+
+def query_osv(packages: List[Dict]) -> List[List[Dict]]:
     """
-    Query OSV batch endpoint for multiple packages at once.
-
-    packages: list of {"name": str, "version": str, "ecosystem": str}
-    Returns: list of vuln lists, one per package (same order as input)
+    Main OSV entry point.
+    1. Cleans and validates all versions
+    2. Tries batch query
+    3. Falls back to individual queries on 400
+    Returns one list of vulns per input package (same order).
     """
     if not packages:
         return []
 
-    queries = []
-    for pkg in packages:
-        queries.append({
-            "version": {
-                "name":      pkg["name"],
-                "version":   pkg["version"],
-                "ecosystem": pkg["ecosystem"],
-            }
-        })
+    result_map: Dict[int, List] = {i: [] for i in range(len(packages))}
+    valid_idx:  List[int]       = []
+    valid_pkgs: List[Dict]      = []
 
-    try:
-        resp = requests.post(
-            OSV_BATCH_URL,
-            json={"queries": queries},
-            timeout=30,
-            headers={"Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data    = resp.json()
-        results = data.get("results", [])
-        # Each result: {"vulns": [...]} or {}
-        return [r.get("vulns", []) for r in results]
-    except requests.exceptions.Timeout:
-        print("[SASTScanner] OSV API timeout — dependency check skipped")
+    for i, p in enumerate(packages):
+        cleaned = _clean_version(p.get("version", ""))
+        if not _is_valid_version(cleaned):
+            print(f"[SASTScanner] Skip {p['name']}@{p.get('version','?')!r} -- bad version")
+            continue
+        vp = dict(p)
+        vp["version"] = cleaned
+        valid_idx.append(i)
+        valid_pkgs.append(vp)
+
+    if not valid_pkgs:
+        print("[SASTScanner] No valid package versions to query")
         return [[] for _ in packages]
-    except requests.exceptions.ConnectionError:
-        print("[SASTScanner] OSV API unreachable — dependency check skipped")
-        return [[] for _ in packages]
-    except Exception as e:
-        print(f"[SASTScanner] OSV API error: {e}")
-        return [[] for _ in packages]
+
+    print(f"[SASTScanner] Querying OSV: {len(valid_pkgs)} packages "
+          f"({len(packages) - len(valid_pkgs)} skipped)")
+
+    # Batch in chunks of 100
+    all_results: List[List[Dict]] = []
+    use_individual = False
+
+    for i in range(0, len(valid_pkgs), 100):
+        chunk = valid_pkgs[i:i + 100]
+        res   = _osv_batch(chunk)
+        if res is None:
+            use_individual = True
+            break
+        all_results.extend(res)
+        if i + 100 < len(valid_pkgs):
+            time.sleep(0.3)
+
+    if use_individual:
+        all_results = _osv_individual(valid_pkgs)
+
+    for orig_i, vulns in zip(valid_idx, all_results):
+        result_map[orig_i] = vulns
+
+    return [result_map[i] for i in range(len(packages))]
 
 
 # ---------------------------------------------------------------------------
-# Main scanner class
+# SASTScanner
 # ---------------------------------------------------------------------------
 
 class SASTScanner:
     """
-    Secrets, credentials, dependency CVEs (via OSV API), and misconfiguration scanner.
-    Does NOT perform taint analysis — that is semgrep_scanner.py's job.
+    Secrets, credentials, dependency CVEs (OSV API), misconfiguration scanner.
+    Does NOT perform taint analysis -- semgrep_scanner.py handles that.
     """
 
-    def scan_repo(self, repo_path: str, file_tree: Dict[str, List]) -> List[Dict[str, Any]]:
+    def scan_repo(self, repo_path: str,
+                  file_tree: Dict[str, List]) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
         all_files = file_tree.get("all", [])
         print(f"[SASTScanner] Scanning {len(all_files)} files for secrets/misconfigs")
@@ -202,129 +336,109 @@ class SASTScanner:
             if not self._should_scan(filepath):
                 continue
             try:
-                size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if size_mb > MAX_FILE_SIZE_MB:
+                if os.path.getsize(filepath) / (1024 * 1024) > MAX_FILE_SIZE_MB:
                     continue
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
             except OSError:
                 continue
 
-            rel_path = self._relative(filepath, repo_path)
-            findings.extend(self._scan_secrets(content, rel_path))
-            findings.extend(self._scan_misconfigs(content, rel_path))
+            rel = self._relative(filepath, repo_path)
+            findings.extend(self._scan_secrets(content, rel))
+            findings.extend(self._scan_misconfigs(content, rel))
 
-        # Dependency CVE check via OSV API
-        print("[SASTScanner] Querying OSV API for dependency vulnerabilities...")
-        findings.extend(self._scan_dependencies_osv(repo_path))
-
+        findings.extend(self._scan_dependencies(repo_path))
         print(f"[SASTScanner] Total: {len(findings)} findings")
         return findings
 
     # ------------------------------------------------------------------
-    # Secret detection
-    # ------------------------------------------------------------------
 
-    def _scan_secrets(self, content: str, rel_path: str) -> List[Dict[str, Any]]:
-        findings = []
-        lines = content.splitlines()
-        for i, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if stripped.startswith(("#", "//", "*", "<!--")):
+    def _scan_secrets(self, content: str, rel: str) -> List[Dict[str, Any]]:
+        out = []
+        for i, line in enumerate(content.splitlines(), 1):
+            if line.strip().startswith(("#", "//", "*", "<!--")):
                 continue
-            for pattern, label, confidence in SECRET_PATTERNS:
+            for pattern, label, conf in SECRET_PATTERNS:
                 if re.search(pattern, line):
-                    findings.append({
-                        "type":       label,
-                        "category":   "secret",
-                        "file":       rel_path,
-                        "line":       i,
-                        "code":       line.strip()[:120],
-                        "confidence": confidence,
-                        "severity":   "Critical",
-                        "message":    f"Hardcoded {label} detected",
-                        "source":     "sast-scanner",
+                    out.append({
+                        "type": label, "category": "secret",
+                        "file": rel, "line": i,
+                        "code": line.strip()[:120],
+                        "confidence": conf, "severity": "Critical",
+                        "message": f"Hardcoded {label} detected",
+                        "source": "sast-scanner",
                     })
                     break
-        return findings
+        return out
 
-    # ------------------------------------------------------------------
-    # Misconfiguration detection
-    # ------------------------------------------------------------------
-
-    def _scan_misconfigs(self, content: str, rel_path: str) -> List[Dict[str, Any]]:
-        findings = []
-        lines = content.splitlines()
-        for i, line in enumerate(lines, start=1):
-            for pattern, label, confidence in MISCONFIG_PATTERNS:
+    def _scan_misconfigs(self, content: str, rel: str) -> List[Dict[str, Any]]:
+        out = []
+        for i, line in enumerate(content.splitlines(), 1):
+            for pattern, label, conf in MISCONFIG_PATTERNS:
                 if re.search(pattern, line):
-                    findings.append({
-                        "type":       label,
-                        "category":   "config",
-                        "file":       rel_path,
-                        "line":       i,
-                        "code":       line.strip()[:120],
-                        "confidence": confidence,
-                        "severity":   "Medium",
-                        "message":    f"Misconfiguration: {label}",
-                        "source":     "sast-scanner",
+                    out.append({
+                        "type": label, "category": "config",
+                        "file": rel, "line": i,
+                        "code": line.strip()[:120],
+                        "confidence": conf, "severity": "Medium",
+                        "message": f"Misconfiguration: {label}",
+                        "source": "sast-scanner",
                     })
                     break
-        return findings
+        return out
 
-    # ------------------------------------------------------------------
-    # Dependency CVE scanning via OSV API
-    # ------------------------------------------------------------------
-
-    def _scan_dependencies_osv(self, repo_path: str) -> List[Dict[str, Any]]:
-        """
-        Parse all dependency files, batch-query OSV API, return findings.
-        Covers: npm (package.json), pip (requirements*.txt, Pipfile),
-                with ecosystem auto-detected.
-        """
+    def _scan_dependencies(self, repo_path: str) -> List[Dict[str, Any]]:
         root     = Path(repo_path)
-        packages = []   # {"name", "version", "ecosystem", "file", "raw_line"}
+        packages: List[Dict[str, str]] = []
 
-        # ── npm ──────────────────────────────────────────────────────────────
         for pkg_file in root.rglob("package.json"):
-            if "node_modules" in str(pkg_file):
+            # Skip blacklisted dirs (includes scanner-terminal)
+            if any(part in SKIP_DEP_DIRS for part in pkg_file.parts):
                 continue
-            packages.extend(self._parse_npm(pkg_file))
+            # Skip frontend-only CRA/Vite apps
+            if _is_frontend_package_json(pkg_file):
+                try:
+                    rel = pkg_file.relative_to(root)
+                except ValueError:
+                    rel = pkg_file
+                print(f"[SASTScanner] Skipping frontend app: {rel}")
+                continue
+            pkgs = self._parse_npm(pkg_file)
+            if pkgs:
+                print(f"[SASTScanner] npm: {len(pkgs)} deps in {pkg_file.name}")
+            packages.extend(pkgs)
 
-        # ── pip ──────────────────────────────────────────────────────────────
         for req_file in root.rglob("requirements*.txt"):
-            packages.extend(self._parse_pip(req_file, "PyPI"))
+            if any(part in SKIP_DEP_DIRS for part in req_file.parts):
+                continue
+            pkgs = self._parse_pip(req_file, "PyPI")
+            if pkgs:
+                print(f"[SASTScanner] pip: {len(pkgs)} deps in {req_file.name}")
+            packages.extend(pkgs)
+
         for pipfile in root.rglob("Pipfile"):
-            packages.extend(self._parse_pip(pipfile, "PyPI"))
+            if any(part in SKIP_DEP_DIRS for part in pipfile.parts):
+                continue
+            pkgs = self._parse_pip(pipfile, "PyPI")
+            if pkgs:
+                print(f"[SASTScanner] Pipfile: {len(pkgs)} deps")
+            packages.extend(pkgs)
 
         if not packages:
-            print("[SASTScanner] No dependency files found")
+            print("[SASTScanner] No backend dependency files found")
             return []
 
-        print(f"[SASTScanner] Checking {len(packages)} dependencies against OSV API...")
+        all_vulns = query_osv(packages)
+        findings  = []
 
-        # Batch in groups of 100 (OSV limit per batch)
-        BATCH_SIZE = 100
-        all_vulns: List[List[Dict]] = []
-        for i in range(0, len(packages), BATCH_SIZE):
-            batch = packages[i:i + BATCH_SIZE]
-            results = query_osv_batch(batch)
-            all_vulns.extend(results)
-            if i + BATCH_SIZE < len(packages):
-                time.sleep(0.3)  # polite rate limiting
-
-        findings = []
         for pkg, vuln_list in zip(packages, all_vulns):
             for vuln in vuln_list:
-                vuln_id   = vuln.get("id", "UNKNOWN")
-                summary   = vuln.get("summary", "Vulnerability in dependency")
-                severity  = _osv_severity(vuln)
-                cves      = _osv_cves(vuln)
-                cve_str   = ", ".join(cves) if cves else vuln_id
-                aliases   = vuln.get("aliases", [])
-
-                # Build remediation from affected ranges
-                fix_version = self._extract_fix_version(vuln, pkg["ecosystem"])
+                vuln_id  = vuln.get("id", "UNKNOWN")
+                summary  = vuln.get("summary", "Vulnerability in dependency")
+                severity = _osv_severity(vuln)
+                cves     = _osv_cves(vuln)
+                cve_str  = ", ".join(cves) if cves else vuln_id
+                fix_ver  = _osv_fix_version(vuln, pkg["ecosystem"])
 
                 findings.append({
                     "type":        "vulnerable-dependency",
@@ -334,105 +448,78 @@ class SASTScanner:
                     "code":        pkg["raw_line"],
                     "confidence":  90,
                     "severity":    severity,
-                    "message": (
-                        f"{pkg['name']}@{pkg['version']} is vulnerable — "
-                        f"{cve_str}: {summary[:120]}"
-                    ),
+                    "message":     f"{pkg['name']}@{pkg['version']} -- {cve_str}: {summary[:120]}",
                     "cve":         cve_str,
                     "osv_id":      vuln_id,
-                    "aliases":     aliases,
                     "remediation": (
-                        f"Upgrade {pkg['name']} to {fix_version}. "
+                        f"Upgrade to {fix_ver}. "
                         f"See https://osv.dev/vulnerability/{vuln_id}"
-                    ) if fix_version else (
-                        f"See https://osv.dev/vulnerability/{vuln_id} for remediation details."
-                    ),
+                    ) if fix_ver else f"See https://osv.dev/vulnerability/{vuln_id}",
                     "source":      "sast-scanner",
                 })
 
-        vuln_pkg_count = len([p for p, v in zip(packages, all_vulns) if v])
-        print(f"[SASTScanner] OSV: {len(findings)} CVEs across {vuln_pkg_count} vulnerable packages")
+        print(f"[SASTScanner] OSV: {len(findings)} CVEs found")
         return findings
 
     def _parse_npm(self, path: Path) -> List[Dict[str, str]]:
-        """Parse package.json and return list of versioned packages."""
         packages = []
         try:
             data     = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-            all_deps = {}
-            all_deps.update(data.get("dependencies", {}))
-            all_deps.update(data.get("devDependencies", {}))
-            for name, version_str in all_deps.items():
-                clean = version_str.lstrip("^~>=< ")
-                # Skip git URLs, file: refs, wildcards
-                if not re.match(r"^\d+\.", clean):
+            all_deps = {
+                **data.get("dependencies",    {}),
+                **data.get("devDependencies", {}),
+            }
+            for name, ver_str in all_deps.items():
+                cleaned = _clean_version(ver_str)
+                if not _is_valid_version(cleaned):
                     continue
                 packages.append({
-                    "name":       name,
-                    "version":    clean,
-                    "ecosystem":  "npm",
-                    "file":       str(path),
-                    "raw_line":   f"{name}@{version_str}",
+                    "name":      name,
+                    "version":   cleaned,
+                    "ecosystem": "npm",
+                    "file":      str(path),
+                    "raw_line":  f"{name}@{ver_str}",
                 })
         except Exception as e:
-            print(f"[SASTScanner] Failed to parse {path}: {e}")
+            print(f"[SASTScanner] npm parse error {path.name}: {e}")
         return packages
 
-    def _parse_pip(self, path: Path, ecosystem: str = "PyPI") -> List[Dict[str, str]]:
-        """Parse requirements.txt or Pipfile and return versioned packages."""
+    def _parse_pip(self, path: Path,
+                   ecosystem: str = "PyPI") -> List[Dict[str, str]]:
         packages = []
         try:
-            for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = raw_line.strip()
+            for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
                 if not line or line.startswith(("#", "-", "[")):
                     continue
-                match = re.match(r"([a-zA-Z0-9_\-\.]+)[>=<!~^]{1,2}([0-9][^\s,;#]*)?", line)
-                if not match:
+                m = re.match(
+                    r"([a-zA-Z0-9_\-\.]+)\s*[><=!~^]{1,2}\s*([0-9][^\s,;#]*)?",
+                    line,
+                )
+                if not m:
                     continue
-                name, version = match.group(1), match.group(2) or ""
-                if not version:
+                name    = m.group(1).strip()
+                cleaned = _clean_version(m.group(2) or "")
+                if not cleaned or not _is_valid_version(cleaned):
                     continue
                 packages.append({
-                    "name":       name,
-                    "version":    version.strip(),
-                    "ecosystem":  ecosystem,
-                    "file":       str(path),
-                    "raw_line":   line[:120],
+                    "name":      name,
+                    "version":   cleaned,
+                    "ecosystem": ecosystem,
+                    "file":      str(path),
+                    "raw_line":  line[:120],
                 })
         except Exception as e:
-            print(f"[SASTScanner] Failed to parse {path}: {e}")
+            print(f"[SASTScanner] pip parse error {path.name}: {e}")
         return packages
 
-    def _extract_fix_version(self, vuln: Dict, ecosystem: str) -> Optional[str]:
-        """
-        Try to extract the patched/fixed version from OSV affected ranges.
-        Returns None if not determinable.
-        """
-        for affected in vuln.get("affected", []):
-            pkg_eco = affected.get("package", {}).get("ecosystem", "")
-            if pkg_eco.lower() != ecosystem.lower():
-                continue
-            for rng in affected.get("ranges", []):
-                if rng.get("type") in ("SEMVER", "ECOSYSTEM"):
-                    for event in rng.get("events", []):
-                        fixed = event.get("fixed")
-                        if fixed:
-                            return fixed
-            # versions field lists all affected versions — not useful for fix
-        return None
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _should_scan(self, filepath: str) -> bool:
-        path  = Path(filepath)
-        if any(skip in path.name for skip in SKIP_FILES):
+        path = Path(filepath)
+        if any(s in path.name for s in SKIP_FILES):
             return False
         if path.suffix.lower() not in SCANNABLE_EXTENSIONS:
             return False
-        parts = set(path.parts)
-        if parts & {"node_modules", ".git", "venv", "__pycache__", "dist", "build"}:
+        if any(part in SKIP_DEP_DIRS for part in path.parts):
             return False
         return True
 

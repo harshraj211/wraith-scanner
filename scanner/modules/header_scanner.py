@@ -5,9 +5,13 @@ Checks for missing or misconfigured security response headers.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
+
+# Version pattern: matches things like Apache/2.4.51, nginx/1.21.6, PHP/8.1.2
+_VERSION_RE = re.compile(r'\d+\.\d+(?:\.\d+)?')
 
 
 # (header, recommended_value_hint, description, confidence)
@@ -69,19 +73,57 @@ class HeaderScanner:
                     'url': url,
                 })
 
-        # Information-disclosing headers
+        # Information-disclosing headers — version-specific vs generic
+        # Cloud providers / CDN names that carry no exploitable info
+        _GENERIC_SERVERS = {
+            'vercel', 'cloudflare', 'netlify', 'heroku', 'aws',
+            'amazons3', 'gws', 'gse', 'cloudfront', 'akamai',
+            'fastly', 'fly', 'railway', 'render', 'digitalocean',
+        }
+
         for header, pattern, evidence, confidence in DANGEROUS_HEADER_VALUES:
             value = headers.get(header, '')
             if value:
-                findings.append({
-                    'vulnerable': True,
-                    'type': 'header-info-disclosure',
-                    'param': header,
-                    'payload': 'N/A',
-                    'evidence': f'{evidence} Value: {value[:80]}',
-                    'confidence': confidence,
-                    'url': url,
-                })
+                has_version = bool(_VERSION_RE.search(value))
+                is_generic_server = (
+                    header.lower() == 'server'
+                    and not has_version
+                    and value.strip().lower().split('/')[0].split()[0] in _GENERIC_SERVERS
+                )
+
+                if is_generic_server:
+                    # "Server: Vercel" — informational, not exploitable
+                    findings.append({
+                        'vulnerable': True,
+                        'type': 'header-info-disclosure-generic',
+                        'param': header,
+                        'payload': 'N/A',
+                        'evidence': f'Server header present but only discloses cloud/CDN provider. Value: {value[:80]}',
+                        'confidence': 30,
+                        'url': url,
+                    })
+                elif has_version:
+                    # "Apache/2.4.51 (Ubuntu)" — version enables targeted exploits
+                    findings.append({
+                        'vulnerable': True,
+                        'type': 'header-info-disclosure-versioned',
+                        'param': header,
+                        'payload': 'N/A',
+                        'evidence': f'{evidence} Value: {value[:80]}',
+                        'confidence': confidence,
+                        'url': url,
+                    })
+                else:
+                    # Generic non-cloud disclosure (e.g. "nginx" without version)
+                    findings.append({
+                        'vulnerable': True,
+                        'type': 'header-info-disclosure-generic',
+                        'param': header,
+                        'payload': 'N/A',
+                        'evidence': f'{evidence} Value: {value[:80]} (no version disclosed)',
+                        'confidence': 40,
+                        'url': url,
+                    })
 
         # CSP quality check
         csp = headers.get('Content-Security-Policy', '')
@@ -140,15 +182,41 @@ class HeaderScanner:
         acao = resp.headers.get('Access-Control-Allow-Origin', '')
 
         if acao == '*':
-            findings.append({
-                'vulnerable': True,
-                'type': 'header-cors-wildcard',
-                'param': 'Access-Control-Allow-Origin',
-                'payload': 'N/A',
-                'evidence': 'CORS wildcard (*) allows any origin to read responses. Dangerous on authenticated endpoints.',
-                'confidence': 75,
-                'url': url,
-            })
+            # Check if endpoint appears to handle authentication
+            has_auth_indicators = any([
+                resp.headers.get('Set-Cookie', ''),
+                'authorization' in (resp.headers.get('WWW-Authenticate', '').lower()),
+                resp.headers.get('X-Auth-Token', ''),
+            ])
+            acac = resp.headers.get('Access-Control-Allow-Credentials', '')
+            # Wildcard + credentials is impossible per spec, so browsers block it.
+            # On public endpoints without auth this is benign.
+            if has_auth_indicators:
+                findings.append({
+                    'vulnerable': True,
+                    'type': 'header-cors-wildcard',
+                    'param': 'Access-Control-Allow-Origin',
+                    'payload': 'N/A',
+                    'evidence': (
+                        'CORS wildcard (*) on an endpoint that sets authentication-related headers. '
+                        'If the endpoint returns user-specific data, this is exploitable.'
+                    ),
+                    'confidence': 75,
+                    'url': url,
+                })
+            else:
+                findings.append({
+                    'vulnerable': True,
+                    'type': 'header-cors-wildcard-public',
+                    'param': 'Access-Control-Allow-Origin',
+                    'payload': 'N/A',
+                    'evidence': (
+                        'CORS wildcard (*) set on a public endpoint with no authentication indicators. '
+                        'This is acceptable for public APIs and static content.'
+                    ),
+                    'confidence': 30,
+                    'url': url,
+                })
 
         # Check if CORS reflects arbitrary Origin
         try:
