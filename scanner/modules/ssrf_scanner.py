@@ -143,7 +143,7 @@ class _OOBClient:
             resp = self._session.post(
                 self.REGISTER_URL,
                 json={"public-key": "", "secret-key": ""},
-                timeout=8,
+                timeout=3,
             )
             data = resp.json()
             self._domain    = data.get("domain")
@@ -166,7 +166,7 @@ class _OOBClient:
         uid = uuid.uuid4().hex[:8]
         return f"http://{uid}.{self._domain}"
 
-    def poll(self, seconds: int = 8) -> List[Dict]:
+    def poll(self, seconds: int = 3) -> List[Dict]:
         if not self._available or not self._secret:
             return []
         time.sleep(seconds)
@@ -323,7 +323,7 @@ class SSRFScanner:
 
     def _inband(self, url: str, param: str,
                 params: Dict[str, Any], method: str) -> Optional[Dict]:
-        for payload_url, label in SSRF_TARGETS:
+        for payload_url, label in SSRF_TARGETS[:8]:  # top 8 most impactful targets
             data = {**params, param: payload_url}
             text, status = self._fetch(url, data, method)
             if text is None:
@@ -389,8 +389,8 @@ class SSRFScanner:
             # Also try POST even if form is GET — APIs often differ
             method = "POST"
 
-        for key in JSON_URL_KEYS:
-            for payload_url, label in SSRF_TARGETS[:6]:  # top 6 most common
+        for key in JSON_URL_KEYS[:5]:  # top 5 keys only
+            for payload_url, label in SSRF_TARGETS[:3]:  # top 3 most common
                 body = {key: payload_url}
                 try:
                     resp = self.session.request(
@@ -443,8 +443,8 @@ class SSRFScanner:
 
     def _header_injection(self, url: str) -> Optional[Dict]:
         """Inject SSRF payloads via common headers (Referer, X-Forwarded-For, etc.)."""
-        for header_name, template in SSRF_HEADERS:
-            for payload_url, label in SSRF_TARGETS[:5]:
+        for header_name, template in SSRF_HEADERS[:4]:  # top 4 headers
+            for payload_url, label in SSRF_TARGETS[:3]:  # top 3 targets
                 injected_value = template.replace("{PAYLOAD}", payload_url)
                 try:
                     resp = self.session.get(

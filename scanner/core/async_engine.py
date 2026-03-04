@@ -197,15 +197,25 @@ class AsyncScanEngine:
         scanners:        List[Any],
         progress_cb:     Optional[Callable],
     ) -> List[Dict[str, Any]]:
+        # ── One task per (URL × scanner) for full parallelism ──
         semaphore = asyncio.Semaphore(self.max_concurrent)
         tasks     = []
+        url_count = len(url_param_pairs)
 
-        for idx, (url, params) in enumerate(url_param_pairs):
-            task = self._scan_url_guarded(
-                semaphore, url, params, scanners,
-                idx + 1, len(url_param_pairs), progress_cb
-            )
-            tasks.append(task)
+        for url_idx, (url, params) in enumerate(url_param_pairs):
+            if not params:
+                continue
+            if progress_cb:
+                progress_cb(
+                    f"[{url_idx + 1}/{url_count}] Queuing {len(scanners)} "
+                    f"scanners for: {url}"
+                )
+            for scanner in scanners:
+                tasks.append(
+                    self._scan_url_scanner_guarded(
+                        semaphore, url, params, scanner
+                    )
+                )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -213,46 +223,34 @@ class AsyncScanEngine:
         for r in results:
             if isinstance(r, list):
                 findings.extend(r)
-            elif isinstance(r, Exception):
-                pass  # individual URL errors don't crash the whole scan
         return findings
 
-    async def _scan_url_guarded(
+    async def _scan_url_scanner_guarded(
         self,
-        semaphore:   asyncio.Semaphore,
-        url:         str,
-        params:      Dict[str, str],
-        scanners:    List[Any],
-        idx:         int,
-        total:       int,
-        progress_cb: Optional[Callable],
+        semaphore: asyncio.Semaphore,
+        url:       str,
+        params:    Dict[str, str],
+        scanner:   Any,
     ) -> List[Dict[str, Any]]:
         async with semaphore:
-            if progress_cb:
-                progress_cb(f"[{idx}/{total}] Scanning: {url}")
             return await asyncio.to_thread(
-                self._scan_url_sync, url, params, scanners
+                self._scan_url_single, url, params, scanner
             )
 
-    def _scan_url_sync(
-        self,
-        url:      str,
-        params:   Dict[str, str],
-        scanners: List[Any],
+    @staticmethod
+    def _scan_url_single(
+        url:     str,
+        params:  Dict[str, str],
+        scanner: Any,
     ) -> List[Dict[str, Any]]:
-        """Runs in thread pool — calls existing sync scanner methods."""
-        findings = []
-        if not params:
-            return findings
-        for scanner in scanners:
-            try:
-                results = scanner.scan_url(url, params)
-                for f in results:
-                    f["url"] = url
-                findings.extend(results)
-            except Exception as e:
-                pass
-        return findings
+        """Run ONE scanner against ONE URL in its own thread."""
+        try:
+            results = scanner.scan_url(url, params)
+            for f in results:
+                f["url"] = url
+            return results
+        except Exception:
+            return []
 
     async def _scan_all_forms(
         self,
@@ -260,15 +258,24 @@ class AsyncScanEngine:
         scanners:    List[Any],
         progress_cb: Optional[Callable],
     ) -> List[Dict[str, Any]]:
-        semaphore = asyncio.Semaphore(max(3, self.max_concurrent // 5))
-        tasks     = []
+        # ── One task per (form × scanner) for full parallelism ──
+        semaphore  = asyncio.Semaphore(self.max_concurrent)
+        tasks      = []
+        form_count = len(forms)
 
-        for idx, form in enumerate(forms):
-            task = self._scan_form_guarded(
-                semaphore, form, scanners,
-                idx + 1, len(forms), progress_cb
-            )
-            tasks.append(task)
+        for form_idx, form in enumerate(forms):
+            action = form.get("action", "")
+            if progress_cb:
+                progress_cb(
+                    f"[{form_idx + 1}/{form_count}] Queuing {len(scanners)} "
+                    f"scanners for form: {action}"
+                )
+            for scanner in scanners:
+                tasks.append(
+                    self._scan_form_scanner_guarded(
+                        semaphore, form, scanner
+                    )
+                )
 
         results  = await asyncio.gather(*tasks, return_exceptions=True)
         findings = []
@@ -277,39 +284,31 @@ class AsyncScanEngine:
                 findings.extend(r)
         return findings
 
-    async def _scan_form_guarded(
+    async def _scan_form_scanner_guarded(
         self,
-        semaphore:   asyncio.Semaphore,
-        form:        Dict[str, Any],
-        scanners:    List[Any],
-        idx:         int,
-        total:       int,
-        progress_cb: Optional[Callable],
+        semaphore: asyncio.Semaphore,
+        form:      Dict[str, Any],
+        scanner:   Any,
     ) -> List[Dict[str, Any]]:
         async with semaphore:
-            action = form.get("action", "")
-            if progress_cb:
-                progress_cb(f"[{idx}/{total}] Scanning form: {action}")
             return await asyncio.to_thread(
-                self._scan_form_sync, form, scanners
+                self._scan_form_single, form, scanner
             )
 
-    def _scan_form_sync(
-        self,
-        form:     Dict[str, Any],
-        scanners: List[Any],
+    @staticmethod
+    def _scan_form_single(
+        form:    Dict[str, Any],
+        scanner: Any,
     ) -> List[Dict[str, Any]]:
-        findings = []
-        action   = form.get("action", "")
-        for scanner in scanners:
-            try:
-                results = scanner.scan_form(form)
-                for f in results:
-                    f["url"] = action
-                findings.extend(results)
-            except Exception:
-                pass
-        return findings
+        """Run ONE scanner against ONE form in its own thread."""
+        action = form.get("action", "")
+        try:
+            results = scanner.scan_form(form)
+            for f in results:
+                f["url"] = action
+            return results
+        except Exception:
+            return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

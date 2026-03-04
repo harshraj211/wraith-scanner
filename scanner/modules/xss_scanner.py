@@ -45,9 +45,7 @@ REFLECTED_PAYLOADS = [
 ]
 
 DOM_PAYLOADS = [
-    '<script>alert("{MARKER}")</script>',
     '<img src=x onerror=alert("{MARKER}")>',
-    '<svg onload=alert("{MARKER}")>',
     '"><script>alert("{MARKER}")</script>',
 ]
 
@@ -187,8 +185,11 @@ class XSSScanner:
     def scan_url(self, url: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
         findings = []
         for param in params:
-            findings.extend(self._scan_param_reflected(url, params, param))
-            findings.extend(self._scan_param_dom(url, params, param))
+            reflected = self._scan_param_reflected(url, params, param)
+            findings.extend(reflected)
+            if not reflected:
+                # Only try slow DOM checks if reflected didn't find anything
+                findings.extend(self._scan_param_dom(url, params, param))
             if findings:
                 break  # one confirmed finding per URL is enough
         return findings
@@ -398,7 +399,7 @@ class XSSScanner:
                 page.goto(
                     url,
                     wait_until="domcontentloaded",  # FIX: was networkidle
-                    timeout=8000,                   # 8s hard cap
+                    timeout=4000,                   # 4s hard cap
                 )
             except Exception:
                 # Timeout or nav error — still check what loaded

@@ -81,6 +81,7 @@ class IDORScanner:
                 )
                 if vuln:
                     findings.append(vuln)
+                    break  # one IDOR proof per param is enough
         return findings
 
     def _extract_numeric_params(self, params: Dict[str, Any]) -> Dict[str, str]:

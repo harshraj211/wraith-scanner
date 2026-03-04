@@ -172,7 +172,7 @@ class WebCrawler:
                     # Use a short networkidle wait with a tight timeout cap.
                     # This catches the initial burst of fetch() calls SPAs make.
                     try:
-                        page.wait_for_load_state("networkidle", timeout=8000)
+                        page.wait_for_load_state("networkidle", timeout=5000)
                     except Exception:
                         pass  # Timeout OK — SPAs with websockets/analytics won't idle
 
@@ -383,11 +383,11 @@ class WebCrawler:
         try:
             # 1. Scroll to bottom (triggers infinite scroll / lazy components)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(600)
 
             # 2. Scroll back up (some sites load content on scroll-up)
             page.evaluate("window.scrollTo(0, 0)")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(300)
 
             # 3. Click nav items to trigger SPA route changes
             self._click_nav_items(page)
@@ -483,7 +483,7 @@ class WebCrawler:
             print(f"[Crawler] SPA hash routes found: {len(hash_links)}")
 
             visited_hashes: Set[str] = set()
-            for hash_route in hash_links[:25]:          # cap to avoid infinite loops
+            for hash_route in hash_links[:15]:          # cap to avoid long crawl times
                 if hash_route in visited_hashes:
                     continue
                 visited_hashes.add(hash_route)
@@ -498,7 +498,7 @@ class WebCrawler:
 
                     # Let the framework render + fire API calls
                     # (use fixed timeout — networkidle is unreliable for in-page hash changes)
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(1500)
 
                     # Extract forms from the new view
                     route_forms = self._extract_forms_playwright(page, full_url)

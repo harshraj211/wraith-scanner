@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 import datetime
+import html as html_mod
 import math
 from urllib.parse import urlparse
 from functools import partial
@@ -347,7 +348,13 @@ def _clean_evidence(evidence: str) -> str:
     if not evidence:
         return "N/A"
     clean = ' '.join(evidence.split())
+    clean = html_mod.escape(clean)
     return clean[:200] + "..." if len(clean) > 200 else clean
+
+
+def _esc(text) -> str:
+    """Escape text for safe insertion into ReportLab Paragraph XML."""
+    return html_mod.escape(str(text or 'N/A'))
 
 
 def _is_passive_finding(vuln_type: str) -> bool:
@@ -528,6 +535,7 @@ def generate_pdf_report(
     forms: List[Dict[str, Any]],
     findings: List[Dict[str, Any]],
     output_path: str,
+    scan_duration: float = 0.0,
 ) -> None:
     """Generate a multi-page PDF vulnerability report."""
 
@@ -551,6 +559,10 @@ def generate_pdf_report(
     story.append(Paragraph(f"<b>Target:</b> {target}", normal))
     story.append(Paragraph(f"<b>Scan Date:</b> {now}", normal))
     story.append(Paragraph(f"<b>Scanner Version:</b> {SCANNER_VERSION}", normal))
+    if scan_duration:
+        mins, secs = divmod(int(scan_duration), 60)
+        duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        story.append(Paragraph(f"<b>Scan Duration:</b> {duration_str}", normal))
     story.append(Spacer(1, 12))
 
     total_urls  = len(urls)
@@ -650,6 +662,120 @@ def generate_pdf_report(
 
     overall = _overall_risk(findings)
     story.append(Paragraph(f"<b>Overall Risk Rating:</b> {overall}", normal))
+    story.append(Spacer(1, 12))
+
+    # ── OWASP Top 10 Coverage Matrix ──────────────────────────────────────
+    story.append(Paragraph("<b>OWASP Top 10 — 2021 Coverage</b>", subheading))
+    story.append(Spacer(1, 4))
+    _OWASP_CATEGORIES = [
+        ("A01", "Broken Access Control",               ["idor", "open-redirect", "csrf", "path-traversal"]),
+        ("A02", "Cryptographic Failures",              ["crypto"]),
+        ("A03", "Injection",                            ["sqli", "xss", "command-injection", "cmdi", "xxe", "ssti"]),
+        ("A04", "Insecure Design",                     []),
+        ("A05", "Security Misconfiguration",           ["header"]),
+        ("A06", "Vulnerable Components",               ["vulnerable-component"]),
+        ("A07", "Auth Failures",                       []),
+        ("A08", "Software &amp; Data Integrity",      []),
+        ("A09", "Logging &amp; Monitoring Failures",  []),
+        ("A10", "SSRF",                                ["ssrf"]),
+    ]
+    owasp_rows = [["Category", "Status", "Findings"]]
+    for code, name, vuln_types in _OWASP_CATEGORIES:
+        matched = [f for f in findings
+                   if any(vt in f.get('type', '').lower() for vt in vuln_types)] if vuln_types else []
+        if matched:
+            status = "FOUND"
+        elif vuln_types:
+            status = "Tested — Clean"
+        else:
+            status = "Not Tested"
+        owasp_rows.append([f"{code}: {name}", status, str(len(matched))])
+    owasp_table = Table(owasp_rows, colWidths=[2.8*inch, 1.5*inch, 0.8*inch])
+    owasp_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.darkblue),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.white),
+        ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
+        ("FONTSIZE",   (0, 0), (-1, -1), 8),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(owasp_table)
+    story.append(Spacer(1, 12))
+
+    # ── Findings Summary Table ────────────────────────────────────────────
+    if findings:
+        story.append(Paragraph("<b>Findings Summary</b>", subheading))
+        story.append(Spacer(1, 4))
+        summary_rows = [["#", "Type", "Severity", "CVSS", "Parameter", "URL"]]
+        for idx, f in enumerate(findings, 1):
+            cvss_data = calculate_cvss(f.get('type', ''), f.get('confidence', 0))
+            sev = _severity_from_cvss(cvss_data['score'])
+            vtype = f.get('type', '')
+            param_short = (f.get('param', '') or '')[:15]
+            url_short = (urlparse(f.get('url', '')).path or '/')[:25]
+            summary_rows.append([
+                str(idx), vtype[:18], sev.upper()[:4],
+                str(cvss_data['score']), param_short, url_short,
+            ])
+        summary_table = Table(summary_rows,
+                             colWidths=[0.3*inch, 1.3*inch, 0.6*inch, 0.5*inch, 1.1*inch, 1.5*inch])
+        summary_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), colors.white),
+            ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE",   (0, 0), (-1, -1), 7),
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 12))
+
+    # Methodology & Scope
+    story.append(PageBreak())
+    story.append(Paragraph("Methodology &amp; Scope", heading))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "<b>Testing Approach:</b> This assessment was conducted using automated Dynamic Application "
+        "Security Testing (DAST). The scanner employs a Playwright-based headless Chromium browser to "
+        "crawl the target, including full JavaScript rendering for Single Page Applications (SPAs). "
+        "Network-level interception captures all fetch/XHR API endpoints, which are then tested "
+        "alongside traditional HTML forms.",
+        normal,
+    ))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "<b>Standards:</b> Findings are mapped to the OWASP Top 10 (2021), CWE, and scored using "
+        "CVSS v3.1. The assessment covers injection flaws (SQL, XSS, Command, SSTI, XXE), "
+        "access control (IDOR, CSRF, Open Redirect, Path Traversal), cryptographic failures, "
+        "security misconfigurations (HTTP headers, CORS), server-side request forgery (SSRF), "
+        "and vulnerable third-party components.",
+        normal,
+    ))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "<b>Limitations:</b> This automated scan does not replace manual penetration testing. "
+        "Business logic flaws, authentication bypass, and privilege escalation vulnerabilities "
+        "typically require human analysis. Rate limiting, WAF rules, or CAPTCHAs may reduce coverage.",
+        normal,
+    ))
+    story.append(Spacer(1, 12))
+
+    # Compliance Reference
+    story.append(Paragraph("<b>Compliance Reference</b>", subheading))
+    compliance_rows = [
+        ["Standard", "Relevant Controls"],
+        ["PCI DSS 4.0", "Req 6.2 (Secure Development), Req 6.4 (Public-Facing App Protection)"],
+        ["SOC 2", "CC6.1 (Logical Access), CC7.1 (System Monitoring)"],
+        ["ISO 27001:2022", "A.8.26 (Application Security), A.8.28 (Secure Coding)"],
+        ["NIST 800-53", "SA-11 (Developer Security Testing), SI-10 (Input Validation)"],
+        ["GDPR", "Art. 32 (Security of Processing), Art. 25 (Data Protection by Design)"],
+    ]
+    compliance_table = Table(compliance_rows, colWidths=[1.5*inch, 4*inch])
+    compliance_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.darkblue),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.white),
+        ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
+        ("FONTSIZE",   (0, 0), (-1, -1), 8),
+    ]))
+    story.append(compliance_table)
     story.append(Spacer(1, 12))
 
     # Attack scenarios
@@ -829,7 +955,7 @@ def generate_pdf_report(
         short_param = param_list[0] if param_list else param
         if len(param_list) > 1:
             short_param += f' +{len(param_list)-1}'
-        title    = f"{kind} — {short_param} ({url_path[:40]})"
+        title    = f"{kind} — {_esc(short_param)} ({_esc(url_path[:40])})"
         cvss_data = calculate_cvss(f.get('type', ''), f.get('confidence', 0))
 
         story.append(Paragraph(title, heading))
@@ -891,7 +1017,7 @@ def generate_pdf_report(
         story.append(Spacer(1, 6))
 
         def wrap(text, style=normal):
-            return Paragraph(str(text or 'N/A'), style)
+            return Paragraph(_esc(text), style)
 
         param_display = ', '.join(param_list[:6])
         if len(param_list) > 6:
@@ -942,12 +1068,12 @@ def generate_pdf_report(
 
         story.append(Paragraph("<b>Steps to Reproduce:</b>", normal))
         for step in _get_reproduction_steps(f.get('type', ''), f.get('url', ''), f.get('param', ''), f.get('payload', '')):
-            story.append(Paragraph(f"  {step}", normal))
+            story.append(Paragraph(f"  {_esc(step)}", normal))
         story.append(Spacer(1, 6))
 
         story.append(Paragraph("<b>Remediation:</b>", normal))
         for r in rems:
-            story.append(Paragraph(f"- {r}", normal))
+            story.append(Paragraph(f"- {_esc(r)}", normal))
         story.append(Spacer(1, 6))
 
         story.append(Paragraph("<b>References:</b>", normal))

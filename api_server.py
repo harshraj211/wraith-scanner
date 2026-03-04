@@ -4,11 +4,13 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import os
 import uuid
 import shutil
 import subprocess
 import json as _json
+import time
 from datetime import datetime
 
 from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
@@ -125,13 +127,16 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         if wp_findings:
             emit_progress(scan_id, f"WordPress detected! Found {len(wp_findings)} WP-specific issues", "warning")
 
+        scan_start_time = time.time()
+
         emit_progress(scan_id, "Phase 1: Crawling target...", "phase")
         crawler = WebCrawler(target_url, max_depth=depth, timeout=timeout)
         results = crawler.crawl()
         urls = results.get("urls", [])
         forms = results.get("forms", [])
 
-        emit_progress(scan_id, f"Found {len(urls)} URLs and {len(forms)} forms", "success")
+        crawl_duration = round(time.time() - scan_start_time, 1)
+        emit_progress(scan_id, f"Crawl complete in {crawl_duration}s: {len(urls)} URLs, {len(forms)} forms", "success")
 
         sqli = SQLiScanner(timeout=timeout, session=authenticated_session)
         xss = XSSScanner(timeout=timeout, session=authenticated_session)
@@ -147,15 +152,23 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         header_scan = HeaderScanner(timeout=timeout, session=authenticated_session)
         component_scan = ComponentScanner(timeout=timeout, session=authenticated_session)
 
+        # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
-        all_findings.extend(header_scan.scan_url(target_url))
-        all_findings.extend(component_scan.scan_url(target_url))
-        all_findings.extend(component_scan.scan_base_url(target_url))
-        all_findings.extend(crypto.scan_url(target_url))
+        emit_progress(scan_id, "Running passive checks (headers, components, crypto)...", "info")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_header    = pool.submit(header_scan.scan_url, target_url)
+            f_comp_url  = pool.submit(component_scan.scan_url, target_url)
+            f_comp_base = pool.submit(component_scan.scan_base_url, target_url)
+            f_crypto    = pool.submit(crypto.scan_url, target_url)
+        for fut in [f_header, f_comp_url, f_comp_base, f_crypto]:
+            try:
+                all_findings.extend(fut.result(timeout=30))
+            except Exception:
+                pass
 
         emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (multi-threaded)...", "phase")
         engine = AsyncScanEngine(
-            max_concurrent=30 if mode_config['aggressive'] else 15,
+            max_concurrent=50 if mode_config['aggressive'] else 25,
             timeout=timeout,
         )
         url_param_pairs = build_url_param_pairs(urls)
@@ -186,6 +199,8 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
 
         emit_progress(scan_id, "Phase 3: Generating report...", "phase")
 
+        scan_duration = round(time.time() - scan_start_time, 1)
+
         report_filename = f"scan_{scan_id}.pdf"
         report_path = os.path.join(REPORTS_DIR, report_filename)
         unique_findings = deduplicate_and_group(all_findings)
@@ -193,7 +208,8 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         flags_found = [f for f in unique_findings if f.get('type') == 'flag']
         vuln_findings = [f for f in unique_findings if f.get('type') != 'flag']
 
-        generate_pdf_report(target_url, urls, forms, vuln_findings, report_path)
+        generate_pdf_report(target_url, urls, forms, vuln_findings, report_path,
+                            scan_duration=scan_duration)
 
         active_scans[scan_id] = {
             'status': 'completed',

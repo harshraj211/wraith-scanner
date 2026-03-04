@@ -12,26 +12,23 @@ from typing import Any, Dict, List, Optional
 import requests
 
 
-# Command injection payloads for different OS
+# Command injection payloads — error-based first (fast), time-based last (slow)
 CMD_PAYLOADS = [
-    # Unix/Linux
-    "; sleep 5",
-    "| sleep 5",
-    "& sleep 5 &",
-    "`sleep 5`",
-    "$(sleep 5)",
-    "; ping -c 5 127.0.0.1",
-    
-    # Windows
-    "& timeout 5",
-    "| timeout 5",
-    "&& timeout 5",
-    
-    # Error-based detection
+    # Error-based detection (instant — no delay)
     "; ls",
     "| whoami",
     "& dir",
     "; cat /etc/passwd",
+
+    # Time-based (slower — only reached if error-based didn't fire)
+    # Unix/Linux
+    "; sleep 2",
+    "| sleep 2",
+    "$(sleep 2)",
+    
+    # Windows
+    "& timeout 2",
+    "| timeout 2",
 ]
 
 
@@ -115,7 +112,7 @@ class CMDIScanner:
                 
                 elapsed = time.time() - start
                 
-                if elapsed >= 4.0:
+                if elapsed >= 1.5:
                     print(f"Time-based command injection detected on {param_name} (elapsed={elapsed:.2f}s)")
                     return {
                         "vulnerable": True,
