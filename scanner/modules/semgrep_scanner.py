@@ -1,18 +1,16 @@
 """
 semgrep_scanner.py — AST-based SAST using Semgrep engine
 
-Replaces sast_scanner.py entirely.
+Replaces sast_scanner.py entirely for code flow analysis.
 Uses Semgrep's OCaml AST parser — understands variable scope, cross-file
 imports, taint flows, and ignores comments natively.
 
-Rulesets used:
-  - p/default          — general security issues
-  - p/owasp-top-ten    — OWASP A01-A10
-  - p/secrets          — hardcoded credentials, API keys
-  - p/javascript       — JS/TS specific issues
-  - p/python           — Python specific issues
-  - p/php              — PHP specific issues
-  - rules/             — your custom rules (taint flows, CTF patterns)
+FIX: _build_rulesets() was returning ["auto"] which silently returns 0
+     results when not logged into semgrep.dev. Now:
+       1. Uses local custom rules (always works, no login needed)
+       2. Uses p/ registry rulesets only if logged in
+       3. Falls back to r/ open registry if not logged in
+       4. Falls back to --config auto as last resort
 """
 from __future__ import annotations
 
@@ -20,23 +18,39 @@ import os
 import json
 import subprocess
 import shutil
+import sys
 from typing import Any, Dict, List, Optional
 
 
+def _find_semgrep():
+    scripts_dir = os.path.dirname(sys.executable)
+    for candidate in [
+        os.path.join(scripts_dir, "semgrep.exe"),
+        os.path.join(scripts_dir, "semgrep"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("semgrep")
+
+
+SEMGREP_BIN = _find_semgrep()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Semgrep ruleset config
+# Ruleset config
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Core rulesets — always applied
+# Requires semgrep login (semgrep.dev registry)
 BASE_RULESETS = [
     "p/default",
     "p/owasp-top-ten",
     "p/secrets",
 ]
 
-# Language-specific rulesets applied based on detected tech stack
+# Language-specific rulesets — also require login
 LANG_RULESETS = {
     "javascript": ["p/javascript", "p/nodejs", "p/react", "p/express"],
+    "typescript": ["p/typescript", "p/nodejs"],
     "python":     ["p/python", "p/django", "p/flask"],
     "php":        ["p/php"],
     "java":       ["p/java"],
@@ -44,14 +58,30 @@ LANG_RULESETS = {
     "go":         ["p/golang"],
 }
 
-# Map Semgrep severity → your scanner's confidence score
+# Open registry rulesets — NO login required (r/ prefix)
+# Used as fallback when not authenticated
+OPEN_RULESETS = {
+    "javascript": ["r/javascript", "r/nodejs"],
+    "typescript": ["r/typescript", "r/nodejs"],
+    "python":     ["r/python"],
+    "php":        ["r/php"],
+    "java":       ["r/java"],
+    "ruby":       ["r/ruby"],
+    "go":         ["r/go"],
+}
+
+# Open registry base rules — work without login
+OPEN_BASE_RULESETS = [
+    "r/generic.secrets",
+    "r/generic.ci",
+]
+
 SEVERITY_CONFIDENCE = {
     "ERROR":   92,
     "WARNING": 75,
     "INFO":    55,
 }
 
-# Map Semgrep check_id prefixes → your vuln type format
 RULE_TYPE_MAP = {
     "sql":          "sqli",
     "sqli":         "sqli",
@@ -88,7 +118,7 @@ RULE_TYPE_MAP = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Custom YAML rules — written once, no regex, Semgrep handles AST
+# Custom YAML rules — local, no login needed
 # ─────────────────────────────────────────────────────────────────────────────
 
 CUSTOM_RULES = """
@@ -278,6 +308,50 @@ rules:
       owasp: "A02:2021"
       cwe: "CWE-338"
       category: crypto
+
+  # ── eval() with any input ───────────────────────────────────────────────────
+  - id: custom-eval-usage
+    pattern: eval($X)
+    message: >
+      eval() is dangerous and should never be used with untrusted input.
+      It can lead to remote code execution. Refactor to avoid eval entirely.
+    languages: [javascript, python]
+    severity: ERROR
+    metadata:
+      owasp: "A03:2021"
+      cwe: "CWE-94"
+      category: rce
+
+  # ── Express: res.redirect with user input (Open Redirect) ──────────────────
+  - id: custom-express-open-redirect
+    pattern: res.redirect(<... req.$OBJ.$FIELD ...>)
+    message: >
+      Open Redirect: user-controlled value passed to res.redirect().
+      Validate against a whitelist of allowed redirect destinations.
+    languages: [javascript]
+    severity: WARNING
+    metadata:
+      owasp: "A01:2021"
+      cwe: "CWE-601"
+      category: redirect
+
+  # ── Express: axios/fetch with user input (SSRF) ─────────────────────────────
+  - id: custom-express-ssrf
+    patterns:
+      - pattern-either:
+          - pattern: axios.get(<... req.$OBJ.$FIELD ...>)
+          - pattern: axios.post(<... req.$OBJ.$FIELD ...>)
+          - pattern: fetch(<... req.$OBJ.$FIELD ...>)
+          - pattern: http.get(<... req.$OBJ.$FIELD ...>)
+    message: >
+      SSRF: user-controlled URL passed to an HTTP client.
+      Validate and whitelist allowed destinations before fetching.
+    languages: [javascript]
+    severity: ERROR
+    metadata:
+      owasp: "A10:2021"
+      cwe: "CWE-918"
+      category: ssrf
 """
 
 
@@ -289,32 +363,71 @@ class SemgrepScanner:
     """
     AST-based SAST scanner powered by Semgrep.
 
-    Replaces sast_scanner.py. No regex taint tracking.
-    Semgrep's OCaml engine handles AST parsing, variable scoping,
-    comment stripping, and cross-pattern matching natively.
+    Ruleset priority:
+      1. Local custom rules  (always — no login needed)
+      2. p/ registry         (if logged into semgrep.dev)
+      3. r/ open registry    (fallback — no login needed)
+      4. --config auto       (last resort)
     """
 
     def __init__(self):
         self.findings: List[Dict[str, Any]] = []
         self._rules_path: Optional[str]     = None
+        self._semgrep_bin: Optional[str]    = None
+        self._logged_in: Optional[bool]     = None  # cached
 
     def check_semgrep_installed(self) -> bool:
-        """Check if semgrep is available in PATH."""
-        if shutil.which("semgrep"):
+        bin_path = SEMGREP_BIN or _find_semgrep()
+        if bin_path and os.path.isfile(bin_path):
+            self._semgrep_bin = bin_path
+            print(f"[✓] Semgrep found: {bin_path}")
             return True
-        print("[✗] Semgrep not found. Install it:")
-        print("    pip install semgrep")
-        print("    or: brew install semgrep")
+        print(f"[✗] Semgrep not found in PATH or {os.path.dirname(sys.executable)}")
         return False
+
+    def _is_semgrep_logged_in(self) -> bool:
+        """
+        Check if the user is authenticated to semgrep.dev.
+        Cached after first call.
+        p/ rulesets require login — r/ rulesets do not.
+        """
+        if self._logged_in is not None:
+            return self._logged_in
+
+        try:
+            result = subprocess.run(
+                [self._semgrep_bin, "whoami"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            # Logged in: exit 0 and output contains a username/email
+            # Not logged in: output contains "anonymous" or "not logged in"
+            stdout = result.stdout.lower()
+            logged_in = (
+                result.returncode == 0
+                and "anonymous" not in stdout
+                and "not logged" not in stdout
+                and len(stdout.strip()) > 0
+            )
+            self._logged_in = logged_in
+            if logged_in:
+                print(f"[✓] Semgrep authenticated — p/ rulesets available")
+            else:
+                print(f"[!] Semgrep not logged in — using r/ open rulesets")
+                print(f"    For full coverage: semgrep login")
+        except Exception:
+            self._logged_in = False
+
+        return self._logged_in
 
     def scan_repo(self, repo_path: str, tech_stack: Optional[Dict] = None) -> List[Dict[str, Any]]:
         """
-        Run Semgrep against the cloned repository.
+        Run Semgrep against a cloned repository.
 
         Args:
-            repo_path:  Path to cloned repo (from GitHubManager)
+            repo_path:  Path to cloned repo
             tech_stack: Optional dict from detect_tech_stack()
-                        Used to select language-specific rulesets
 
         Returns:
             List of findings in scanner's unified format
@@ -328,92 +441,139 @@ class SemgrepScanner:
             print(f"[✗] Repo path does not exist: {repo_path}")
             return []
 
-        # Write custom rules to a temp file
+        # Write custom rules to temp file in repo dir
         self._rules_path = self._write_custom_rules(repo_path)
 
         # Build ruleset list
         rulesets = self._build_rulesets(tech_stack)
-        print(f"[*] Semgrep rulesets: {', '.join(rulesets)}")
+
+        if rulesets:
+            print(f"[*] Semgrep rulesets ({len(rulesets)}): {', '.join(str(r) for r in rulesets)}")
+        else:
+            print(f"[*] Semgrep rulesets: --config auto (fallback)")
 
         # Run Semgrep
         findings_raw = self._run_semgrep(repo_path, rulesets)
 
-        # Parse results into unified format
+        # Parse into unified format
         self._parse_results(findings_raw, repo_path)
 
-        # Cleanup temp rules file
+        # Cleanup
         self._cleanup_rules()
 
         print(f"[✓] Semgrep complete: {len(self.findings)} findings")
         return self.findings
 
-    def _build_rulesets(self, tech_stack: Optional[Dict]) -> List[str]:
-        """Select rulesets based on detected tech stack."""
-        rulesets = list(BASE_RULESETS)
+    def _build_rulesets(self, tech_stack: Optional[Dict]) -> Optional[List[str]]:
+        """
+        Build the list of --config arguments for semgrep.
 
-        if tech_stack:
-            lang = tech_stack.get("primary_language", "unknown")
-            for fw_ruleset in LANG_RULESETS.get(lang, []):
-                rulesets.append(fw_ruleset)
+        Priority:
+          1. Local custom rules file (always included, no login)
+          2. p/ registry rules      (only if logged into semgrep.dev)
+          3. r/ open registry rules (fallback if not logged in)
 
-            # Add framework-specific rulesets
-            for fw in tech_stack.get("frameworks", []):
-                if fw in ("express",):
-                    if "p/nodejs" not in rulesets:
-                        rulesets.append("p/nodejs")
-                if fw in ("django", "flask"):
-                    if "p/python" not in rulesets:
-                        rulesets.append("p/python")
+        Returns None if no rulesets available — caller uses --config auto.
+        """
+        rulesets = []
+        lang = (tech_stack or {}).get("primary_language", "").lower() if tech_stack else ""
 
-        # Always include custom rules
+        # 1. Local custom rules — always works
         if self._rules_path and os.path.exists(self._rules_path):
             rulesets.append(self._rules_path)
+            print(f"[*] Custom rules: {self._rules_path}")
 
-        return rulesets
+        if self._is_semgrep_logged_in():
+            # 2a. Authenticated — use full p/ registry
+            rulesets.extend(BASE_RULESETS)
+            lang_specific = LANG_RULESETS.get(lang, [])
+            if lang_specific:
+                print(f"[*] Language-specific rulesets for '{lang}': {lang_specific}")
+                rulesets.extend(lang_specific)
+        else:
+            # 2b. Not authenticated — use r/ open registry (no login required)
+            rulesets.extend(OPEN_BASE_RULESETS)
+            lang_specific = OPEN_RULESETS.get(lang, [])
+            if lang_specific:
+                print(f"[*] Open registry rulesets for '{lang}': {lang_specific}")
+                rulesets.extend(lang_specific)
+            elif not rulesets:
+                # No language match and no custom rules — return None → use auto
+                print(f"[!] No language-specific open rulesets for '{lang}' — falling back to auto")
+                return None
 
-    def _run_semgrep(self, repo_path: str, rulesets: List[str]) -> Dict:
+        return rulesets if rulesets else None
+
+    def _run_semgrep(self, repo_path: str, rulesets: Optional[List[str]]) -> Dict:
         """Execute semgrep CLI and return parsed JSON output."""
 
         # Build --config flags
-        config_flags = []
-        for r in rulesets:
-            config_flags.extend(["--config", r])
+        if not rulesets:
+            # Last resort fallback — auto may need login but worth trying
+            config_flags = ["--config", "auto"]
+            print("[!] No rulesets available — trying --config auto as last resort")
+        else:
+            config_flags = []
+            for r in rulesets:
+                config_flags.extend(["--config", r])
 
         command = [
-            "semgrep", "scan",
+            self._semgrep_bin, "scan",
             *config_flags,
-            "--json",               # Machine-readable output
-            "--quiet",              # Suppress progress logs
-            "--no-git-ignore",      # Scan all files even if gitignored
-            "--max-target-bytes", "5000000",  # Skip files > 5MB
-            "--timeout", "30",      # Per-file timeout
+            "--json",
+            "--quiet",
+            "--no-git-ignore",
+            "--max-target-bytes", "5000000",
+            "--timeout", "30",
             repo_path,
         ]
 
-        print(f"[*] Running: semgrep scan --config ... {repo_path}")
+        print(f"[*] Running semgrep scan on: {repo_path}")
 
         try:
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                check=False,   # Semgrep exits non-zero when findings exist
-                timeout=300,   # 5 min total timeout
+                check=False,   # Semgrep exits non-zero when it finds issues
+                timeout=300,
             )
 
-            if not result.stdout.strip():
-                if result.stderr:
-                    print(f"[!] Semgrep stderr: {result.stderr[:500]}")
+            # Always try stdout first
+            raw = result.stdout.strip()
+
+            if not raw:
+                stderr = result.stderr.strip()
+                if stderr:
+                    print(f"[!] Semgrep stderr: {stderr[:500]}")
+                    # Check for common auth errors
+                    if "api_token" in stderr.lower() or "login" in stderr.lower():
+                        print("[!] Semgrep authentication required for these rulesets.")
+                        print("    Run: semgrep login")
+                    elif "no rules" in stderr.lower():
+                        print("[!] No rules matched — check ruleset names")
                 return {"results": [], "errors": []}
 
-            return json.loads(result.stdout)
+            data = json.loads(raw)
+
+            # Log any semgrep-level errors
+            errors = data.get("errors", [])
+            if errors:
+                for err in errors[:3]:
+                    msg = err.get("message", str(err))[:150]
+                    print(f"[!] Semgrep error: {msg}")
+
+            total = len(data.get("results", []))
+            print(f"[*] Semgrep raw results: {total}")
+            return data
 
         except subprocess.TimeoutExpired:
             print("[✗] Semgrep timed out after 5 minutes")
             return {"results": [], "errors": []}
         except json.JSONDecodeError as e:
-            print(f"[✗] Failed to parse Semgrep output: {e}")
-            print(f"    Raw output (first 500 chars): {result.stdout[:500]}")
+            print(f"[✗] Failed to parse Semgrep JSON: {e}")
+            if 'result' in dir() and result.stdout:
+                print(f"    Raw output (first 300 chars): {result.stdout[:300]}")
             return {"results": [], "errors": []}
         except Exception as e:
             print(f"[✗] Semgrep execution error: {e}")
@@ -423,17 +583,12 @@ class SemgrepScanner:
         """Map Semgrep JSON schema → scanner's unified finding format."""
 
         results = semgrep_data.get("results", [])
-        errors  = semgrep_data.get("errors", [])
-
-        if errors:
-            for err in errors[:3]:
-                print(f"[!] Semgrep error: {err.get('message', str(err))[:100]}")
 
         for issue in results:
             try:
-                filepath = issue.get("path", "")
-                rel_path = os.path.relpath(filepath, repo_path) \
-                           if os.path.isabs(filepath) else filepath
+                filepath   = issue.get("path", "")
+                rel_path   = os.path.relpath(filepath, repo_path) \
+                             if os.path.isabs(filepath) else filepath
 
                 start_line = issue.get("start", {}).get("line", 0)
                 extra      = issue.get("extra", {})
@@ -443,50 +598,46 @@ class SemgrepScanner:
                 message    = extra.get("message", "Security issue detected")
                 code_line  = extra.get("lines", "").strip()
 
-                # Extract OWASP / CWE from metadata
-                owasp = self._extract_list_or_str(metadata.get("owasp"), "Unknown OWASP")
-                cwe   = self._extract_list_or_str(metadata.get("cwe"),   "Unknown CWE")
+                owasp = self._extract_list_or_str(metadata.get("owasp"), "")
+                cwe   = self._extract_list_or_str(metadata.get("cwe"),   "")
 
-                # Map check_id → vuln type
                 vuln_type = self._map_rule_to_type(check_id, metadata)
                 category  = metadata.get("category", "code")
 
-                # Extract language
                 lang = self._extract_list_or_str(
                     metadata.get("technology") or metadata.get("language"),
                     self._lang_from_path(rel_path)
                 )
 
-                # Build remediation from message (Semgrep messages ARE the remediation)
                 remediation = message
                 fix = extra.get("fix")
                 if fix:
                     remediation += f"\n\nSuggested fix:\n  {fix}"
 
-                finding = {
-                    "type":        f"sast-{vuln_type}",
+                self.findings.append({
+                    "type":        vuln_type,
                     "title":       message.split("\n")[0][:120],
+                    "category":    category,
                     "file":        rel_path,
                     "line":        start_line,
-                    "param":       check_id.split(".")[-1],  # Last segment of rule ID
+                    "code":        code_line[:200],
+                    "message":     message,
+                    "param":       check_id.split(".")[-1],
                     "payload":     "N/A (AST analysis)",
-                    "evidence": (
-                        f"{rel_path}:{start_line}\n"
-                        f"  Rule: {check_id}\n"
-                        f"  Code: {code_line[:150]}"
+                    "evidence":    (
+                        f"Rule: {check_id}\n"
+                        f"Code: {code_line[:150]}"
                     ),
                     "confidence":  SEVERITY_CONFIDENCE.get(severity, 70),
+                    "severity":    {"ERROR": "High", "WARNING": "Medium", "INFO": "Low"}.get(severity, "Medium"),
                     "url":         f"sast://{rel_path}:{start_line}",
                     "owasp":       owasp,
                     "cwe":         cwe,
-                    "category":    category,
                     "language":    lang,
                     "remediation": remediation,
-                    "scan_type":   "SAST (Semgrep)",
+                    "source":      "semgrep",   # used by _is_sast_finding() in pdf_generator.py
                     "rule_id":     check_id,
-                }
-
-                self.findings.append(finding)
+                })
 
             except Exception as e:
                 print(f"[!] Failed to parse finding: {e}")
@@ -494,20 +645,19 @@ class SemgrepScanner:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _write_custom_rules(self, repo_path: str) -> str:
+    def _write_custom_rules(self, repo_path: str) -> Optional[str]:
         """Write custom YAML rules to a temp file in the repo dir."""
         rules_path = os.path.join(repo_path, ".vulnscan_rules.yaml")
         try:
             with open(rules_path, "w", encoding="utf-8") as f:
                 f.write(CUSTOM_RULES)
             print(f"[*] Custom rules written: {rules_path}")
+            return rules_path
         except Exception as e:
             print(f"[!] Could not write custom rules: {e}")
-            rules_path = None
-        return rules_path
+            return None
 
     def _cleanup_rules(self) -> None:
-        """Remove temp rules file."""
         if self._rules_path and os.path.exists(self._rules_path):
             try:
                 os.remove(self._rules_path)
@@ -515,20 +665,16 @@ class SemgrepScanner:
                 pass
 
     def _map_rule_to_type(self, check_id: str, metadata: Dict) -> str:
-        """Map Semgrep rule ID → scanner vuln type string."""
         check_lower = check_id.lower()
 
-        # Check metadata category first (most accurate)
         meta_cat = metadata.get("category", "").lower()
         if meta_cat in RULE_TYPE_MAP.values():
             return meta_cat
 
-        # Match against rule ID keywords
         for keyword, vuln_type in RULE_TYPE_MAP.items():
             if keyword in check_lower:
                 return vuln_type
 
-        # Check vulnerability class from metadata
         vuln_class = metadata.get("vulnerability_class", [])
         if isinstance(vuln_class, list) and vuln_class:
             vc = vuln_class[0].lower()
@@ -539,7 +685,6 @@ class SemgrepScanner:
         return "code"
 
     def _extract_list_or_str(self, value: Any, default: str) -> str:
-        """Handle Semgrep metadata that can be a list or a string."""
         if isinstance(value, list):
             return value[0] if value else default
         if isinstance(value, str) and value:
@@ -547,9 +692,15 @@ class SemgrepScanner:
         return default
 
     def _lang_from_path(self, filepath: str) -> str:
-        """Detect language from file extension as fallback."""
         return {
-            ".py": "python", ".js": "javascript", ".ts": "javascript",
-            ".jsx": "javascript", ".tsx": "javascript", ".php": "php",
-            ".java": "java", ".rb": "ruby", ".go": "go", ".cs": "csharp",
+            ".py":   "python",
+            ".js":   "javascript",
+            ".ts":   "javascript",
+            ".jsx":  "javascript",
+            ".tsx":  "javascript",
+            ".php":  "php",
+            ".java": "java",
+            ".rb":   "ruby",
+            ".go":   "go",
+            ".cs":   "csharp",
         }.get(os.path.splitext(filepath)[1].lower(), "unknown")

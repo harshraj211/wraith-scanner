@@ -458,6 +458,14 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"XXE scanner failed on form {action}: {exc}")
 
+    # After the scanning loops complete, run stored XSS check
+    stored_xss = xss.check_stored(urls, session=session)
+    all_findings.extend(stored_xss)
+
+    # After all scan_url / scan_form calls — collect blind SSRF callbacks
+    blind_ssrf = ssrf.collect_oob_findings()
+    all_findings.extend(blind_ssrf)
+
     # Deduplicate and sort
     unique = dedupe_findings(all_findings)
     unique.sort(key=severity_sort_key)

