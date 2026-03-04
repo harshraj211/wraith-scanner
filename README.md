@@ -1,6 +1,3 @@
-This README is designed to present your scanner as a mature, production-ready tool. It emphasizes the specific architectural upgrades we've implemented (like the true asynchronous engine and SPA reconnaissance) which set it apart from basic student projects.
-
-Markdown
 <div align="center">
 
 # 🛡️ Vibe - Web Vulnerability Scanner
@@ -181,3 +178,4 @@ The developer assumes no liability and is not responsible for any misuse or dama
 
 👨‍💻 Author
 Harsh Raj Cyber Security Student
+
