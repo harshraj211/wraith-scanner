@@ -318,7 +318,138 @@ class SSRFScanner:
         return findings
 
     # ------------------------------------------------------------------
-    # Detection method 1: In-band
+    # Async methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        ssrf_params = self._identify_ssrf_params(params)
+        for param in ssrf_params:
+            result = await self._inband_async(url, param, params, "GET", http)
+            if result:
+                findings.append(result)
+                continue
+            if self._oob.available:
+                await self._inject_oob_async(url, param, params, "GET", http)
+        result = await self._header_injection_async(url, http)
+        if result:
+            findings.append(result)
+        return findings
+
+    async def scan_form_async(self, form: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        action  = form.get("action", "")
+        method  = (form.get("method") or "GET").upper()
+        inputs  = form.get("inputs", [])
+        if not action or not inputs:
+            return findings
+        baseline = {inp["name"]: "" for inp in inputs if inp.get("name")}
+        ssrf_params = self._identify_ssrf_params(baseline)
+        for param in ssrf_params:
+            result = await self._inband_async(action, param, baseline, method, http)
+            if result:
+                findings.append(result)
+                continue
+            if self._oob.available:
+                await self._inject_oob_async(action, param, baseline, method, http)
+        result = await self._json_body_ssrf_async(action, method, http)
+        if result:
+            findings.append(result)
+        return findings
+
+    async def _inband_async(self, url, param, params, method, http):
+        for payload_url, label in SSRF_TARGETS[:8]:
+            data = {**params, param: payload_url}
+            if method.upper() == "GET":
+                resp = await http.get(url, params=data)
+            else:
+                resp = await http.post(url, data=data)
+            if not resp:
+                continue
+            text   = resp.text
+            status = resp.status_code
+            indicator = self._check_indicators(text)
+            if indicator:
+                return {
+                    "vulnerable": True, "type": "ssrf",
+                    "param": param, "payload": payload_url,
+                    "evidence": f"Response contains: {indicator}",
+                    "confidence": 92, "url": url, "target": label,
+                }
+            if status == 200 and self._heuristic_match(text):
+                return {
+                    "vulnerable": True, "type": "ssrf",
+                    "param": param, "payload": payload_url,
+                    "evidence": "Heuristic: status 200 with internal content keywords",
+                    "confidence": 60, "url": url, "target": label,
+                }
+        return None
+
+    async def _inject_oob_async(self, url, param, params, method, http):
+        oob_url = self._oob.get_payload_url(tag=param)
+        if not oob_url:
+            return
+        data = {**params, param: oob_url}
+        if method.upper() == "GET":
+            await http.get(url, params=data)
+        else:
+            await http.post(url, data=data)
+        self._oob_injections[oob_url] = {"url": url, "param": param}
+
+    async def _json_body_ssrf_async(self, url, method, http):
+        if method.upper() not in ("POST", "PUT", "PATCH"):
+            method = "POST"
+        for key in JSON_URL_KEYS[:5]:
+            for payload_url, label in SSRF_TARGETS[:3]:
+                body = {key: payload_url}
+                resp = await http.request(
+                    method, url, json=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                if resp:
+                    indicator = self._check_indicators(resp.text)
+                    if indicator:
+                        return {
+                            "vulnerable": True, "type": "ssrf",
+                            "param": f"json:{key}", "payload": payload_url,
+                            "evidence": f"Response contains: {indicator}",
+                            "confidence": 90, "url": url,
+                            "target": label, "method": "json-body",
+                        }
+                if self._oob.available:
+                    oob_url = self._oob.get_payload_url(tag=key)
+                    if oob_url:
+                        await http.request(
+                            method, url, json={key: oob_url},
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self._oob_injections[oob_url] = {"url": url, "param": f"json:{key}"}
+        return None
+
+    async def _header_injection_async(self, url, http):
+        for header_name, template in SSRF_HEADERS[:4]:
+            for payload_url, label in SSRF_TARGETS[:3]:
+                injected_value = template.replace("{PAYLOAD}", payload_url)
+                resp = await http.get(url, headers={header_name: injected_value})
+                if resp:
+                    indicator = self._check_indicators(resp.text)
+                    if indicator:
+                        return {
+                            "vulnerable": True, "type": "ssrf",
+                            "param": f"header:{header_name}", "payload": payload_url,
+                            "evidence": f"Response contains: {indicator}",
+                            "confidence": 88, "url": url,
+                            "target": label, "method": "header-injection",
+                        }
+                if self._oob.available:
+                    oob_url = self._oob.get_payload_url(tag=header_name)
+                    if oob_url:
+                        await http.get(url, headers={header_name: oob_url})
+                        self._oob_injections[oob_url] = {"url": url, "param": f"header:{header_name}"}
+        return None
+
+    # ------------------------------------------------------------------
+    # Sync detection methods (kept for standalone / fallback use)
     # ------------------------------------------------------------------
 
     def _inband(self, url: str, param: str,

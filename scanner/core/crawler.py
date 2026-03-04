@@ -1,21 +1,17 @@
 """
-crawler.py — Web Crawler with Playwright SPA support
-=====================================================
+crawler.py — Web Crawler with async Playwright SPA support
+==========================================================
 
-Fixes vs previous version:
-  1. deque instead of list for BFS queue — popleft() is O(1) vs O(n)
-     for list.pop(0). At 10,000 URLs this was causing severe CPU lag.
-  2. wait_until="domcontentloaded" instead of "networkidle"
-     networkidle waits for 500ms of silence — never fires on SPAs with
-     websockets, long-polling, analytics, or any continuous background
-     traffic. domcontentloaded fires when DOM is parsed — immediately usable.
-  3. Hard page timeout of 15s instead of relying on networkidle.
-  4. Playwright browser pool reuse (shares pool with XSSScanner if available).
-  5. XHR/Fetch interception for API endpoint discovery.
-  6. SPA route detection (Next.js, React Router, Vue Router).
+Architecture (v3 — async_playwright):
+  - async_playwright for all JS-rendered pages (non-blocking I/O)
+  - asyncio.run() wraps the async crawl inside the sync crawl() API
+  - BFS queue with domcontentloaded (never hangs on SPAs)
+  - Full fetch/XHR interception for API endpoint discovery
+  - SPA hash route exploration for Angular/Vue apps
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -63,46 +59,43 @@ class WebCrawler:
         """
         Crawl the target. Returns {"urls": [...], "forms": [...]}.
 
-        Tries Playwright first (JS-rendered SPA support).
+        Tries async Playwright first (JS-rendered SPA support).
         Falls back to BeautifulSoup (static HTML) if Playwright unavailable.
         """
         if self._playwright_available():
-            print("[Crawler] Using Playwright engine (JS rendering enabled)")
-            return self._crawl_playwright()
+            print("[Crawler] Using async Playwright engine (JS rendering enabled)")
+            return asyncio.run(self._crawl_playwright_async())
         else:
             print("[Crawler] Playwright not available — using BeautifulSoup (static only)")
             return self._crawl_bs4()
 
     # ------------------------------------------------------------------
-    # Playwright crawler
+    # Async Playwright crawler
     # ------------------------------------------------------------------
 
-    def _crawl_playwright(self) -> Dict[str, Any]:
-        from playwright.sync_api import sync_playwright
+    async def _crawl_playwright_async(self) -> Dict[str, Any]:
+        from playwright.async_api import async_playwright
 
         visited: Set[str]       = set()
         all_forms: List[Dict]   = []
         network_urls: Set[str]  = set()
-        # NEW: capture full fetch/XHR requests (method + body + URL)
         api_requests: List[Dict] = []
-        api_seen: Set[str]       = set()   # dedup key: "METHOD url_no_query"
+        api_seen: Set[str]       = set()
 
-        # BFS queue: (url, depth) — deque for O(1) popleft
         queue: deque = deque()
         queue.append((self.base_url, 0))
 
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
-            context = browser.new_context(
+            context = await browser.new_context(
                 ignore_https_errors=True,
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
 
-            # Sync session cookies to Playwright
-            self._sync_cookies(context)
+            await self._sync_cookies_async(context)
 
             while queue:
                 url, depth = queue.popleft()
@@ -120,23 +113,16 @@ class WebCrawler:
                 page_forms: List[Dict] = []
 
                 try:
-                    page = context.new_page()
+                    page = await context.new_page()
 
-                    # ── Network interception: capture ALL fetch/XHR ────────
                     def handle_request(req):
                         req_url = req.url
                         if not self._same_domain(req_url):
                             return
                         if self._skip_url(req_url):
                             return
-
-                        # Strip query for URL collection
                         base_req_url = req_url.split("?")[0]
-
-                        # Always add to network URLs for scanning
                         network_urls.add(base_req_url)
-
-                        # Capture fetch/XHR as injectable API endpoints
                         res_type = req.resource_type
                         if res_type in ("fetch", "xhr"):
                             dedup_key = f"{req.method} {base_req_url}"
@@ -162,70 +148,74 @@ class WebCrawler:
 
                     page.on("request", handle_request)
 
-                    # Navigate with domcontentloaded first (never hangs)
+                    # ── Navigation: load the page ──────────────────────
                     try:
-                        page.goto(url, wait_until=NAV_WAIT, timeout=PAGE_TIMEOUT_MS)
+                        await page.goto(url, wait_until=NAV_WAIT, timeout=PAGE_TIMEOUT_MS)
                     except Exception as e:
                         print(f"[Crawler] Navigation timeout/error for {url}: {e}")
 
-                    # ── Post-navigation: wait for SPA hydration + API calls ──
-                    # Use a short networkidle wait with a tight timeout cap.
-                    # This catches the initial burst of fetch() calls SPAs make.
+                    # ── SPA hydration: wait for framework to bootstrap ─
+                    # 1. Wait for network to calm (bundles downloading)
                     try:
-                        page.wait_for_load_state("networkidle", timeout=5000)
+                        await page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
-                        pass  # Timeout OK — SPAs with websockets/analytics won't idle
+                        pass  # Timeout OK — SPAs with websockets never idle
 
-                    # ── Simulate user interaction to uncover hidden content ──
-                    self._simulate_user_interaction(page)
+                    # 2. Wait for framework to render interactive elements
+                    #    SPAs start as empty <app-root></app-root> shells —
+                    #    we need to wait for actual content to appear.
+                    try:
+                        await page.wait_for_selector(
+                            'a[href], input, button, [role="link"], [role="button"], '
+                            'form, textarea, select, [ng-reflect-router-link]',
+                            timeout=8000,
+                        )
+                    except Exception:
+                        pass  # Page might genuinely have none
 
-                    # Extract links from live DOM (after hydration)
-                    page_urls = self._extract_links_playwright(page, url)
+                    # 3. Post-render stabilization — let Angular/React/Vue
+                    #    finish any deferred rendering, lazy-loaded modules,
+                    #    and background API calls after initial bootstrap.
+                    await page.wait_for_timeout(2000)
 
-                    # Extract forms + SPA floating inputs
-                    page_forms = self._extract_forms_playwright(page, url)
+                    # ── User interaction: uncover hidden content ───────
+                    await self._simulate_user_interaction_async(page)
 
-                    # Discover framework-specific routes
-                    page_urls.update(self._extract_spa_routes(page))
+                    page_urls = await self._extract_links_async(page, url)
+                    page_forms = await self._extract_forms_async(page, url)
+                    page_urls.update(await self._extract_spa_routes_async(page))
 
-                    # ── Explore SPA hash routes within the same page ──
-                    # Only on the first (non-hash) page load to avoid
-                    # re-exploring from BFS-visited hash pages.
                     if "#/" not in url:
-                        hash_urls, hash_forms = self._explore_spa_hash_routes(
+                        hash_urls, hash_forms = await self._explore_hash_routes_async(
                             page, url, api_requests, api_seen, network_urls,
                         )
-                        visited.update(hash_urls)      # don't re-visit via BFS
+                        visited.update(hash_urls)
                         page_forms.extend(hash_forms)
-                        network_urls.update(hash_urls)  # include in final URL list
+                        network_urls.update(hash_urls)
 
                 except Exception as e:
                     print(f"[Crawler] Error on {url}: {e}")
                 finally:
                     if page:
                         try:
-                            page.close()
+                            await page.close()
                         except Exception:
                             pass
 
                 all_forms.extend(page_forms)
-                # Only queue non-hash URLs into BFS — hash routes are
-                # fully explored inside _explore_spa_hash_routes.
                 for link in page_urls:
                     if "#/" in link:
-                        continue          # handled by _explore_spa_hash_routes
+                        continue
                     if link not in visited:
                         queue.append((link, depth + 1))
 
-            context.close()
-            browser.close()
+            await context.close()
+            await browser.close()
 
-        # Seed with robots.txt and sitemap
         extra = set()
         extra.update(self._fetch_robots_txt())
         extra.update(self._fetch_sitemap())
 
-        # ── Convert captured API requests into synthetic forms ─────────
         synthetic_forms = self._api_requests_to_forms(api_requests)
         all_forms.extend(synthetic_forms)
         if synthetic_forms:
@@ -239,10 +229,14 @@ class WebCrawler:
         print(f"[Crawler] Complete: {len(all_urls)} URLs, {len(forms)} forms")
         return {"urls": all_urls, "forms": forms}
 
-    def _extract_links_playwright(self, page: Any, base_url: str) -> Set[str]:
+    # ------------------------------------------------------------------
+    # Async Playwright helpers
+    # ------------------------------------------------------------------
+
+    async def _extract_links_async(self, page, base_url: str) -> Set[str]:
         links: Set[str] = set()
         try:
-            hrefs = page.evaluate("""
+            hrefs = await page.evaluate("""
                 () => Array.from(document.querySelectorAll('a[href]'))
                          .map(a => a.href)
             """)
@@ -254,12 +248,11 @@ class WebCrawler:
             pass
         return links
 
-    def _extract_forms_playwright(self, page: Any, base_url: str) -> List[Dict]:
+    async def _extract_forms_async(self, page, base_url: str) -> List[Dict]:
         forms = []
         try:
-            raw_forms = page.evaluate("""
+            raw_forms = await page.evaluate("""
                 () => {
-                    // ── 1. Traditional <form> elements ────────────────
                     const results = Array.from(document.querySelectorAll('form')).map(f => ({
                         action: f.action || '',
                         method: f.method || 'get',
@@ -270,16 +263,10 @@ class WebCrawler:
                         })),
                         _source: 'form-tag',
                     }));
-
-                    // ── 2. SPA "floating" inputs (not inside any <form>) ──
-                    // Collect all inputs/textareas/selects that have NO <form> ancestor.
                     const orphanInputs = Array.from(
                         document.querySelectorAll('input, textarea, select')
                     ).filter(el => !el.closest('form'));
-
                     if (orphanInputs.length > 0) {
-                        // Group by nearest container: fieldset, dialog, section,
-                        // [role="form"], or common wrapper divs.
                         const containers = new Map();
                         for (const inp of orphanInputs) {
                             const container =
@@ -290,11 +277,9 @@ class WebCrawler:
                             containers.get(key).push(inp);
                         }
                         for (const [container, inputs] of containers.entries()) {
-                            // Find a nearby submit button
                             const btn = container.querySelector(
                                 'button[type="submit"], button:not([type]), input[type="submit"], [role="button"]'
                             );
-                            // Determine target URL from button onclick, data-action, or form action attrs
                             let action = '';
                             if (btn) {
                                 action = btn.getAttribute('formaction') || '';
@@ -304,7 +289,7 @@ class WebCrawler:
                             }
                             results.push({
                                 action: action || window.location.href,
-                                method: 'post',   // SPAs almost always POST via fetch/XHR
+                                method: 'post',
                                 inputs: inputs.map(i => ({
                                     name:  i.name || i.id || i.getAttribute('aria-label') || i.placeholder || 'unknown',
                                     type:  i.type || 'text',
@@ -314,7 +299,6 @@ class WebCrawler:
                             });
                         }
                     }
-
                     return results;
                 }
             """)
@@ -333,21 +317,16 @@ class WebCrawler:
             pass
         return forms
 
-    def _extract_spa_routes(self, page: Any) -> Set[str]:
+    async def _extract_spa_routes_async(self, page) -> Set[str]:
         routes: Set[str] = set()
         try:
-            # Next.js exposes routes in __NEXT_DATA__
-            next_data = page.evaluate("() => window.__NEXT_DATA__")
+            next_data = await page.evaluate("() => window.__NEXT_DATA__")
             if next_data:
-                build_id = next_data.get("buildId", "")
-                pages    = next_data.get("pages", [])
-                for p in pages:
+                for p in next_data.get("pages", []):
                     url = urljoin(self.base_url, p)
                     if self._same_domain(url):
                         routes.add(url)
-
-            # React Router / Vue Router may expose __routes
-            app_routes = page.evaluate("() => window.__routes || []")
+            app_routes = await page.evaluate("() => window.__routes || []")
             if isinstance(app_routes, list):
                 for r in app_routes:
                     if isinstance(r, str) and r.startswith("/"):
@@ -356,43 +335,15 @@ class WebCrawler:
             pass
         return routes
 
-    def _click_nav_items(self, page: Any):
-        """Click navigation elements to trigger SPA route changes."""
-        nav_selectors = [
-            "nav a", "[role='navigation'] a", ".navbar a",
-            ".nav-link", ".menu-item a", "header a",
-        ]
-        for selector in nav_selectors:
-            try:
-                elements = page.query_selector_all(selector)
-                for el in elements[:5]:  # limit clicks per selector
-                    try:
-                        el.click(timeout=1000)
-                        page.wait_for_timeout(500)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    def _simulate_user_interaction(self, page: Any):
-        """
-        Simulate realistic user behaviour to trigger lazy-loaded content,
-        hidden modals, dynamic forms, and background API calls that SPAs
-        only fire in response to interaction.
-        """
+    async def _simulate_user_interaction_async(self, page):
         try:
-            # 1. Scroll to bottom (triggers infinite scroll / lazy components)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(600)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(600)
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.wait_for_timeout(300)
 
-            # 2. Scroll back up (some sites load content on scroll-up)
-            page.evaluate("window.scrollTo(0, 0)")
-            page.wait_for_timeout(300)
+            await self._click_nav_items_async(page)
 
-            # 3. Click nav items to trigger SPA route changes
-            self._click_nav_items(page)
-
-            # 4. Click buttons that might open modals / reveal forms
             modal_selectors = [
                 "button[data-toggle='modal']",
                 "button[data-bs-toggle='modal']",
@@ -410,61 +361,62 @@ class WebCrawler:
             ]
             for selector in modal_selectors:
                 try:
-                    els = page.query_selector_all(selector)
+                    els = await page.query_selector_all(selector)
                     for el in els[:2]:
                         try:
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(800)
+                            await el.click(timeout=1500)
+                            await page.wait_for_timeout(800)
                         except Exception:
                             pass
                 except Exception:
                     pass
 
-            # 5. Hover over dropdown menus to reveal hidden links
             hover_selectors = [
                 ".dropdown-toggle", "[data-toggle='dropdown']",
                 ".has-submenu", ".menu-item-has-children > a",
             ]
             for selector in hover_selectors:
                 try:
-                    els = page.query_selector_all(selector)
+                    els = await page.query_selector_all(selector)
                     for el in els[:3]:
                         try:
-                            el.hover(timeout=1000)
-                            page.wait_for_timeout(400)
+                            await el.hover(timeout=1000)
+                            await page.wait_for_timeout(400)
                         except Exception:
                             pass
                 except Exception:
                     pass
-
         except Exception:
             pass
 
-    def _explore_spa_hash_routes(
-        self,
-        page: Any,
-        current_url: str,
-        api_requests: List[Dict],
-        api_seen: Set[str],
-        network_urls: Set[str],
+    async def _click_nav_items_async(self, page):
+        nav_selectors = [
+            "nav a", "[role='navigation'] a", ".navbar a",
+            ".nav-link", ".menu-item a", "header a",
+        ]
+        for selector in nav_selectors:
+            try:
+                elements = await page.query_selector_all(selector)
+                for el in elements[:5]:
+                    try:
+                        await el.click(timeout=1000)
+                        await page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    async def _explore_hash_routes_async(
+        self, page, current_url, api_requests, api_seen, network_urls,
     ) -> Tuple[Set[str], List[Dict]]:
-        """
-        For hash-based SPAs (Angular, Vue), discover and visit each
-        hash route *within the same page context* so Angular/Vue router
-        renders the new view and fires its API calls — all captured by
-        the already-attached network interception handler.
-        """
         discovered_urls: Set[str] = set()
         discovered_forms: List[Dict] = []
-
         try:
-            # Collect all hash-based links from the DOM
-            hash_links = page.evaluate("""
+            hash_links = await page.evaluate("""
                 () => {
                     const links = new Set();
                     document.querySelectorAll('a[href]').forEach(a => {
                         const href = a.getAttribute('href') || '';
-                        // Match #/path or full-url#/path
                         const idx = href.indexOf('#/');
                         if (idx !== -1) {
                             links.add(href.substring(idx));
@@ -473,46 +425,47 @@ class WebCrawler:
                     return Array.from(links);
                 }
             """)
-
             if not hash_links:
                 return discovered_urls, discovered_forms
 
             base = current_url.split("#")[0]
             if not base.endswith("/"):
-                base += "/"          # match _normalize_url output format
+                base += "/"
             print(f"[Crawler] SPA hash routes found: {len(hash_links)}")
 
             visited_hashes: Set[str] = set()
-            for hash_route in hash_links[:15]:          # cap to avoid long crawl times
+            for hash_route in hash_links[:15]:
                 if hash_route in visited_hashes:
                     continue
                 visited_hashes.add(hash_route)
-
                 full_url = f"{base}{hash_route}"
                 discovered_urls.add(full_url)
                 print(f"[Crawler]   Visiting hash route: {hash_route}")
-
                 try:
-                    # Navigate within the SPA (no page reload)
-                    page.evaluate("hash => window.location.hash = hash", hash_route)
-
-                    # Let the framework render + fire API calls
-                    # (use fixed timeout — networkidle is unreliable for in-page hash changes)
-                    page.wait_for_timeout(1500)
-
-                    # Extract forms from the new view
-                    route_forms = self._extract_forms_playwright(page, full_url)
+                    await page.evaluate("hash => window.location.hash = hash", hash_route)
+                    await page.wait_for_timeout(1500)
+                    route_forms = await self._extract_forms_async(page, full_url)
                     discovered_forms.extend(route_forms)
-
                     if route_forms:
                         print(f"[Crawler]     -> {len(route_forms)} forms in {hash_route}")
                 except Exception:
                     pass
-
         except Exception:
             pass
-
         return discovered_urls, discovered_forms
+
+    async def _sync_cookies_async(self, context):
+        cookies = []
+        for c in self.session.cookies:
+            cookies.append({
+                "name":   c.name,
+                "value":  c.value,
+                "domain": c.domain or self.domain,
+                "path":   c.path or "/",
+            })
+        if cookies:
+            await context.add_cookies(cookies)
+            print(f"[Crawler] Synced {len(cookies)} session cookies to Playwright")
 
     def _api_requests_to_forms(self, api_requests: List[Dict]) -> List[Dict]:
         """

@@ -166,25 +166,21 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             except Exception:
                 pass
 
-        emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (multi-threaded)...", "phase")
+        emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (native async aiohttp)...", "phase")
         engine = AsyncScanEngine(
-            max_concurrent=50 if mode_config['aggressive'] else 25,
+            max_concurrent=20 if mode_config['aggressive'] else 10,
             timeout=timeout,
+            auth_session=authenticated_session,
         )
         url_param_pairs = build_url_param_pairs(urls)
         dast_scanners = [sqli, xss, idor, cmdi, path, ssrf, ssti, xxe, redir]
-        all_findings.extend(
-            engine.scan_urls_sync(
-                url_param_pairs,
-                dast_scanners,
-                progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
-            )
-        )
+        form_scanners = [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe]
 
+        # Single event loop — URLs + forms scan concurrently (full I/O overlap)
         all_findings.extend(
-            engine.scan_forms_sync(
-                forms,
-                [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe],
+            engine.scan_all_sync(
+                url_param_pairs, dast_scanners,
+                forms, form_scanners,
                 progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
             )
         )
@@ -205,29 +201,20 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         report_path = os.path.join(REPORTS_DIR, report_filename)
         unique_findings = deduplicate_and_group(all_findings)
 
-        flags_found = [f for f in unique_findings if f.get('type') == 'flag']
-        vuln_findings = [f for f in unique_findings if f.get('type') != 'flag']
-
-        generate_pdf_report(target_url, urls, forms, vuln_findings, report_path,
+        generate_pdf_report(target_url, urls, forms, unique_findings, report_path,
                             scan_duration=scan_duration)
 
         active_scans[scan_id] = {
             'status': 'completed',
             'target': target_url,
-            'mode': scan_mode,
             'urls': urls,
             'forms': forms,
-            'findings': vuln_findings,
-            'flags': flags_found,
+            'findings': unique_findings,
             'report_path': report_path,
-            'total_vulnerabilities': len(vuln_findings),
-            'total_flags': len(flags_found)
+            'total_vulnerabilities': len(unique_findings),
         }
 
-        if flags_found:
-            emit_progress(scan_id, f"🏁 Captured {len(flags_found)} flags!", "success")
-
-        emit_progress(scan_id, f"Scan complete! Found {len(vuln_findings)} vulnerabilities", "success")
+        emit_progress(scan_id, f"Scan complete! Found {len(unique_findings)} vulnerabilities", "success")
         emit_progress(scan_id, f"Report saved: {report_filename}", "success")
 
     except Exception as e:
@@ -243,17 +230,13 @@ def start_scan():
     depth = data.get('depth')
     timeout = data.get('timeout')
     auth_config = data.get('auth')
-    scan_mode = data.get('mode', 'scan')
+    scan_mode = 'scan'
 
     if not target_url:
         return jsonify({'error': 'URL is required'}), 400
 
-    valid_modes = ['scan', 'lab', 'ctf', 'ctf-auth']
-    if scan_mode not in valid_modes:
-        return jsonify({'error': f'Invalid mode. Must be one of: {valid_modes}'}), 400
-
     scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {'status': 'running', 'target': target_url, 'mode': scan_mode}
+    active_scans[scan_id] = {'status': 'running', 'target': target_url}
 
     thread = threading.Thread(target=run_scan, args=(scan_id, target_url, depth, timeout, auth_config, scan_mode))
     thread.daemon = True
@@ -262,7 +245,6 @@ def start_scan():
     return jsonify({
         'scan_id': scan_id,
         'status': 'started',
-        'mode': scan_mode,
         'message': 'Scan started successfully'
     })
 
@@ -547,7 +529,6 @@ def scan_repo():
                 "findings":              findings,
                 "report_path":           report_path,
                 "total_vulnerabilities": len(findings),
-                "total_flags":           0,
                 "tech_stack":            stack,
                 "summary":               cats,
             }
@@ -619,9 +600,7 @@ def get_scan_status(scan_id):
         'scan_id':              scan_id,
         'status':               scan.get('status'),
         'target':               scan.get('target'),
-        'mode':                 scan.get('mode', 'scan'),
         'total_vulnerabilities': scan.get('total_vulnerabilities', 0),
-        'total_flags':          scan.get('total_flags', 0)
     })
 
 
@@ -639,37 +618,10 @@ def download_report(scan_id):
                      download_name=f'vulnerability_report_{scan_id}.pdf')
 
 
-@app.route('/api/mode', methods=['POST'])
-def set_mode():
-    data = request.json
-    mode = data.get('mode', 'scan')
-    mode_mgr = get_mode_manager()
-    success = mode_mgr.set_mode(mode)
-    if success:
-        return jsonify({'status': 'success', 'mode': mode, 'config': mode_mgr.get_mode_config()})
-    return jsonify({'error': 'Invalid mode'}), 400
-
-
 @app.route('/api/mode', methods=['GET'])
 def get_mode():
     mode_mgr = get_mode_manager()
     return jsonify({'current_mode': mode_mgr.current_mode, 'config': mode_mgr.get_mode_config()})
-
-
-@app.route('/api/modes', methods=['GET'])
-def get_available_modes():
-    return jsonify({
-        'modes': [
-            {'name': 'scan',     'description': 'Normal vulnerability scanning (safe, non-exploiting)',
-             'features': ['Conservative depth', 'No exploitation', 'Production-safe']},
-            {'name': 'lab',      'description': 'Lab/practice environment mode (more aggressive)',
-             'features': ['Deeper crawl', 'Can exploit', 'For DVWA, bWAPP, etc.']},
-            {'name': 'ctf',      'description': 'CTF mode with flag hunting',
-             'features': ['Flag detection', 'Very aggressive', 'Deep crawl']},
-            {'name': 'ctf-auth', 'description': 'Authenticated CTF mode',
-             'features': ['Requires credentials', 'Flag hunting', 'Post-auth testing']},
-        ]
-    })
 
 
 @socketio.on('connect')
@@ -688,7 +640,6 @@ if __name__ == '__main__':
     print("=" * 60)
     print("Server:   http://localhost:5001")
     print("SAST:     Semgrep (subprocess) + Secrets/Deps scanner")
-    print("Modes:    scan, lab, ctf, ctf-auth")
     print("Scanners: SQLi, XSS (reflected+stored+DOM), IDOR, CSRF,")
     print("          CMDi, Path Traversal, Open Redirect, SSRF (OOB),")
     print("          XXE, SSTI, Headers, Components, WordPress")

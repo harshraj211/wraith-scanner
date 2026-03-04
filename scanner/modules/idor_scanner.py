@@ -84,6 +84,78 @@ class IDORScanner:
                     break  # one IDOR proof per param is enough
         return findings
 
+    # ------------------------------------------------------------------
+    # Async methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        numeric_params = self._extract_numeric_params(params)
+        if not numeric_params:
+            return findings
+
+        baseline_resp = await http.get(url, params=params)
+        if not baseline_resp:
+            return findings
+
+        baseline_text   = baseline_resp.text or ""
+        baseline_status = baseline_resp.status_code
+        baseline_len    = len(baseline_text)
+
+        for param, orig_value in numeric_params.items():
+            try:
+                orig_int = int(orig_value)
+            except ValueError:
+                continue
+
+            candidates = [orig_int + 1, max(orig_int - 1, -999999999), orig_int + 10, 999, 9999]
+            for cand in candidates:
+                if cand == orig_int:
+                    continue
+                vuln = await self._test_id_async(url, param, orig_int, str(cand), params, baseline_status, baseline_len, http)
+                if vuln:
+                    findings.append(vuln)
+                    break
+        return findings
+
+    async def _test_id_async(self, url, param_name, original_id, candidate_id, params, baseline_status, baseline_len, http):
+        mutated = params.copy()
+        mutated[param_name] = candidate_id
+        try:
+            resp = await http.get(url, params=mutated)
+            if not resp:
+                return None
+            text   = resp.text or ""
+            status = resp.status_code
+            length = len(text)
+            length_diff = abs(length - baseline_len)
+            lowered = text.lower()
+            error_words = ["not found", "404", "forbidden", "error", "unauthorized"]
+            looks_like_error = any(w in lowered for w in error_words)
+            evidence_parts = [f"Status: {status}", f"Length: {length} (original was {baseline_len})"]
+            is_potential = False
+            if status == 200 and (length_diff > 50 or not looks_like_error):
+                is_potential = True
+            if baseline_status in (403, 404) and status == 200 and not looks_like_error:
+                is_potential = True
+            if is_potential:
+                return {
+                    "vulnerable": True,
+                    "type": "idor",
+                    "param": param_name,
+                    "payload": str(candidate_id),
+                    "evidence": ", ".join(evidence_parts),
+                    "confidence": 75,
+                    "original_value": str(original_id),
+                }
+        except Exception:
+            pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Sync internals
+    # ------------------------------------------------------------------
+
     def _extract_numeric_params(self, params: Dict[str, Any]) -> Dict[str, str]:
         """Return params whose values look like integers.
 

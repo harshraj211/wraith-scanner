@@ -74,8 +74,6 @@ const VULN_META = {
   // A10 – SSRF
   'ssrf':                       { label: 'SSRF',             color: RED,    owasp: 'A10' },
 
-  // CTF
-  'flag':                       { label: '🏁 FLAG',          color: ESC + '[1;32m', owasp: '---' },
 };
 
 const OWASP_LABELS = {
@@ -86,7 +84,7 @@ const OWASP_LABELS = {
   'A06': c('38;5;208', '[A06-COMPON]'),
   'A08': c('38;5;196', '[A08-INTEGR]'),
   'A10': c('38;5;196', '[A10-SSRF]'),
-  '---': c('1;32',     '[CTF-FLAG]'),
+
 };
 
 function getVulnDisplay(type) {
@@ -104,14 +102,7 @@ function App() {
   const terminalRef = useRef(null);
   const termRef = useRef(null);
   const [terminal, setTerminal] = useState(null);
-  const [currentMode, setCurrentMode] = useState('scan');
-  const [availableModes, setAvailableModes] = useState([]);
 
-  useEffect(() => {
-    axios.get(`${API_URL}/api/modes`)
-      .then(r => setAvailableModes(r.data.modes))
-      .catch(() => {});
-  }, []);
 
   // ─── Terminal init ───
   useEffect(() => {
@@ -192,7 +183,7 @@ function App() {
       if (code === 13) {
         terminal.writeln('');
         const cmd = line.trim();
-        if (cmd) await executeCommand(cmd, terminal, currentMode, setCurrentMode, availableModes);
+        if (cmd) await executeCommand(cmd, terminal);
         line = '';
         printPrompt(terminal);
       } else if (code === 127) {
@@ -207,7 +198,7 @@ function App() {
     });
 
     return () => disposable.dispose();
-  }, [terminal, currentMode, availableModes]);
+  }, [terminal]);
 
   return (
     <div className="App">
@@ -218,7 +209,7 @@ function App() {
           <span className="dot dot-green" />
         </div>
         <span className="titlebar-title">vulnscan — terminal</span>
-        <span className="titlebar-mode">MODE: {currentMode.toUpperCase()}</span>
+
       </div>
       <div ref={terminalRef} className="terminal-container" />
     </div>
@@ -242,7 +233,7 @@ function printBanner(term) {
   w('');
   w(div);
   w(
-    c('0;37', '  Multi-Mode Web Vulnerability Scanner') +
+    c('0;37', '  Web Vulnerability Scanner') +
     c('38;5;240', '  │') +
     c('0;37', '  OWASP Top 10 Coverage') +
     c('38;5;240', '  │') +
@@ -277,8 +268,7 @@ function printBanner(term) {
   w(
     c('38;5;245', '  Commands: ') +
     c('38;5;220', 'scan') + c('38;5;245', ' <url>  ') +
-    c('38;5;220', 'mode') + c('38;5;245', ' <mode>  ') +
-    c('38;5;220', 'modes') + c('38;5;245', '  ') +
+    c('38;5;220', 'scanrepo') + c('38;5;245', ' <url>  ') +
     c('38;5;220', 'status') + c('38;5;245', ' <id>  ') +
     c('38;5;220', 'download') + c('38;5;245', ' <id>  ') +
     c('38;5;220', 'help') + c('38;5;245', '  ') +
@@ -321,10 +311,6 @@ function formatProgressLine(message, type) {
     );
   }
 
-  if (message.includes('FLAG FOUND') || message.includes('🏁')) {
-    return c('1;32', '  ████  ' + message + '  ████');
-  }
-
   switch (type) {
     case 'phase':
       return '\r\n' + c('38;5;245', ' ───') + c('38;5;220', ' ' + message + ' ') + c('38;5;245', '───');
@@ -341,7 +327,7 @@ function formatProgressLine(message, type) {
 // ─────────────────────────────────────────────
 // Command executor
 // ─────────────────────────────────────────────
-async function executeCommand(command, term, currentMode, setCurrentMode, availableModes) {
+async function executeCommand(command, term) {
   const parts = command.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
@@ -362,12 +348,11 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
 
         term.writeln('');
         term.writeln(c('38;5;220', '[»] Target:') + '  ' + c('0;37', url));
-        term.writeln(c('38;5;220', '[»] Mode:')   + '    ' + c('0;37', currentMode.toUpperCase()));
         if (depth)   term.writeln(c('38;5;220', '[»] Depth:')   + '   ' + c('0;37', String(depth)));
         if (timeout) term.writeln(c('38;5;220', '[»] Timeout:') + ' '  + c('0;37', timeout + 's'));
         term.writeln('');
 
-        const payload = { url, mode: currentMode };
+        const payload = { url };
         if (depth)   payload.depth = depth;
         if (timeout) payload.timeout = timeout;
 
@@ -376,56 +361,6 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
 
         term.writeln(c('38;5;154', '[✓]') + ' Scan started — ID: ' + c('38;5;220', scanId));
         term.writeln(c('38;5;240', '    run ') + c('38;5;245', 'status ' + scanId) + c('38;5;240', ' to check · ') + c('38;5;245', 'download ' + scanId) + c('38;5;240', ' for PDF'));
-        term.writeln('');
-        break;
-      }
-
-      case 'mode': {
-        if (!args[0]) {
-          term.writeln(c('38;5;196', '[✗]') + ' Mode required — usage: ' + c('38;5;220', 'mode') + ' <scan|lab|ctf|ctf-auth>');
-          return;
-        }
-        const newMode = args[0].toLowerCase();
-        const valid = ['scan', 'lab', 'ctf', 'ctf-auth'];
-        if (!valid.includes(newMode)) {
-          term.writeln(c('38;5;196', '[✗]') + ' Invalid mode "' + c('0;37', newMode) + '". Valid: ' + c('38;5;220', valid.join('  ')));
-          return;
-        }
-        if (newMode === 'ctf' || newMode === 'ctf-auth') {
-          term.writeln('');
-          term.writeln(c('38;5;196', ' ╔══════════════════════════════════════════╗'));
-          term.writeln(c('38;5;196', ' ║  ⚠  EXPLOITATION MODE — AUTHORIZED USE  ║'));
-          term.writeln(c('38;5;196', ' ╚══════════════════════════════════════════╝'));
-          term.writeln(c('38;5;208', '  Use only on CTF platforms, your own labs,'));
-          term.writeln(c('38;5;208', '  or systems with explicit written permission.'));
-          term.writeln('');
-        }
-        setCurrentMode(newMode);
-        const info = availableModes.find(m => m.name === newMode);
-        term.writeln(c('38;5;154', '[✓]') + ' Mode → ' + c('38;5;220', newMode.toUpperCase()));
-        if (info) term.writeln(c('38;5;240', '    ' + info.description));
-        break;
-      }
-
-      case 'modes': {
-        term.writeln('');
-        term.writeln(c('38;5;220', ' Available Modes') + c('38;5;240', ' ────────────────────────────────────'));
-        term.writeln('');
-
-        const modeColorMap = { scan: '154', lab: '220', ctf: '208', 'ctf-auth': '196' };
-        const allModes = availableModes.length ? availableModes : [
-          { name: 'scan',     description: 'Safe detection only (default)',  features: ['No exploitation', 'Production-safe'] },
-          { name: 'lab',      description: 'Controlled lab testing',         features: ['Can exploit', 'Deeper crawl'] },
-          { name: 'ctf',      description: 'CTF flag hunting',               features: ['Flag detection', 'Very aggressive'] },
-          { name: 'ctf-auth', description: 'Authenticated CTF mode',         features: ['Requires creds', 'Flag hunting'] },
-        ];
-
-        allModes.forEach(m => {
-          const col = modeColorMap[m.name] || '245';
-          const active = m.name === currentMode ? '  ' + c('38;5;154', '◄ active') : '';
-          term.writeln('  ' + c('38;5;' + col, m.name.padEnd(12)) + c('0;37', ' ' + m.description) + active);
-          (m.features || []).forEach(f => term.writeln(c('38;5;240', '               · ' + f)));
-        });
         term.writeln('');
         break;
       }
@@ -443,10 +378,8 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
         term.writeln(c('38;5;220', ' Scan Status') + c('38;5;240', ' ──────────────────────────────────────'));
         term.writeln('  ' + c('38;5;245', 'ID        ') + c('0;37', d.scan_id));
         term.writeln('  ' + c('38;5;245', 'Target    ') + c('0;37', d.target));
-        term.writeln('  ' + c('38;5;245', 'Mode      ') + c('38;5;220', (d.mode || 'scan').toUpperCase()));
         term.writeln('  ' + c('38;5;245', 'Status    ') + c('38;5;' + statusColor, d.status));
         term.writeln('  ' + c('38;5;245', 'Vulns     ') + c('38;5;196', String(d.total_vulnerabilities || 0)));
-        if (d.total_flags) term.writeln('  ' + c('38;5;245', 'Flags     ') + c('38;5;154', d.total_flags + ' 🏁'));
         term.writeln('');
         if (d.status === 'completed') {
           term.writeln(c('38;5;240', '  run ') + c('38;5;245', 'download ' + d.scan_id) + c('38;5;240', ' for PDF report'));
@@ -474,8 +407,6 @@ async function executeCommand(command, term, currentMode, setCurrentMode, availa
           ['scanrepo <url>',              'SAST scan a GitHub repository'],
           ['scanrepo <url> --token xxx',  'Scan private repo with GitHub token'],
           ['scanrepo <url> --branch dev', 'Scan a specific branch'],
-          ['mode <mode>',             'Switch scanning mode'],
-          ['modes',                   'List all available modes'],
           ['status <id>',             'Check scan progress and results'],
           ['download <id>',           'Download PDF vulnerability report'],
           ['help',                    'Show this help'],

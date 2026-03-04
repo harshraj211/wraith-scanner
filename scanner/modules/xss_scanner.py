@@ -1,18 +1,17 @@
 """
-xss_scanner.py — XSS Scanner with Playwright Browser Pool
-===========================================================
+xss_scanner.py — Async XSS Scanner with Playwright Browser Pool
+=================================================================
 
-Fixes vs previous version:
-  1. Browser pool: single shared Playwright browser instance, multiple
-     reusable contexts — no longer launches a new browser per DOM XSS check.
-  2. domcontentloaded instead of networkidle — doesn't hang on SPAs with
-     long-polling / websockets.
-  3. Hard timeout on page.goto() — prevents indefinite hangs.
-  4. Stored XSS: scans all URLs post-injection for reflected markers.
-  5. DOM XSS: checks alert(), innerHTML, and JS sink execution.
+Architecture (v3 — native aiohttp):
+  - scan_url_async() / scan_form_async() use AsyncHTTPSession directly
+  - Reflected XSS: fully async — all payloads use aiohttp coroutines
+  - DOM XSS: Playwright remains sync (browser API), wrapped in to_thread()
+    only when DOM check is needed (skipped if reflected XSS already found)
+  - Stored XSS: check_stored() uses sync requests (called once post-scan)
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -179,7 +178,7 @@ class XSSScanner:
         return self._pool
 
     # ------------------------------------------------------------------
-    # Public scan methods
+    # Public scan methods (sync — kept for standalone / fallback use)
     # ------------------------------------------------------------------
 
     def scan_url(self, url: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -210,6 +209,126 @@ class XSSScanner:
             )
             if findings:
                 break
+        return findings
+
+    # ------------------------------------------------------------------
+    # Async scan methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, str],
+                             http) -> List[Dict[str, Any]]:
+        """Fully async URL scan — reflected via aiohttp, DOM via Playwright thread."""
+        findings = []
+        for param in params:
+            reflected = await self._scan_param_reflected_async(url, params, param, http)
+            findings.extend(reflected)
+            if not reflected:
+                # DOM check in thread (Playwright is sync)
+                dom = await asyncio.to_thread(
+                    self._scan_param_dom, url, params, param
+                )
+                findings.extend(dom)
+            if findings:
+                break
+        return findings
+
+    async def scan_form_async(self, form: Dict[str, Any],
+                              http) -> List[Dict[str, Any]]:
+        """Fully async form scan — reflected payloads via aiohttp."""
+        findings = []
+        action   = form.get("action", "")
+        method   = form.get("method", "get").lower()
+        inputs   = form.get("inputs", [])
+
+        if not action:
+            return []
+
+        field_names = [i.get("name", "") for i in inputs if i.get("name")]
+        for field in field_names:
+            reflected = await self._scan_field_reflected_async(
+                action, method, inputs, field, http
+            )
+            findings.extend(reflected)
+            if findings:
+                break
+        return findings
+
+    # ------------------------------------------------------------------
+    # Async reflected XSS
+    # ------------------------------------------------------------------
+
+    async def _scan_param_reflected_async(self, url: str, params: Dict[str, str],
+                                           target_param: str, http) -> List[Dict[str, Any]]:
+        findings = []
+        for payload_template in REFLECTED_PAYLOADS:
+            marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
+            payload = payload_template.replace("{MARKER}", marker)
+
+            test_params = dict(params)
+            test_params[target_param] = payload
+
+            resp = await http.get(url, params=test_params)
+            if not resp:
+                continue
+
+            body = resp.text
+
+            self._injected[marker] = {
+                "param":      target_param,
+                "payload":    payload,
+                "inject_url": url,
+            }
+
+            if marker in body:
+                context = self._detect_context(body, marker)
+                findings.append({
+                    "type":       "xss-reflected",
+                    "param":      target_param,
+                    "payload":    payload,
+                    "evidence":   f"Marker reflected in {context} context",
+                    "confidence": 95 if payload in body else 72,
+                    "url":        url,
+                    "context":    context,
+                })
+                return findings
+        return findings
+
+    async def _scan_field_reflected_async(self, action: str, method: str,
+                                           inputs: List[Dict], target_field: str,
+                                           http) -> List[Dict[str, Any]]:
+        findings = []
+        for payload_template in REFLECTED_PAYLOADS[:6]:
+            marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
+            payload = payload_template.replace("{MARKER}", marker)
+
+            data = {i.get("name", ""): i.get("value", "") for i in inputs if i.get("name")}
+            data[target_field] = payload
+
+            if method == "post":
+                resp = await http.post(action, data=data)
+            else:
+                resp = await http.get(action, params=data)
+
+            if not resp:
+                continue
+
+            body = resp.text
+            self._injected[marker] = {
+                "param":      target_field,
+                "payload":    payload,
+                "inject_url": action,
+            }
+
+            if marker in body:
+                findings.append({
+                    "type":       "xss-reflected",
+                    "param":      target_field,
+                    "payload":    payload,
+                    "evidence":   f"Marker reflected in form response",
+                    "confidence": 90,
+                    "url":        action,
+                })
+                return findings
         return findings
 
     def check_stored(self, urls: List[str],

@@ -61,6 +61,74 @@ class SSTIScanner:
                 findings.append(result)
         return findings
 
+    # ------------------------------------------------------------------
+    # Async methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings = []
+        for param in params:
+            original = str(params.get(param, ''))
+            result = await self._probe_param_async(url, param, original, params, 'GET', http)
+            if result:
+                findings.append(result)
+        return findings
+
+    async def scan_form_async(self, form: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings = []
+        action = form.get('action', '')
+        method = (form.get('method') or 'GET').upper()
+        inputs = form.get('inputs', [])
+        if not action or not inputs:
+            return findings
+        baseline = {inp.get('name', ''): '' for inp in inputs if inp.get('name')}
+        for param in baseline:
+            result = await self._probe_param_async(action, param, '', baseline, method, http)
+            if result:
+                findings.append(result)
+        return findings
+
+    async def _probe_param_async(self, url, param, original, params, method, http):
+        try:
+            baseline_data = params.copy()
+            baseline_data[param] = 'SSTI_BASELINE_12345'
+            if method.upper() == 'GET':
+                baseline_resp = await http.get(url, params=baseline_data)
+            else:
+                baseline_resp = await http.post(url, data=baseline_data)
+            if not baseline_resp or 'SSTI_BASELINE_12345' not in (baseline_resp.text or ''):
+                return None
+        except Exception:
+            return None
+
+        for payload, expected, description in SSTI_PAYLOADS:
+            try:
+                data = params.copy()
+                data[param] = payload
+                if method.upper() == 'GET':
+                    resp = await http.get(url, params=data)
+                else:
+                    resp = await http.post(url, data=data)
+                if resp:
+                    text = resp.text or ''
+                    if expected in text:
+                        return {
+                            'vulnerable': True,
+                            'type': 'ssti',
+                            'param': param,
+                            'payload': payload,
+                            'evidence': f'{description}. Output "{expected}" found in response.',
+                            'confidence': 95,
+                            'url': url,
+                        }
+            except Exception:
+                pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Sync internals (kept for standalone / fallback use)
+    # ------------------------------------------------------------------
+
     def _probe_param(
         self, url, param, original, params, method
     ) -> Optional[Dict[str, Any]]:

@@ -94,6 +94,73 @@ class PathTraversalScanner:
 
         return findings
 
+    # ------------------------------------------------------------------
+    # Async methods (native aiohttp — used by AsyncScanEngine v3)
+    # ------------------------------------------------------------------
+
+    async def scan_url_async(self, url: str, params: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        for param_name in params.keys():
+            if self._looks_like_file_param(param_name):
+                for payload in PATH_PAYLOADS:
+                    vuln = await self._test_path_async(url, param_name, params, payload, http)
+                    if vuln:
+                        findings.append(vuln)
+                        break
+        return findings
+
+    async def scan_form_async(self, form: Dict[str, Any], http) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        action = form.get("action")
+        method = (form.get("method") or "GET").upper()
+        inputs = form.get("inputs", [])
+        if not action or not inputs:
+            return findings
+        baseline = {inp.get("name", ""): "" for inp in inputs if inp.get("name")}
+        for param_name in baseline.keys():
+            if self._looks_like_file_param(param_name):
+                for payload in PATH_PAYLOADS:
+                    vuln = await self._test_path_async(action, param_name, baseline, payload, http, method=method)
+                    if vuln:
+                        findings.append(vuln)
+                        break
+        return findings
+
+    async def _test_path_async(self, test_url, param_name, params, payload, http, method="GET"):
+        try:
+            data = params.copy()
+            data[param_name] = payload
+            if method.upper() == "GET":
+                resp = await http.get(test_url, params=data)
+            else:
+                resp = await http.post(test_url, data=data)
+            if not resp:
+                return None
+            text = resp.text or ""
+            patterns = [
+                (r"root:.*:/bin/(ba)?sh", "/etc/passwd file content"),
+                (r"\[extensions\]|for 16-bit app support", "win.ini file content"),
+                (r"127\.0\.0\.1\s+localhost", "/etc/hosts file content"),
+                (r"nobody:.*:99:99", "/etc/shadow file content"),
+            ]
+            for pattern, description in patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    return {
+                        "vulnerable": True,
+                        "type": "path-traversal",
+                        "param": param_name,
+                        "payload": payload,
+                        "evidence": f"Detected {description}",
+                        "confidence": 95,
+                    }
+        except Exception:
+            pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Sync internals
+    # ------------------------------------------------------------------
+
     def _looks_like_file_param(self, param_name: str) -> bool:
         """Check if parameter name suggests it handles files/paths."""
         file_keywords = ['file', 'path', 'dir', 'folder', 'document', 'doc', 'page', 'include', 'template', 'view']
