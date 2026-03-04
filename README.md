@@ -34,7 +34,7 @@
 
 ## 📖 Overview
 
-**Vibe** is an advanced web vulnerability scanner that unifies **Dynamic Application Security Testing (DAST)** and **Static Application Security Testing (SAST)** into a single, highly concurrent platform. 
+**Vibe** is an advanced web vulnerability scanner that unifies **Dynamic Application Security Testing (DAST)** and **Static Application Security Testing (SAST)** into a single, highly concurrent platform.
 
 Moving beyond traditional static HTML scraping, Vibe leverages a headless browser architecture to dynamically map modern Single Page Applications (SPAs) and intercept hidden API routes. Built on the `aiohttp` and `asyncio` libraries, its core engine executes hundreds of non-blocking vulnerability checks simultaneously while strictly respecting target server rate limits.
 
@@ -71,7 +71,6 @@ Generates comprehensive, deduplicated PDF reports featuring:
 ---
 
 ## 🏗️ Architecture
-
 ```mermaid
 graph TD
     A[Web Terminal UI / React] -->|WebSocket / HTTP| B(Flask API Server)
@@ -84,23 +83,26 @@ graph TD
     G -->|Identifies Vulns| H[Reporting Engine]
     E -->|Semgrep / OSV| H
     H --> I((PDF Report))
-🚀 Getting Started
-Prerequisites
+```
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
 Ensure your system meets the following minimum requirements before installing Vibe:
 
-Python: v3.9 or higher
+- **Python:** v3.9 or higher
+- **Node.js:** v16 or higher (required for Web Terminal)
+- **npm:** v8 or higher
+- **Git:** Required for cloning target repositories during SAST scans
 
-Node.js: v16 or higher (required for Web Terminal)
+### Installation
 
-npm: v8 or higher
-
-Git: Required for cloning target repositories during SAST scans
-
-Installation
-Windows (PowerShell)
-
+#### Windows (PowerShell)
+```powershell
 # 1. Clone the repository
-git clone [https://github.com/harshraj211/vulnerability-scanner.git](https://github.com/harshraj211/vulnerability-scanner.git)
+git clone https://github.com/harshraj211/vulnerability-scanner.git
 cd vulnerability-scanner
 
 # 2. Create and activate a virtual environment
@@ -120,75 +122,93 @@ mkdir reports
 cd scanner-terminal
 npm install
 cd ..
+```
 
-Linux / macOS (Bash)
+#### Linux / macOS (Bash)
+```bash
 # Clone the repository
-git clone [https://github.com/harshraj211/vulnerability-scanner.git](https://github.com/harshraj211/vulnerability-scanner.git)
+git clone https://github.com/harshraj211/vulnerability-scanner.git
 cd vulnerability-scanner
 
 # Run the automated install script
 chmod +x install.sh
 ./install.sh
-(Alternatively, you can run the Windows steps manually, using source venv/bin/activate to activate the virtual environment.)
+```
 
-💻 Usage
+---
+
+## 💻 Usage
+
 Vibe is designed for flexibility and can be operated via an interactive browser-based Web Terminal or a traditional Command Line Interface.
 
-1. Web Terminal UI (Recommended)
-Experience Vibe through a sleek, React-based security console.
+### 1. Web Terminal UI (Recommended)
 
-Start the Backend API:
+**Start the Backend API:**
+```bash
 # Ensure your virtual environment is active
 python api_server.py
 # The API will run on http://localhost:5001
+```
 
-Start the Frontend Terminal:
+**Start the Frontend Terminal:**
+```bash
 # In a new terminal window
 cd scanner-terminal
 npm start
 # The UI will open at http://localhost:3000
+```
 
-Available Terminal Commands:
+**Available Terminal Commands:**
 
-scan <url> - Launch an asynchronous DAST scan against a target URL.
+| Command | Description |
+|---|---|
+| `scan <url>` | Launch an asynchronous DAST scan against a target URL |
+| `scanrepo <github-url>` | Clone and execute SAST analysis on a remote repository |
+| `status <scan-id>` | Monitor the live progress of an active scan |
+| `report <scan-id>` | Download the final PDF vulnerability report |
+| `help` | View all available commands |
 
-scanrepo <github-url> - Clone and execute SAST analysis on a remote repository.
-
-status <scan-id> - Monitor the live progress of an active scan.
-
-report <scan-id> - Download the final PDF vulnerability report.
-
-help - View all available commands.
-
-2. Command Line Interface (CLI)
-Ideal for CI/CD integration, automated pipelines, or batch processing.
+### 2. Command Line Interface (CLI)
+```bash
 # Standard DAST Scan
-python main.py --url [http://target.com](http://target.com) --output reports/report.pdf
+python main.py --url http://target.com --output reports/report.pdf
 
 # Aggressive Scan (Higher Concurrency)
-python main.py --url [http://target.com](http://target.com) --mode aggressive
+python main.py --url http://target.com --mode aggressive
 
 # Scan with custom network timeouts (in seconds)
-python main.py --url [http://target.com](http://target.com) --timeout 15
+python main.py --url http://target.com --timeout 15
+```
 
-🧪 Testing Environment
-To safely verify your installation and test Vibe's capabilities, a deliberately vulnerable Python/Flask application is included in the /test_app directory. We strongly recommend running your first scan against this local environment.
+---
+
+## 🧪 Testing Environment
+
+To safely verify your installation and test Vibe's capabilities, a deliberately vulnerable Python/Flask application is included in the `/test_app` directory. We strongly recommend running your first scan against this local environment.
+```bash
 # 1. Start the vulnerable application (in terminal 1)
 python test_app/vulnerable_app.py
 
 # 2. Launch a scan against the local instance (in terminal 2)
-python main.py --url [http://127.0.0.1:5000](http://127.0.0.1:5000) --output reports/local_test.pdf
+python main.py --url http://127.0.0.1:5000 --output reports/local_test.pdf
+```
 
-⚖️ Responsible Use Disclaimer
+---
+
+## ⚖️ Responsible Use Disclaimer
+
 Vibe is strictly an ethical hacking tool designed exclusively for authorized security assessments and educational purposes.
 
-Authorization Required: You must only scan targets, networks, and applications that you explicitly own or have written, legally binding consent to test.
-
-Legality: Unauthorized vulnerability scanning is a cybercrime in most jurisdictions.
-
-Non-Destructive Design: This tool is designed to identify and report vulnerabilities, not to actively exploit them, maintain persistence, or exfiltrate sensitive data.
+* **Authorization Required:** You must only scan targets, networks, and applications that you explicitly own or have written, legally binding consent to test.
+* **Legality:** Unauthorized vulnerability scanning is a cybercrime in most jurisdictions.
+* **Non-Destructive Design:** This tool is designed to identify and report vulnerabilities, not to actively exploit them, maintain persistence, or exfiltrate sensitive data.
 
 The developer assumes no liability and is not responsible for any misuse, damage, or legal consequences caused by the utilization of this program.
 
-👨‍💻 Author
-Harsh Raj Cyber Security Student & Developer
+---
+
+## 👨‍💻 License & Author
+
+**License:** MIT
+
+**Author:** Harsh Raj — Cyber Security Student & Developer
