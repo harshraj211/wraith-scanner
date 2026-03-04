@@ -1,7 +1,14 @@
 <div align="center">
+```
+ __        __              _   _     
+ \ \      / / __ __ _(_) |_| |__  
+  \ \ /\ / / '__/ _` | | __| '_ \ 
+   \ V  V /| | | (_| | | |_| | | |
+    \_/\_/ |_|  \__,_|_|\__|_| |_|
+```
 
-# 🛡️ Vibe 
-**Enterprise-Grade, Asynchronous DAST & SAST Scanning Engine**
+# Wraith
+**Silent. Fast. Lethal.**
 
 [![Python Version](https://img.shields.io/badge/Python-3.9+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js Version](https://img.shields.io/badge/Node.js-16+-green.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -9,7 +16,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 
 <p align="center">
-  A high-performance, comprehensive security assessment framework engineered for ethical hackers, red teams, and modern DevSecOps pipelines.
+  What others miss, Wraith finds. An async DAST & SAST scanning engine built for ethical hackers, red teams, and DevSecOps pipelines.
 </p>
 
 </div>
@@ -34,9 +41,9 @@
 
 ## 📖 Overview
 
-**Vibe** is an advanced web vulnerability scanner that unifies **Dynamic Application Security Testing (DAST)** and **Static Application Security Testing (SAST)** into a single, highly concurrent platform.
+**Wraith** is an advanced web vulnerability scanner that unifies **Dynamic Application Security Testing (DAST)** and **Static Application Security Testing (SAST)** into a single, highly concurrent platform.
 
-Moving beyond traditional static HTML scraping, Vibe leverages a headless browser architecture to dynamically map modern Single Page Applications (SPAs) and intercept hidden API routes. Built on the `aiohttp` and `asyncio` libraries, its core engine executes hundreds of non-blocking vulnerability checks simultaneously while strictly respecting target server rate limits.
+Unlike traditional scanners that rely on static HTML scraping, Wraith uses a headless browser to dynamically map modern Single Page Applications (SPAs) and intercept hidden API routes. Built on `aiohttp` and `asyncio`, its core engine runs hundreds of non-blocking vulnerability checks simultaneously — without hammering the target server.
 
 ---
 
@@ -90,7 +97,7 @@ graph TD
 ## 🚀 Getting Started
 
 ### Prerequisites
-Ensure your system meets the following minimum requirements before installing Vibe:
+Ensure your system meets the following minimum requirements before installing Wraith:
 
 - **Python:** v3.9 or higher
 - **Node.js:** v16 or higher (required for Web Terminal)
@@ -102,8 +109,8 @@ Ensure your system meets the following minimum requirements before installing Vi
 #### Windows (PowerShell)
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/harshraj211/vulnerability-scanner.git
-cd vulnerability-scanner
+git clone https://github.com/harshraj211/wraith-scanner.git
+cd wraith-scanner
 
 # 2. Create and activate a virtual environment
 python -m venv venv
@@ -127,8 +134,8 @@ cd ..
 #### Linux / macOS (Bash)
 ```bash
 # Clone the repository
-git clone https://github.com/harshraj211/vulnerability-scanner.git
-cd vulnerability-scanner
+git clone https://github.com/harshraj211/wraith-scanner.git
+cd wraith-scanner
 
 # Run the automated install script
 chmod +x install.sh
@@ -139,44 +146,44 @@ chmod +x install.sh
 
 ## 💻 Usage
 
-Vibe is designed for flexibility and can be operated via an interactive browser-based Web Terminal or a traditional Command Line Interface.
+Wraith can be operated via an interactive browser-based Web Terminal or a traditional Command Line Interface.
 
 ### 1. Web Terminal UI (Recommended)
 
 **Start the Backend API:**
 ```bash
-# Ensure your virtual environment is active
+# make sure your virtualenv is active first
 python api_server.py
-# The API will run on http://localhost:5001
+# runs on http://localhost:5001
 ```
 
 **Start the Frontend Terminal:**
 ```bash
-# In a new terminal window
+# open a second terminal window
 cd scanner-terminal
 npm start
-# The UI will open at http://localhost:3000
+# opens at http://localhost:3000
 ```
 
 **Available Terminal Commands:**
 
 | Command | Description |
 |---|---|
-| `scan <url>` | Launch an asynchronous DAST scan against a target URL |
-| `scanrepo <github-url>` | Clone and execute SAST analysis on a remote repository |
-| `status <scan-id>` | Monitor the live progress of an active scan |
-| `report <scan-id>` | Download the final PDF vulnerability report |
-| `help` | View all available commands |
+| `scan <url>` | Launch an async DAST scan against a target URL |
+| `scanrepo <github-url>` | Clone and run SAST analysis on a remote repository |
+| `status <scan-id>` | Check live progress of a running scan |
+| `report <scan-id>` | Download the final PDF report |
+| `help` | List all available commands |
 
 ### 2. Command Line Interface (CLI)
 ```bash
-# Standard DAST Scan
+# standard scan
 python main.py --url http://target.com --output reports/report.pdf
 
-# Aggressive Scan (Higher Concurrency)
+# aggressive mode (higher concurrency)
 python main.py --url http://target.com --mode aggressive
 
-# Scan with custom network timeouts (in seconds)
+# custom timeout
 python main.py --url http://target.com --timeout 15
 ```
 
@@ -184,12 +191,12 @@ python main.py --url http://target.com --timeout 15
 
 ## 🧪 Testing Environment
 
-To safely verify your installation and test Vibe's capabilities, a deliberately vulnerable Python/Flask application is included in the `/test_app` directory. We strongly recommend running your first scan against this local environment.
+A deliberately vulnerable Flask app lives in `/test_app` — use it to verify your install and see Wraith in action without touching a real target.
 ```bash
-# 1. Start the vulnerable application (in terminal 1)
+# terminal 1 — start the vulnerable app
 python test_app/vulnerable_app.py
 
-# 2. Launch a scan against the local instance (in terminal 2)
+# terminal 2 — run wraith against it
 python main.py --url http://127.0.0.1:5000 --output reports/local_test.pdf
 ```
 
@@ -197,13 +204,13 @@ python main.py --url http://127.0.0.1:5000 --output reports/local_test.pdf
 
 ## ⚖️ Responsible Use Disclaimer
 
-Vibe is strictly an ethical hacking tool designed exclusively for authorized security assessments and educational purposes.
+Wraith is an ethical hacking tool built exclusively for authorized security assessments and educational purposes.
 
-* **Authorization Required:** You must only scan targets, networks, and applications that you explicitly own or have written, legally binding consent to test.
-* **Legality:** Unauthorized vulnerability scanning is a cybercrime in most jurisdictions.
-* **Non-Destructive Design:** This tool is designed to identify and report vulnerabilities, not to actively exploit them, maintain persistence, or exfiltrate sensitive data.
+* **Authorization Required:** Only scan targets you own or have explicit written permission to test.
+* **Legality:** Unauthorized scanning is a cybercrime in most jurisdictions.
+* **Non-Destructive:** Wraith identifies and reports vulnerabilities — it does not exploit, persist, or exfiltrate.
 
-The developer assumes no liability and is not responsible for any misuse, damage, or legal consequences caused by the utilization of this program.
+The developer assumes no liability for misuse, damage, or legal consequences.
 
 ---
 
@@ -212,3 +219,5 @@ The developer assumes no liability and is not responsible for any misuse, damage
 **License:** MIT
 
 **Author:** Harsh Raj — Cyber Security Student & Developer
+
+> *Built Wraith — an async DAST/SAST security scanner with SPA crawling, Semgrep integration, and automated CVSS-scored PDF reporting.*
