@@ -12,6 +12,7 @@ Architecture (v3 — native aiohttp):
 from __future__ import annotations
 
 import asyncio
+from html import unescape
 import re
 import time
 import uuid
@@ -279,17 +280,11 @@ class XSSScanner:
                 "inject_url": url,
             }
 
-            if marker in body:
-                context = self._detect_context(body, marker)
-                findings.append({
-                    "type":       "xss-reflected",
-                    "param":      target_param,
-                    "payload":    payload,
-                    "evidence":   f"Marker reflected in {context} context",
-                    "confidence": 95 if payload in body else 72,
-                    "url":        url,
-                    "context":    context,
-                })
+            analysis = await self._analyze_reflected_xss_async(
+                url, payload, body, marker, http, params, target_param
+            )
+            if analysis:
+                findings.append(analysis)
                 return findings
         return findings
 
@@ -319,15 +314,11 @@ class XSSScanner:
                 "inject_url": action,
             }
 
-            if marker in body:
-                findings.append({
-                    "type":       "xss-reflected",
-                    "param":      target_field,
-                    "payload":    payload,
-                    "evidence":   f"Marker reflected in form response",
-                    "confidence": 90,
-                    "url":        action,
-                })
+            analysis = self._analyze_reflected_xss(
+                action, payload, body, marker, target_field, method=method
+            )
+            if analysis:
+                findings.append(analysis)
                 return findings
         return findings
 
@@ -392,17 +383,11 @@ class XSSScanner:
                 "inject_url": url,
             }
 
-            if marker in body:
-                context = self._detect_context(body, marker)
-                findings.append({
-                    "type":       "xss-reflected",
-                    "param":      target_param,
-                    "payload":    payload,
-                    "evidence":   f"Marker reflected in {context} context",
-                    "confidence": 95 if payload in body else 72,
-                    "url":        url,
-                    "context":    context,
-                })
+            analysis = self._analyze_reflected_xss(
+                url, payload, body, marker, target_param
+            )
+            if analysis:
+                findings.append(analysis)
                 return findings  # one finding per param is enough
 
         return findings
@@ -433,15 +418,11 @@ class XSSScanner:
                 "inject_url": action,
             }
 
-            if marker in body:
-                findings.append({
-                    "type":       "xss-reflected",
-                    "param":      target_field,
-                    "payload":    payload,
-                    "evidence":   f"Marker reflected in form response",
-                    "confidence": 90,
-                    "url":        action,
-                })
+            analysis = self._analyze_reflected_xss(
+                action, payload, body, marker, target_field, method=method
+            )
+            if analysis:
+                findings.append(analysis)
                 return findings
 
         return findings
@@ -528,19 +509,40 @@ class XSSScanner:
             if dialog_triggered["value"] and marker in str(dialog_triggered["value"]):
                 return f"alert() triggered with marker in DOM: {url}"
 
-            # Check 2: marker appears unescaped in innerHTML
+            # Check 2: marker flowed into an actually dangerous DOM sink
             try:
-                inner = page.evaluate("document.body.innerHTML")
-                if marker in str(inner):
-                    return f"Marker found unescaped in innerHTML: {url}"
-            except Exception:
-                pass
-
-            # Check 3: marker in page.content() (full HTML)
-            try:
-                content = page.content()
-                if marker in content:
-                    return f"Marker found in page content: {url}"
+                sink = page.evaluate(
+                    """
+                    marker => {
+                        for (const el of Array.from(document.querySelectorAll('*'))) {
+                            for (const attr of Array.from(el.attributes || [])) {
+                                const name = (attr.name || '').toLowerCase();
+                                const value = attr.value || '';
+                                if (!value.includes(marker)) continue;
+                                if (name.startsWith('on')) {
+                                    return `event-handler:${name}`;
+                                }
+                                if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction')
+                                        && value.toLowerCase().includes('javascript:')) {
+                                    return `javascript-url:${name}`;
+                                }
+                                if (name === 'srcdoc') {
+                                    return 'srcdoc';
+                                }
+                            }
+                        }
+                        for (const script of Array.from(document.scripts || [])) {
+                            if ((script.textContent || '').includes(marker)) {
+                                return 'script-text';
+                            }
+                        }
+                        return null;
+                    }
+                    """,
+                    marker,
+                )
+                if sink:
+                    return f"Marker reached DOM sink ({sink}) at {url}"
             except Exception:
                 pass
 
@@ -558,6 +560,130 @@ class XSSScanner:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _analyze_reflected_xss_async(
+        self,
+        url: str,
+        payload: str,
+        body: str,
+        marker: str,
+        http,
+        params: Dict[str, str],
+        target_param: str,
+    ) -> Optional[Dict[str, Any]]:
+        sink = self._find_dangerous_reflection_sink(body, marker, payload)
+        if not sink:
+            return None
+
+        confirmed = await asyncio.to_thread(
+            self._verify_reflected_execution, url, params, target_param, payload, marker
+        )
+        confidence = 96 if confirmed else 78
+        evidence = confirmed or f"Payload reflected into dangerous sink ({sink}) without browser execution confirmation"
+        return {
+            "type":       "xss-reflected",
+            "param":      target_param,
+            "payload":    payload,
+            "evidence":   evidence,
+            "confidence": confidence,
+            "url":        url,
+            "context":    sink,
+        }
+
+    def _analyze_reflected_xss(
+        self,
+        url: str,
+        payload: str,
+        body: str,
+        marker: str,
+        target_param: str,
+        method: str = "get",
+    ) -> Optional[Dict[str, Any]]:
+        sink = self._find_dangerous_reflection_sink(body, marker, payload)
+        if not sink:
+            return None
+
+        confirmed = None
+        if method.lower() == "get":
+            parsed = urlparse(url)
+            params = {
+                k: v[0]
+                for k, v in parse_qs(parsed.query).items()
+                if v
+            }
+            params[target_param] = payload
+            confirmed = self._verify_reflected_execution(
+                url, params, target_param, payload, marker
+            )
+
+        confidence = 96 if confirmed else 78
+        evidence = confirmed or f"Payload reflected into dangerous sink ({sink}) without browser execution confirmation"
+        return {
+            "type":       "xss-reflected",
+            "param":      target_param,
+            "payload":    payload,
+            "evidence":   evidence,
+            "confidence": confidence,
+            "url":        url,
+            "context":    sink,
+        }
+
+    def _verify_reflected_execution(
+        self,
+        url: str,
+        params: Dict[str, str],
+        target_param: str,
+        payload: str,
+        marker: str,
+    ) -> Optional[str]:
+        pool = self._get_pool()
+        if not pool or pool._unavailable:
+            return None
+
+        parsed = urlparse(url)
+        current = {
+            k: v[0]
+            for k, v in parse_qs(parsed.query).items()
+            if v
+        }
+        current.update(params)
+        current[target_param] = payload
+        check_url = urlunparse(parsed._replace(query=urlencode(current)))
+        return self._playwright_check(pool, check_url, marker)
+
+    def _find_dangerous_reflection_sink(
+        self, body: str, marker: str, payload: str
+    ) -> Optional[str]:
+        if marker not in body:
+            return None
+
+        raw_present = payload in body
+        if not raw_present:
+            return None
+
+        decoded_body = unescape(body)
+        idx = decoded_body.find(marker)
+        if idx == -1:
+            idx = body.find(marker)
+            haystack = body
+        else:
+            haystack = decoded_body
+
+        surrounding = haystack[max(0, idx - 180):idx + 180]
+        context = self._detect_context(haystack, marker)
+
+        if context in {"javascript", "event-handler", "url-attribute"}:
+            return context
+
+        if "<script" in surrounding.lower():
+            return "script-tag"
+        if re.search(r'on\w+\s*=\s*["\'][^"\']*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "event-handler"
+        if re.search(r'(href|src|action|formaction)\s*=\s*["\']\s*javascript:[^"\']*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "url-attribute"
+        if re.search(r'<(img|svg|iframe|body|details)\b[^>]*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "active-html"
+        return None
 
     def _detect_context(self, body: str, marker: str) -> str:
         idx = body.find(marker)

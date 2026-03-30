@@ -130,7 +130,12 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         scan_start_time = time.time()
 
         emit_progress(scan_id, "Phase 1: Crawling target...", "phase")
-        crawler = WebCrawler(target_url, max_depth=depth, timeout=timeout)
+        crawler = WebCrawler(
+            target_url,
+            max_depth=depth,
+            timeout=timeout,
+            session=authenticated_session,
+        )
         results = crawler.crawl()
         urls = results.get("urls", [])
         forms = results.get("forms", [])

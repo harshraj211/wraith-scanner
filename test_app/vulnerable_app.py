@@ -5,11 +5,12 @@ A deliberately vulnerable Flask application for testing the scanner.
 WARNING: Never deploy this to production - it has intentional vulnerabilities!
 """
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, redirect, session, url_for
 import sqlite3
 import time
 
 app = Flask(__name__)
+app.secret_key = "test-app-secret-key"
 
 # Initialize a simple database
 def init_db():
@@ -35,6 +36,7 @@ def home():
         <li><a href="/comment">Comment (XSS vulnerable)</a></li>
         <li><a href="/profile?id=1">Profile (IDOR vulnerable)</a></li>
         <li><a href="/redirect?url=https://google.com">Redirect (Open redirect)</a></li>
+        <li><a href="/auth/login">Protected Area Login</a></li>
     </ul>
     """
     return render_template_string(html)
@@ -138,6 +140,97 @@ def redirect_page():
     url = request.args.get('url', '/')
     # VULNERABLE: No URL validation
     return f'<meta http-equiv="refresh" content="0;url={url}"><p>Redirecting to {url}...</p>'
+
+
+@app.route('/auth/login', methods=['GET'])
+def auth_login():
+    csrf_token = "auth-csrf-token"
+    session['auth_csrf'] = csrf_token
+    html = """
+    <h2>Protected Area Login</h2>
+    <form method="POST" action="/auth/session">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        Username: <input type="text" name="user_name"><br>
+        Password: <input type="password" name="user_pass"><br>
+        <input type="submit" value="Login">
+    </form>
+    """
+    return render_template_string(html, csrf_token=csrf_token)
+
+
+@app.route('/auth/session', methods=['POST'])
+def auth_session():
+    username = request.form.get('user_name', '')
+    password = request.form.get('user_pass', '')
+    csrf_token = request.form.get('csrf_token', '')
+
+    if csrf_token != session.get('auth_csrf'):
+        return "<h2>Invalid CSRF token</h2>", 400
+
+    if username == 'admin' and password == 'admin123':
+        session['authenticated_user'] = username
+        return redirect(url_for('auth_dashboard'))
+
+    return "<h2>Invalid credentials</h2>", 401
+
+
+@app.route('/auth/dashboard')
+def auth_dashboard():
+    if not session.get('authenticated_user'):
+        return redirect(url_for('auth_login'))
+
+    html = """
+    <h2>Authenticated Dashboard</h2>
+    <p>Welcome {{ user }}! <a href="/auth/logout">Logout</a></p>
+    <ul>
+        <li><a href="/auth/records?id=1">Private Record 1</a></li>
+        <li><a href="/auth/report">Internal Report Form</a></li>
+    </ul>
+    """
+    return render_template_string(html, user=session['authenticated_user'])
+
+
+@app.route('/auth/records')
+def auth_records():
+    if not session.get('authenticated_user'):
+        return redirect(url_for('auth_login'))
+
+    record_id = request.args.get('id', '1')
+    return (
+        f"<h2>Private Record #{record_id}</h2>"
+        f"<p>Owner: {session['authenticated_user']}</p>"
+        "<a href='/auth/dashboard'>Dashboard</a>"
+    )
+
+
+@app.route('/auth/report', methods=['GET', 'POST'])
+def auth_report():
+    if not session.get('authenticated_user'):
+        return redirect(url_for('auth_login'))
+
+    if request.method == 'GET':
+        html = """
+        <h2>Internal Report</h2>
+        <form method="POST">
+            <input type="text" name="title" value="Quarterly report"><br>
+            <textarea name="notes"></textarea><br>
+            <input type="submit" value="Save">
+        </form>
+        """
+        return render_template_string(html)
+
+    title = request.form.get('title', '')
+    notes = request.form.get('notes', '')
+    return (
+        f"<h2>Report Saved</h2><p>{title}</p><p>{notes}</p>"
+        "<a href='/auth/dashboard'>Dashboard</a>"
+    )
+
+
+@app.route('/auth/logout')
+def auth_logout():
+    session.clear()
+    return redirect(url_for('auth_login'))
 
 if __name__ == '__main__':
     print("\n" + "="*60)

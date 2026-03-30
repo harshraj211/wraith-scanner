@@ -121,7 +121,7 @@ RULE_TYPE_MAP = {
 # Custom YAML rules -- local, no login needed
 # -----------------------------------------------------------------------------
 
-CUSTOM_RULES = """
+CUSTOM_RULES = r"""
 rules:
 
   # -- Express: req.query/body/params -> res.send/json (Reflected XSS) --------
@@ -264,6 +264,157 @@ rules:
       owasp: "A08:2021"
       cwe: "CWE-502"
       category: rce
+
+  # -- Flask/FastAPI: reflected user input into a dynamic template -------------
+  - id: custom-python-template-xss
+    patterns:
+      - pattern-either:
+          - pattern: render_template_string(..., $REQ.$SOURCE.$FIELD, ...)
+          - pattern: TemplateResponse(..., {"$KEY": $REQ.$SOURCE.$FIELD, ...}, ...)
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: (args|form|values|cookies|headers|query_params|path_params)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: (request)
+    message: >
+      User-controlled data flows into a dynamic template response. If the value
+      is rendered without autoescaping or is later marked safe, this can become
+      reflected XSS. Validate and escape untrusted input.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      owasp: "A03:2021"
+      cwe: "CWE-79"
+      category: xss
+
+  # -- Flask/Django/FastAPI: open redirect with request-controlled target ------
+  - id: custom-python-open-redirect
+    patterns:
+      - pattern-either:
+          - pattern: redirect($REQ.$SOURCE.$FIELD)
+          - pattern: RedirectResponse($REQ.$SOURCE.$FIELD, ...)
+          - pattern: HttpResponseRedirect($REQ.$SOURCE.$FIELD)
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: (args|form|values|GET|POST|query_params|path_params)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: (request)
+    message: >
+      Open redirect risk: a request-controlled value is used as the redirect
+      destination. Validate against an allowlist of local paths or trusted hosts.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      owasp: "A01:2021"
+      cwe: "CWE-601"
+      category: redirect
+
+  # -- Python web apps: SSRF via requests/httpx/urllib -------------------------
+  - id: custom-python-ssrf-request-input
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($REQ.$SOURCE.$FIELD, ...)
+          - pattern: requests.post($REQ.$SOURCE.$FIELD, ...)
+          - pattern: httpx.get($REQ.$SOURCE.$FIELD, ...)
+          - pattern: httpx.post($REQ.$SOURCE.$FIELD, ...)
+          - pattern: urllib.request.urlopen($REQ.$SOURCE.$FIELD, ...)
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: (args|form|values|json|GET|POST|query_params|path_params)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: (request)
+    message: >
+      SSRF risk: request-controlled input is passed directly to an outbound HTTP
+      client. Restrict destinations and validate scheme, host, and path.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A10:2021"
+      cwe: "CWE-918"
+      category: ssrf
+
+  # -- Python file read/send with request-controlled path ----------------------
+  - id: custom-python-path-traversal-request-input
+    patterns:
+      - pattern-either:
+          - pattern: open($REQ.$SOURCE.$FIELD, ...)
+          - pattern: send_file($REQ.$SOURCE.$FIELD, ...)
+          - pattern: FileResponse($REQ.$SOURCE.$FIELD, ...)
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: (args|form|values|GET|POST|query_params|path_params)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: (request)
+    message: >
+      Path traversal risk: a request-controlled file path is used in a file read
+      or file response. Canonicalize and enforce a base directory allowlist.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A01:2021"
+      cwe: "CWE-22"
+      category: path-traversal
+
+  # -- Python: string concatenation / formatting in SQL execution --------------
+  - id: custom-python-sqli-string-build
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute("..." + $INPUT, ...)
+          - pattern: $CURSOR.execute($SQL % $INPUT, ...)
+          - pattern: $CURSOR.execute("...".format(...), ...)
+    message: >
+      SQL Injection risk: SQL is built with string concatenation or formatting
+      before execution. Use parameterized queries instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A03:2021"
+      cwe: "CWE-89"
+      category: sqli
+
+  # -- Python: unsafe deserialization ------------------------------------------
+  - id: custom-python-unsafe-deserialization
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads($DATA)
+          - pattern: dill.loads($DATA)
+          - pattern: marshal.loads($DATA)
+    message: >
+      Unsafe deserialization can lead to remote code execution when untrusted
+      input reaches the deserializer. Use a safe format like JSON instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A08:2021"
+      cwe: "CWE-502"
+      category: deserialization
+
+  # -- Python: weak password hashing -------------------------------------------
+  - id: custom-python-weak-password-hash
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5($DATA)
+          - pattern: hashlib.sha1($DATA)
+      - pattern-either:
+          - pattern-inside: |
+              $PWD = ...
+          - pattern-inside: |
+              $PASSWORD = ...
+          - pattern-inside: |
+              $PASSWD = ...
+    message: >
+      Weak password hashing detected. MD5 and SHA1 are unsuitable for passwords.
+      Use a dedicated password hashing function such as bcrypt, scrypt, or Argon2.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      owasp: "A02:2021"
+      cwe: "CWE-327"
+      category: crypto
 
   # -- Hardcoded password in object literal ------------------------------------
   - id: custom-hardcoded-password-object

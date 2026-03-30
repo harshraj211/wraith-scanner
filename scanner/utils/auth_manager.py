@@ -1,5 +1,6 @@
 """Authentication manager for scanning protected areas."""
 from typing import Optional, Dict
+from urllib.parse import urljoin, urlparse
 import requests
 
 
@@ -42,6 +43,15 @@ class AuthManager:
             from bs4 import BeautifulSoup
             
             soup = BeautifulSoup(resp.text, 'html.parser')
+            form = soup.find('form')
+
+            submit_url = login_url
+            submit_method = 'post'
+            if form:
+                action = (form.get('action') or '').strip()
+                if action:
+                    submit_url = urljoin(login_url, action)
+                submit_method = (form.get('method') or 'post').lower()
             
             # Look for hidden inputs (often CSRF tokens)
             for hidden in soup.find_all('input', type='hidden'):
@@ -51,7 +61,10 @@ class AuthManager:
                     login_data[name] = value
             
             # Submit login form
-            login_resp = self.session.post(login_url, data=login_data)
+            if submit_method == 'get':
+                login_resp = self.session.get(submit_url, params=login_data)
+            else:
+                login_resp = self.session.post(submit_url, data=login_data)
             
             # Check if login was successful
             # Common indicators: redirect, no error message, presence of logout link
@@ -62,8 +75,18 @@ class AuthManager:
                 
                 has_failure = any(indicator in text_lower for indicator in failure_indicators)
                 has_logout = 'logout' in text_lower or 'sign out' in text_lower
-                
-                if not has_failure or has_logout:
+                final_path = urlparse(getattr(login_resp, "url", submit_url)).path
+                login_paths = {
+                    urlparse(login_url).path,
+                    urlparse(submit_url).path,
+                }
+                moved_away_from_login = final_path not in login_paths
+                has_session_cookie = bool(self.session.cookies)
+                redirected = bool(getattr(login_resp, "history", []))
+
+                if not has_failure and (
+                    has_logout or moved_away_from_login or has_session_cookie or redirected
+                ):
                     self.is_authenticated = True
                     self.auth_type = 'form'
                     self.credentials = {'username': username, 'password': password}

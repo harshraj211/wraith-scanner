@@ -45,15 +45,17 @@ NAV_WAIT        = "domcontentloaded"  # FIX: was "networkidle"
 
 class WebCrawler:
 
-    def __init__(self, base_url: str, max_depth: int = 3, timeout: int = 10):
+    def __init__(self, base_url: str, max_depth: int = 3, timeout: int = 10,
+                 session: Optional[requests.Session] = None):
         self.base_url  = base_url.rstrip("/")
         self.max_depth = max_depth
         self.timeout   = timeout
         self.domain    = urlparse(base_url).netloc
 
-        self.session = requests.Session()
+        self.session = session or requests.Session()
         self.session.verify = False
-        self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
+        if "User-Agent" not in self.session.headers:
+            self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
 
     def crawl(self) -> Dict[str, Any]:
         """
@@ -242,7 +244,12 @@ class WebCrawler:
             """)
             for href in hrefs:
                 url = self._normalize_url(href, base_url)
-                if url and self._same_domain(url) and not self._skip_url(url):
+                if (
+                    url
+                    and self._same_domain(url)
+                    and not self._skip_url(url)
+                    and not self._is_logout_url(url)
+                ):
                     links.add(url)
         except Exception:
             pass
@@ -603,7 +610,12 @@ class WebCrawler:
             # Links
             for tag in soup.find_all("a", href=True):
                 link = self._normalize_url(tag["href"], url)
-                if link and self._same_domain(link) and not self._skip_url(link):
+                if (
+                    link
+                    and self._same_domain(link)
+                    and not self._skip_url(link)
+                    and not self._is_logout_url(link)
+                ):
                     if link not in visited:
                         queue.append((link, depth + 1))
 
@@ -689,6 +701,11 @@ class WebCrawler:
     def _skip_url(self, url: str) -> bool:
         path = urlparse(url).path.lower()
         return any(path.endswith(ext) for ext in SKIP_EXTENSIONS)
+
+    def _is_logout_url(self, url: str) -> bool:
+        path = urlparse(url).path.lower()
+        logout_keywords = ("logout", "signout", "log-out", "sign-out")
+        return any(keyword in path for keyword in logout_keywords)
 
     def _fetch_robots_txt(self) -> Set[str]:
         urls: Set[str] = set()

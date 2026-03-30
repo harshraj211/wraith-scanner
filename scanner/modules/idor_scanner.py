@@ -6,8 +6,9 @@ insecure direct object references.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from difflib import SequenceMatcher
 import re
+from typing import Any, Dict, List, Optional, Set
 
 import requests
 
@@ -56,8 +57,7 @@ class IDORScanner:
             baseline_resp = self.session.get(url, params=params, timeout=self.timeout)
             baseline_text = baseline_resp.text or ""
             baseline_status = baseline_resp.status_code
-            baseline_len = len(baseline_text)
-            baseline_snippet = baseline_text[:200]
+            baseline_profile = self._build_response_profile(baseline_text)
         except requests.RequestException as exc:
             print(f"Failed to fetch baseline for {url}: {exc}")
             return findings
@@ -77,7 +77,7 @@ class IDORScanner:
                     continue
 
                 vuln = self._test_id_manipulation(
-                    url, param, orig_int, str(cand), params, baseline_status, baseline_len, baseline_snippet
+                    url, param, orig_int, str(cand), params, baseline_status, baseline_profile
                 )
                 if vuln:
                     findings.append(vuln)
@@ -100,7 +100,7 @@ class IDORScanner:
 
         baseline_text   = baseline_resp.text or ""
         baseline_status = baseline_resp.status_code
-        baseline_len    = len(baseline_text)
+        baseline_profile = self._build_response_profile(baseline_text)
 
         for param, orig_value in numeric_params.items():
             try:
@@ -112,13 +112,19 @@ class IDORScanner:
             for cand in candidates:
                 if cand == orig_int:
                     continue
-                vuln = await self._test_id_async(url, param, orig_int, str(cand), params, baseline_status, baseline_len, http)
+                vuln = await self._test_id_async(
+                    url, param, orig_int, str(cand), params,
+                    baseline_status, baseline_profile, http
+                )
                 if vuln:
                     findings.append(vuln)
                     break
         return findings
 
-    async def _test_id_async(self, url, param_name, original_id, candidate_id, params, baseline_status, baseline_len, http):
+    async def _test_id_async(
+        self, url, param_name, original_id, candidate_id,
+        params, baseline_status, baseline_profile, http
+    ):
         mutated = params.copy()
         mutated[param_name] = candidate_id
         try:
@@ -127,27 +133,10 @@ class IDORScanner:
                 return None
             text   = resp.text or ""
             status = resp.status_code
-            length = len(text)
-            length_diff = abs(length - baseline_len)
-            lowered = text.lower()
-            error_words = ["not found", "404", "forbidden", "error", "unauthorized"]
-            looks_like_error = any(w in lowered for w in error_words)
-            evidence_parts = [f"Status: {status}", f"Length: {length} (original was {baseline_len})"]
-            is_potential = False
-            if status == 200 and (length_diff > 50 or not looks_like_error):
-                is_potential = True
-            if baseline_status in (403, 404) and status == 200 and not looks_like_error:
-                is_potential = True
-            if is_potential:
-                return {
-                    "vulnerable": True,
-                    "type": "idor",
-                    "param": param_name,
-                    "payload": str(candidate_id),
-                    "evidence": ", ".join(evidence_parts),
-                    "confidence": 75,
-                    "original_value": str(original_id),
-                }
+            return self._analyze_candidate(
+                param_name, original_id, candidate_id,
+                baseline_status, baseline_profile, status, text
+            )
         except Exception:
             pass
         return None
@@ -166,7 +155,7 @@ class IDORScanner:
             if v is None:
                 continue
             sv = str(v).strip()
-            if re.fullmatch(r"\d+", sv):
+            if re.fullmatch(r"\d+", sv) and self._is_likely_id_param(k):
                 numeric[k] = sv
         return numeric
 
@@ -178,8 +167,7 @@ class IDORScanner:
         candidate_id: str,
         params: Dict[str, Any],
         baseline_status: int,
-        baseline_len: int,
-        baseline_snippet: str,
+        baseline_profile: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Test a single manipulated ID and compare responses.
 
@@ -192,45 +180,139 @@ class IDORScanner:
             resp = self.session.get(url, params=mutated, timeout=self.timeout)
             text = resp.text or ""
             status = resp.status_code
-            length = len(text)
-
-            # Heuristics for potential IDOR:
-            # - candidate returns 200 while baseline might be 200 as well (data likely returned)
-            # - response length differs by >50 chars (different data)
-            # - status code is 200 while baseline was 404/403 (access granted)
-            length_diff = abs(length - baseline_len)
-
-            # Simple detection of error pages/content that indicate invalid access
-            lowered = text.lower()
-            error_words = ["not found", "404", "forbidden", "error", "unauthorized"]
-            looks_like_error = any(w in lowered for w in error_words)
-
-            evidence_parts = []
-            evidence_parts.append(f"Status: {status}")
-            evidence_parts.append(f"Length: {length} (original was {baseline_len})")
-
-            is_potential = False
-
-            if status == 200 and (length_diff > 50 or not looks_like_error):
-                is_potential = True
-
-            if baseline_status in (403, 404) and status == 200 and not looks_like_error:
-                is_potential = True
-
-            if is_potential:
-                evidence = ", ".join(evidence_parts)
+            finding = self._analyze_candidate(
+                param_name, original_id, candidate_id,
+                baseline_status, baseline_profile, status, text
+            )
+            if finding:
+                evidence = finding["evidence"]
                 print(f"Potential IDOR detected: param={param_name}, candidate={candidate_id}, {evidence}")
-                return {
-                    "vulnerable": True,
-                    "type": "idor",
-                    "param": param_name,
-                    "payload": str(candidate_id),
-                    "evidence": evidence,
-                    "confidence": 75,
-                    "original_value": str(original_id),
-                }
+                return finding
 
         except requests.RequestException as exc:
             print(f"Request failed during IDOR test for {param_name}={candidate_id}: {exc}")
 
         return None
+
+    def _is_likely_id_param(self, name: str) -> bool:
+        name = (name or "").lower()
+        keywords = (
+            "id", "user", "account", "profile", "order", "invoice",
+            "customer", "member", "record", "doc", "document", "item",
+        )
+        return any(keyword in name for keyword in keywords)
+
+    def _build_response_profile(self, text: str) -> Dict[str, Any]:
+        lowered = (text or "").lower()
+        structure = re.sub(r'\b\d+\b', '#', lowered)
+        structure = re.sub(r'[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}', '<email>', structure)
+        structure = re.sub(r'\s+', ' ', structure)
+        return {
+            "text": text or "",
+            "length": len(text or ""),
+            "structure": structure[:4000],
+            "denied": self._looks_like_error(text or ""),
+            "artifacts": self._extract_identity_artifacts(text or ""),
+        }
+
+    def _extract_identity_artifacts(self, text: str) -> Set[str]:
+        artifacts: Set[str] = set()
+
+        for email in re.findall(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', text):
+            artifacts.add(f"email:{email.lower()}")
+
+        patterns = [
+            r'(?i)\b(username|user|email|name|account|customer|owner)\b\s*[:=]\s*([^\n<]{1,80})',
+            r'(?i)\b(profile|account|order|invoice|document|record)\s*#?\s*(\d{1,12})',
+            r'(?i)"(id|user_id|account_id|order_id|invoice_id|profile_id)"\s*:\s*"?([A-Za-z0-9_.@-]{1,80})"?',
+            r'(?i)"(username|email|name|owner|customer)"\s*:\s*"([^"]{1,80})"',
+        ]
+        for pattern in patterns:
+            for key, value in re.findall(pattern, text):
+                cleaned = re.sub(r'\s+', ' ', value).strip(" '\"\t\r\n")
+                if cleaned:
+                    artifacts.add(f"{key.lower()}:{cleaned.lower()[:80]}")
+
+        return artifacts
+
+    def _looks_like_error(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        error_words = [
+            "not found", "404", "forbidden", "error", "unauthorized",
+            "access denied", "permission denied", "invalid", "does not exist",
+        ]
+        return any(word in lowered for word in error_words)
+
+    def _analyze_candidate(
+        self,
+        param_name: str,
+        original_id: int,
+        candidate_id: str,
+        baseline_status: int,
+        baseline_profile: Dict[str, Any],
+        candidate_status: int,
+        candidate_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        if candidate_status != 200:
+            return None
+
+        candidate_profile = self._build_response_profile(candidate_text)
+        if candidate_profile["denied"]:
+            return None
+        if candidate_profile["text"] == baseline_profile["text"]:
+            return None
+
+        similarity = SequenceMatcher(
+            None,
+            baseline_profile["structure"],
+            candidate_profile["structure"],
+        ).ratio()
+
+        baseline_artifacts = baseline_profile["artifacts"]
+        candidate_artifacts = candidate_profile["artifacts"]
+        new_artifacts = candidate_artifacts - baseline_artifacts
+        lost_artifacts = baseline_artifacts - candidate_artifacts
+        artifact_change = bool(new_artifacts and lost_artifacts)
+
+        candidate_mentions_new_id = re.search(
+            rf'(?<!\d){re.escape(candidate_id)}(?!\d)', candidate_profile["text"]
+        ) is not None
+        baseline_mentions_original = re.search(
+            rf'(?<!\d){re.escape(str(original_id))}(?!\d)', baseline_profile["text"]
+        ) is not None
+
+        if similarity < 0.55:
+            return None
+
+        evidence_parts = [
+            f"Status: {candidate_status}",
+            f"Template similarity: {similarity:.2f}",
+        ]
+
+        if artifact_change:
+            sample_new = ", ".join(sorted(list(new_artifacts))[:3])
+            sample_old = ", ".join(sorted(list(lost_artifacts))[:3])
+            evidence_parts.append(f"Identity fields changed ({sample_old} -> {sample_new})")
+
+        if candidate_mentions_new_id and baseline_mentions_original:
+            evidence_parts.append(f"Object identifier changed from {original_id} to {candidate_id}")
+
+        if artifact_change and candidate_mentions_new_id:
+            confidence = 90
+        elif artifact_change:
+            confidence = 84
+        elif baseline_status in (403, 404) and candidate_mentions_new_id:
+            confidence = 76
+            evidence_parts.append("Baseline looked blocked, mutated object returned 200")
+        else:
+            return None
+
+        return {
+            "vulnerable": True,
+            "type": "idor",
+            "param": param_name,
+            "payload": str(candidate_id),
+            "evidence": ", ".join(evidence_parts),
+            "confidence": confidence,
+            "original_value": str(original_id),
+        }

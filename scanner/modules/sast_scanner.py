@@ -25,6 +25,11 @@ import requests
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    tomllib = None
+
 
 requests.packages.urllib3.disable_warnings()
 
@@ -33,30 +38,50 @@ requests.packages.urllib3.disable_warnings()
 # ---------------------------------------------------------------------------
 
 SECRET_PATTERNS: List[Tuple[str, str, int]] = [
-    (r'(?i)(password|passwd|pwd)\s*=\s*["\'][^"\']{4,}["\']',       "hardcoded-password",    90),
-    (r'(?i)(secret|secret_key)\s*=\s*["\'][^"\']{8,}["\']',         "hardcoded-secret",      90),
-    (r'(?i)api[_-]?key\s*=\s*["\'][^"\']{8,}["\']',                 "hardcoded-api-key",     90),
-    (r'(?i)access[_-]?token\s*=\s*["\'][^"\']{8,}["\']',            "hardcoded-token",       90),
-    (r'(?i)auth[_-]?token\s*=\s*["\'][^"\']{8,}["\']',              "hardcoded-token",       85),
-    (r'AKIA[0-9A-Z]{16}',                                             "aws-access-key",        98),
-    (r'(?i)aws[_-]?secret\s*=\s*["\'][^"\']{20,}["\']',             "aws-secret-key",        98),
-    (r'-----BEGIN (RSA|EC|DSA|OPENSSH) PRIVATE KEY-----',            "private-key",           99),
-    (r'(?i)private[_-]?key\s*=\s*["\'][^"\']{16,}["\']',            "hardcoded-private-key", 95),
-    (r'ghp_[a-zA-Z0-9]{36}',                                         "github-token",          99),
-    (r'gho_[a-zA-Z0-9]{36}',                                         "github-oauth-token",    99),
-    (r'ghs_[a-zA-Z0-9]{36}',                                         "github-server-token",   99),
-    (r'xox[baprs]-[0-9a-zA-Z\-]{10,}',                               "slack-token",           99),
-    (r'(?i)db[_-]?password\s*=\s*["\'][^"\']{4,}["\']',             "db-password",           90),
-    (r'(?i)database[_-]?url\s*=\s*["\'].*:.*@.*["\']',              "db-connection-string",  88),
-    (r'mongodb(\+srv)?://[^"\'>\s]{8,}',                             "mongodb-uri",           88),
-    (r'redis://:?[^@\s]{4,}@',                                       "redis-uri-with-auth",   88),
-    (r'(?i)smtp[_-]?password\s*=\s*["\'][^"\']{4,}["\']',           "smtp-password",         85),
-    (r'(?i)jwt[_-]?secret\s*=\s*["\'][^"\']{8,}["\']',              "jwt-secret",            90),
-    (r'(?i)encryption[_-]?key\s*=\s*["\'][^"\']{8,}["\']',          "encryption-key",        88),
-    (r'(?i)stripe[_-]?secret\s*=\s*["\']sk_live_[^"\']{20,}["\']',  "stripe-live-key",       99),
-    (r'AIza[0-9A-Za-z\-_]{35}',                                      "google-api-key",        99),
-    (r'(?i)sendgrid[_-]?key\s*=\s*["\']SG\.[^"\']{40,}["\']',      "sendgrid-key",          99),
+    (r'(?i)(?:export\s+)?["\']?(password|passwd|pwd)["\']?\s*[:=]\s*["\'][^"\']{4,}["\']',       "hardcoded-password",    90),
+    (r'(?i)(?:export\s+)?["\']?(secret|secret_key)["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',         "hardcoded-secret",      90),
+    (r'(?i)(?:export\s+)?["\']?api[_-]?key["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',                 "hardcoded-api-key",     90),
+    (r'(?i)(?:export\s+)?["\']?access[_-]?token["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',            "hardcoded-token",       90),
+    (r'(?i)(?:export\s+)?["\']?auth[_-]?token["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',              "hardcoded-token",       85),
+    (r'(?i)(?:export\s+)?["\']?client[_-]?secret["\']?\s*[:=]\s*["\'][^"\']{12,}["\']',          "hardcoded-secret",      92),
+    (r'(?i)["\']?authorization["\']?\s*[:=]\s*["\']bearer\s+[A-Za-z0-9._\-=/+]{16,}["\']',       "hardcoded-token",       95),
+    (r'AKIA[0-9A-Z]{16}',                                                                           "aws-access-key",        98),
+    (r'(?i)(?:export\s+)?["\']?aws[_-]?(secret|secret_access_key)["\']?\s*[:=]\s*["\'][^"\']{20,}["\']', "aws-secret-key", 98),
+    (r'(?i)(?:export\s+)?["\']?private[_-]?key["\']?\s*[:=]\s*["\'][^"\']{16,}["\']',            "hardcoded-private-key", 95),
+    (r'ghp_[a-zA-Z0-9]{36}',                                                                       "github-token",          99),
+    (r'gho_[a-zA-Z0-9]{36}',                                                                       "github-oauth-token",    99),
+    (r'ghs_[a-zA-Z0-9]{36}',                                                                       "github-server-token",   99),
+    (r'xox[baprs]-[0-9a-zA-Z\-]{10,}',                                                             "slack-token",           99),
+    (r'(?i)(?:export\s+)?["\']?db[_-]?password["\']?\s*[:=]\s*["\'][^"\']{4,}["\']',             "db-password",           90),
+    (r'(?i)(?:export\s+)?["\']?database[_-]?url["\']?\s*[:=]\s*["\']?.*:.*@.*["\']?',            "db-connection-string",  88),
+    (r'mongodb(\+srv)?://[^"\'>\s]{8,}',                                                           "mongodb-uri",           88),
+    (r'redis://:?[^@\s]{4,}@',                                                                     "redis-uri-with-auth",   88),
+    (r'(?i)(?:export\s+)?["\']?smtp[_-]?password["\']?\s*[:=]\s*["\'][^"\']{4,}["\']',           "smtp-password",         85),
+    (r'(?i)(?:export\s+)?["\']?jwt[_-]?secret["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',              "jwt-secret",            90),
+    (r'(?i)(?:export\s+)?["\']?encryption[_-]?key["\']?\s*[:=]\s*["\'][^"\']{8,}["\']',          "encryption-key",        88),
+    (r'(?i)(?:export\s+)?["\']?stripe[_-]?secret["\']?\s*[:=]\s*["\']sk_live_[^"\']{20,}["\']',  "stripe-live-key",       99),
+    (r'AIza[0-9A-Za-z\-_]{35}',                                                                    "google-api-key",        99),
+    (r'(?i)(?:export\s+)?["\']?sendgrid[_-]?key["\']?\s*[:=]\s*["\']SG\.[^"\']{40,}["\']',      "sendgrid-key",          99),
 ]
+
+BLOCK_SECRET_PATTERNS: List[Tuple[str, str, int]] = [
+    (r'-----BEGIN (RSA|EC|DSA|OPENSSH|PGP) PRIVATE KEY-----.*?-----END (RSA|EC|DSA|OPENSSH|PGP) PRIVATE KEY-----',
+     "private-key", 99),
+]
+
+HIGH_ENTROPY_FIELD_PATTERNS: List[Tuple[re.Pattern, str, int, int]] = [
+    (re.compile(r'(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|secret_key|client[_-]?secret|private[_-]?key|jwt[_-]?secret|bearer[_-]?token)'), "hardcoded-token", 88, 20),
+    (re.compile(r'(?i)(password|passwd|pwd|db[_-]?password|smtp[_-]?password)'), "hardcoded-password", 85, 12),
+]
+
+ASSIGNMENT_VALUE_RE = re.compile(
+    r'''(?ix)
+    (?:export\s+)?
+    ["']?(?P<key>[A-Za-z0-9_.\-]+)["']?
+    \s*[:=]\s*
+    ["']?(?P<value>[^"'#\n]{8,})["']?
+    '''
+)
 
 # ---------------------------------------------------------------------------
 # Misconfiguration patterns
@@ -116,7 +141,8 @@ def _clean_version(raw: str) -> str:
     """Strip semver range operators so OSV receives a clean version.
     Examples: ^1.2.3 -> 1.2.3  |  >=2.0.0 -> 2.0.0  |  ~1.2 -> 1.2
     """
-    return re.sub(r'^[\^~><=! ]+', '', (raw or "").strip())
+    cleaned = re.sub(r'^[\^~><=! ]+', '', (raw or "").strip())
+    return re.sub(r'^v(?=\d)', '', cleaned, flags=re.IGNORECASE)
 
 
 def _is_valid_version(v: str) -> bool:
@@ -355,6 +381,7 @@ class SASTScanner:
 
     def _scan_secrets(self, content: str, rel: str) -> List[Dict[str, Any]]:
         out = []
+        out.extend(self._scan_block_secrets(content, rel))
         for i, line in enumerate(content.splitlines(), 1):
             if line.strip().startswith(("#", "//", "*", "<!--")):
                 continue
@@ -369,7 +396,83 @@ class SASTScanner:
                         "source": "sast-scanner",
                     })
                     break
-        return out
+            else:
+                entropy_finding = self._scan_high_entropy_secret(line, rel, i)
+                if entropy_finding:
+                    out.append(entropy_finding)
+        return self._dedupe_findings(out)
+
+    def _scan_block_secrets(self, content: str, rel: str) -> List[Dict[str, Any]]:
+        findings = []
+        for pattern, label, conf in BLOCK_SECRET_PATTERNS:
+            for match in re.finditer(pattern, content, re.DOTALL | re.IGNORECASE):
+                line_no = content.count("\n", 0, match.start()) + 1
+                snippet = match.group(0).splitlines()[0][:120]
+                findings.append({
+                    "type": label,
+                    "category": "secret",
+                    "file": rel,
+                    "line": line_no,
+                    "code": snippet,
+                    "confidence": conf,
+                    "severity": "Critical",
+                    "message": f"Hardcoded {label} detected",
+                    "source": "sast-scanner",
+                })
+        return findings
+
+    def _scan_high_entropy_secret(self, line: str, rel: str, line_no: int) -> Optional[Dict[str, Any]]:
+        match = ASSIGNMENT_VALUE_RE.search(line)
+        if not match:
+            return None
+
+        key = match.group("key") or ""
+        value = (match.group("value") or "").strip()
+        if not value or any(token in value.lower() for token in ("localhost", "example.com", "changeme", "your_", "sample", "dummy")):
+            return None
+
+        for field_pattern, label, confidence, min_length in HIGH_ENTROPY_FIELD_PATTERNS:
+            if not field_pattern.search(key):
+                continue
+            if len(value) < min_length:
+                continue
+            if not self._looks_high_entropy(value):
+                continue
+            return {
+                "type": label,
+                "category": "secret",
+                "file": rel,
+                "line": line_no,
+                "code": line.strip()[:120],
+                "confidence": confidence,
+                "severity": "Critical",
+                "message": f"Potential hardcoded {label} detected via high-entropy value",
+                "source": "sast-scanner",
+            }
+        return None
+
+    def _looks_high_entropy(self, value: str) -> bool:
+        trimmed = value.strip().strip('"\'')
+        if len(trimmed) < 12:
+            return False
+        unique_ratio = len(set(trimmed)) / max(len(trimmed), 1)
+        classes = 0
+        classes += bool(re.search(r'[a-z]', trimmed))
+        classes += bool(re.search(r'[A-Z]', trimmed))
+        classes += bool(re.search(r'\d', trimmed))
+        classes += bool(re.search(r'[^A-Za-z0-9]', trimmed))
+        return unique_ratio >= 0.45 and classes >= 3
+
+    def _dedupe_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        unique = []
+        seen = set()
+        for finding in findings:
+            key = (finding.get("type"), finding.get("file"), finding.get("line"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(finding)
+        return unique
 
     def _scan_misconfigs(self, content: str, rel: str) -> List[Dict[str, Any]]:
         out = []
@@ -390,12 +493,32 @@ class SASTScanner:
     def _scan_dependencies(self, repo_path: str) -> List[Dict[str, Any]]:
         root     = Path(repo_path)
         packages: List[Dict[str, str]] = []
+        npm_lock_dirs = set()
+        poetry_lock_dirs = set()
+
+        for lock_file in root.rglob("package-lock.json"):
+            if self._should_skip_dep_file(lock_file):
+                continue
+            pkgs = self._parse_package_lock(lock_file)
+            if pkgs:
+                npm_lock_dirs.add(lock_file.parent.resolve())
+                print(f"[SASTScanner] npm lock: {len(pkgs)} deps in {lock_file.name}")
+            packages.extend(pkgs)
+
+        for lock_file in root.rglob("npm-shrinkwrap.json"):
+            if self._should_skip_dep_file(lock_file):
+                continue
+            pkgs = self._parse_package_lock(lock_file)
+            if pkgs:
+                npm_lock_dirs.add(lock_file.parent.resolve())
+                print(f"[SASTScanner] npm shrinkwrap: {len(pkgs)} deps in {lock_file.name}")
+            packages.extend(pkgs)
 
         for pkg_file in root.rglob("package.json"):
-            # Skip blacklisted dirs (includes scanner-terminal)
-            if any(part in SKIP_DEP_DIRS for part in pkg_file.parts):
+            if self._should_skip_dep_file(pkg_file):
                 continue
-            # Skip frontend-only CRA/Vite apps
+            if pkg_file.parent.resolve() in npm_lock_dirs:
+                continue
             if _is_frontend_package_json(pkg_file):
                 try:
                     rel = pkg_file.relative_to(root)
@@ -405,24 +528,69 @@ class SASTScanner:
                 continue
             pkgs = self._parse_npm(pkg_file)
             if pkgs:
-                print(f"[SASTScanner] npm: {len(pkgs)} deps in {pkg_file.name}")
+                print(f"[SASTScanner] npm manifest: {len(pkgs)} deps in {pkg_file.name}")
             packages.extend(pkgs)
 
         for req_file in root.rglob("requirements*.txt"):
-            if any(part in SKIP_DEP_DIRS for part in req_file.parts):
+            if self._should_skip_dep_file(req_file):
                 continue
             pkgs = self._parse_pip(req_file, "PyPI")
             if pkgs:
                 print(f"[SASTScanner] pip: {len(pkgs)} deps in {req_file.name}")
             packages.extend(pkgs)
 
-        for pipfile in root.rglob("Pipfile"):
-            if any(part in SKIP_DEP_DIRS for part in pipfile.parts):
+        for lock_file in root.rglob("poetry.lock"):
+            if self._should_skip_dep_file(lock_file):
                 continue
-            pkgs = self._parse_pip(pipfile, "PyPI")
+            pkgs = self._parse_poetry_lock(lock_file)
+            if pkgs:
+                poetry_lock_dirs.add(lock_file.parent.resolve())
+                print(f"[SASTScanner] poetry lock: {len(pkgs)} deps in {lock_file.name}")
+            packages.extend(pkgs)
+
+        for pyproject in root.rglob("pyproject.toml"):
+            if self._should_skip_dep_file(pyproject):
+                continue
+            if pyproject.parent.resolve() in poetry_lock_dirs:
+                continue
+            pkgs = self._parse_pyproject(pyproject)
+            if pkgs:
+                print(f"[SASTScanner] pyproject: {len(pkgs)} deps in {pyproject.name}")
+            packages.extend(pkgs)
+
+        for pipfile_lock in root.rglob("Pipfile.lock"):
+            if self._should_skip_dep_file(pipfile_lock):
+                continue
+            pkgs = self._parse_pipfile_lock(pipfile_lock)
+            if pkgs:
+                print(f"[SASTScanner] Pipfile.lock: {len(pkgs)} deps")
+            packages.extend(pkgs)
+
+        for pipfile in root.rglob("Pipfile"):
+            if self._should_skip_dep_file(pipfile):
+                continue
+            pkgs = self._parse_pipfile(pipfile)
             if pkgs:
                 print(f"[SASTScanner] Pipfile: {len(pkgs)} deps")
             packages.extend(pkgs)
+
+        for go_mod in root.rglob("go.mod"):
+            if self._should_skip_dep_file(go_mod):
+                continue
+            pkgs = self._parse_go_mod(go_mod)
+            if pkgs:
+                print(f"[SASTScanner] go.mod: {len(pkgs)} deps")
+            packages.extend(pkgs)
+
+        for composer_lock in root.rglob("composer.lock"):
+            if self._should_skip_dep_file(composer_lock):
+                continue
+            pkgs = self._parse_composer_lock(composer_lock)
+            if pkgs:
+                print(f"[SASTScanner] composer.lock: {len(pkgs)} deps")
+            packages.extend(pkgs)
+
+        packages = self._dedupe_packages(packages)
 
         if not packages:
             print("[SASTScanner] No backend dependency files found")
@@ -484,6 +652,41 @@ class SASTScanner:
             print(f"[SASTScanner] npm parse error {path.name}: {e}")
         return packages
 
+    def _parse_package_lock(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(data.get("packages"), dict):
+                for pkg_path, meta in data["packages"].items():
+                    if not pkg_path.startswith("node_modules/"):
+                        continue
+                    name = pkg_path.split("node_modules/")[-1]
+                    version = _clean_version(str(meta.get("version", "")))
+                    if not name or not _is_valid_version(version):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": version,
+                        "ecosystem": "npm",
+                        "file": str(path),
+                        "raw_line": f"{name}@{version}",
+                    })
+            elif isinstance(data.get("dependencies"), dict):
+                for name, meta in data["dependencies"].items():
+                    version = _clean_version(str((meta or {}).get("version", "")))
+                    if not _is_valid_version(version):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": version,
+                        "ecosystem": "npm",
+                        "file": str(path),
+                        "raw_line": f"{name}@{version}",
+                    })
+        except Exception as e:
+            print(f"[SASTScanner] package-lock parse error {path.name}: {e}")
+        return packages
+
     def _parse_pip(self, path: Path,
                    ecosystem: str = "PyPI") -> List[Dict[str, str]]:
         packages = []
@@ -512,6 +715,224 @@ class SASTScanner:
         except Exception as e:
             print(f"[SASTScanner] pip parse error {path.name}: {e}")
         return packages
+
+    def _parse_pipfile(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        if tomllib is None:
+            return packages
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            sections = [data.get("packages", {}), data.get("dev-packages", {})]
+            for section in sections:
+                for name, version_spec in section.items():
+                    if isinstance(version_spec, dict):
+                        version_spec = version_spec.get("version", "")
+                    cleaned = _clean_version(str(version_spec or ""))
+                    if not _is_valid_version(cleaned):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": cleaned,
+                        "ecosystem": "PyPI",
+                        "file": str(path),
+                        "raw_line": f"{name}{version_spec}",
+                    })
+        except Exception as e:
+            print(f"[SASTScanner] Pipfile parse error {path.name}: {e}")
+        return packages
+
+    def _parse_pipfile_lock(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            for section_name in ("default", "develop"):
+                section = data.get(section_name, {})
+                for name, meta in section.items():
+                    version = _clean_version(str((meta or {}).get("version", "")))
+                    if not _is_valid_version(version):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": version,
+                        "ecosystem": "PyPI",
+                        "file": str(path),
+                        "raw_line": f"{name}=={version}",
+                    })
+        except Exception as e:
+            print(f"[SASTScanner] Pipfile.lock parse error {path.name}: {e}")
+        return packages
+
+    def _parse_pyproject(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        if tomllib is None:
+            return packages
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8", errors="ignore"))
+
+            project = data.get("project", {})
+            for raw in project.get("dependencies", []):
+                parsed = self._parse_pep508_dependency(str(raw))
+                if parsed:
+                    name, version = parsed
+                    packages.append({
+                        "name": name,
+                        "version": version,
+                        "ecosystem": "PyPI",
+                        "file": str(path),
+                        "raw_line": str(raw)[:120],
+                    })
+
+            optional = project.get("optional-dependencies", {})
+            for deps in optional.values():
+                for raw in deps:
+                    parsed = self._parse_pep508_dependency(str(raw))
+                    if parsed:
+                        name, version = parsed
+                        packages.append({
+                            "name": name,
+                            "version": version,
+                            "ecosystem": "PyPI",
+                            "file": str(path),
+                            "raw_line": str(raw)[:120],
+                        })
+
+            poetry = data.get("tool", {}).get("poetry", {})
+            for section_name in ("dependencies", "dev-dependencies"):
+                for name, spec in (poetry.get(section_name, {}) or {}).items():
+                    if name.lower() == "python":
+                        continue
+                    version = ""
+                    if isinstance(spec, str):
+                        version = spec
+                    elif isinstance(spec, dict):
+                        version = spec.get("version", "")
+                    cleaned = _clean_version(str(version or ""))
+                    if not _is_valid_version(cleaned):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": cleaned,
+                        "ecosystem": "PyPI",
+                        "file": str(path),
+                        "raw_line": f"{name}{version}",
+                    })
+        except Exception as e:
+            print(f"[SASTScanner] pyproject parse error {path.name}: {e}")
+        return packages
+
+    def _parse_poetry_lock(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        if tomllib is None:
+            return packages
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            for pkg in data.get("package", []):
+                name = str(pkg.get("name", "")).strip()
+                version = _clean_version(str(pkg.get("version", "")).strip())
+                if not name or not _is_valid_version(version):
+                    continue
+                packages.append({
+                    "name": name,
+                    "version": version,
+                    "ecosystem": "PyPI",
+                    "file": str(path),
+                    "raw_line": f"{name}=={version}",
+                })
+        except Exception as e:
+            print(f"[SASTScanner] poetry.lock parse error {path.name}: {e}")
+        return packages
+
+    def _parse_go_mod(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        try:
+            in_require_block = False
+            for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("//"):
+                    continue
+                if line.startswith("require ("):
+                    in_require_block = True
+                    continue
+                if in_require_block and line == ")":
+                    in_require_block = False
+                    continue
+                if line.startswith("require "):
+                    line = line[len("require "):].strip()
+                elif not in_require_block:
+                    continue
+
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                name = parts[0].strip()
+                version = _clean_version(parts[1].strip())
+                if not _is_valid_version(version):
+                    continue
+                packages.append({
+                    "name": name,
+                    "version": version,
+                    "ecosystem": "Go",
+                    "file": str(path),
+                    "raw_line": raw.strip()[:120],
+                })
+        except Exception as e:
+            print(f"[SASTScanner] go.mod parse error {path.name}: {e}")
+        return packages
+
+    def _parse_composer_lock(self, path: Path) -> List[Dict[str, str]]:
+        packages = []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            for section_name in ("packages", "packages-dev"):
+                for pkg in data.get(section_name, []):
+                    name = str(pkg.get("name", "")).strip()
+                    version = _clean_version(str(pkg.get("version", "")).strip())
+                    if not name or not _is_valid_version(version):
+                        continue
+                    packages.append({
+                        "name": name,
+                        "version": version,
+                        "ecosystem": "Packagist",
+                        "file": str(path),
+                        "raw_line": f"{name}:{version}",
+                    })
+        except Exception as e:
+            print(f"[SASTScanner] composer.lock parse error {path.name}: {e}")
+        return packages
+
+    def _parse_pep508_dependency(self, raw: str) -> Optional[Tuple[str, str]]:
+        dep = raw.split(";")[0].strip()
+        dep = re.sub(r'\[.*?\]', '', dep)
+        match = re.match(r'^([A-Za-z0-9_.\-]+)\s*\(([^)]+)\)$', dep)
+        if match:
+            dep = f"{match.group(1)} {match.group(2)}"
+        match = re.match(r'^([A-Za-z0-9_.\-]+)\s*([<>=!~^]{1,2}\s*[^,\s]+)', dep)
+        if not match:
+            return None
+        name = match.group(1).strip()
+        version = _clean_version(match.group(2).strip())
+        if not _is_valid_version(version):
+            return None
+        return name, version
+
+    def _should_skip_dep_file(self, path: Path) -> bool:
+        return any(part in SKIP_DEP_DIRS for part in path.parts)
+
+    def _dedupe_packages(self, packages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        unique: List[Dict[str, str]] = []
+        seen = set()
+        for pkg in packages:
+            key = (
+                pkg.get("ecosystem", ""),
+                pkg.get("name", "").lower(),
+                pkg.get("version", ""),
+                pkg.get("file", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(pkg)
+        return unique
 
     def _should_scan(self, filepath: str) -> bool:
         path = Path(filepath)
