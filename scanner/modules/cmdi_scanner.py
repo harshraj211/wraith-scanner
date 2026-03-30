@@ -15,6 +15,10 @@ from scanner.utils.request_metadata import (
     form_request_parts,
     injectable_locations,
 )
+from scanner.utils.waf_evasion import (
+    CMDI_WAF_BYPASS_PAYLOADS,
+    EvasionLevel,
+)
 
 
 # Command injection payloads — error-based first (fast), time-based last (slow)
@@ -40,8 +44,10 @@ CMD_PAYLOADS = [
 class CMDIScanner:
     """Scanner for OS command injection vulnerabilities."""
 
-    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None) -> None:
+    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None,
+                 evasion_level: int = EvasionLevel.MEDIUM) -> None:
         self.timeout = timeout
+        self._evasion_level = evasion_level
         
         # Use provided session (authenticated) or create new one
         if session:
@@ -99,11 +105,21 @@ class CMDIScanner:
         findings: List[Dict[str, Any]] = []
         for param_name in params.keys():
             original_value = str(params.get(param_name, ""))
+            found = False
             for payload in CMD_PAYLOADS:
                 vuln = await self._test_cmdi_async(url, param_name, original_value, params, payload, http)
                 if vuln:
                     findings.append(vuln)
+                    found = True
                     break
+            # WAF evasion fallback
+            if not found and self._evasion_level >= EvasionLevel.LOW:
+                limit = {1: 8, 2: 15, 3: 25, 4: len(CMDI_WAF_BYPASS_PAYLOADS)}.get(self._evasion_level, 15)
+                for waf_payload, dtype, technique in CMDI_WAF_BYPASS_PAYLOADS[:limit]:
+                    vuln = await self._test_cmdi_waf_async(url, param_name, original_value, params, waf_payload, dtype, technique, http)
+                    if vuln:
+                        findings.append(vuln)
+                        break
         return findings
 
     async def scan_form_async(self, form: Dict[str, Any], http) -> List[Dict[str, Any]]:
@@ -116,6 +132,7 @@ class CMDIScanner:
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
         for location, param_name in injectable_locations(body_fields, header_fields, cookie_fields):
             original_value = {"body": body_fields, "header": header_fields, "cookie": cookie_fields}[location].get(param_name, "")
+            found = False
             for payload in CMD_PAYLOADS:
                 vuln = await self._test_cmdi_async(
                     action, param_name, original_value, request_parts, payload,
@@ -123,7 +140,19 @@ class CMDIScanner:
                 )
                 if vuln:
                     findings.append(vuln)
+                    found = True
                     break
+            if not found and self._evasion_level >= EvasionLevel.LOW:
+                limit = {1: 8, 2: 15, 3: 25, 4: len(CMDI_WAF_BYPASS_PAYLOADS)}.get(self._evasion_level, 15)
+                for waf_payload, dtype, technique in CMDI_WAF_BYPASS_PAYLOADS[:limit]:
+                    vuln = await self._test_cmdi_waf_async(
+                        action, param_name, original_value, request_parts,
+                        waf_payload, dtype, technique, http,
+                        method=method, body_format=body_format, target_location=location
+                    )
+                    if vuln:
+                        findings.append(vuln)
+                        break
         return findings
 
     async def _test_cmdi_async(self, test_url, param_name, original_value, request_parts, payload, http, method="GET", body_format="form", target_location="body"):
@@ -145,7 +174,7 @@ class CMDIScanner:
                         "type": "command-injection",
                         "param": param_name,
                         "payload": payload,
-                        "evidence": f"Response time: {elapsed:.2f}s (expected delay)",
+                        "evidence": "Response time: " + str(round(elapsed, 2)) + "s (expected delay)",
                         "confidence": 80,
                     }
             else:
@@ -165,8 +194,56 @@ class CMDIScanner:
                                 "type": "command-injection",
                                 "param": param_name,
                                 "payload": payload,
-                                "evidence": f"Command output detected: {pattern}",
+                                "evidence": "Command output detected: " + pattern,
                                 "confidence": 90,
+                            }
+        except Exception:
+            pass
+        return None
+
+    async def _test_cmdi_waf_async(self, test_url, param_name, original_value,
+                                    request_parts, payload, dtype, technique, http,
+                                    method="GET", body_format="form", target_location="body"):
+        """WAF bypass command injection test with technique tracking."""
+        try:
+            injected = original_value + payload if original_value else payload
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
+            data, headers, cookies = build_request_context(
+                body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                target_location, param_name, injected
+            )
+            if dtype == "time":
+                start = time.time()
+                resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
+                elapsed = time.time() - start
+                if resp and elapsed >= 1.5:
+                    return {
+                        "vulnerable": True,
+                        "type": "command-injection",
+                        "param": param_name,
+                        "payload": payload,
+                        "evidence": "[waf-bypass:" + technique + "] Time: " + str(round(elapsed, 2)) + "s",
+                        "confidence": 78,
+                    }
+            else:
+                resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
+                if resp:
+                    text = resp.text or ""
+                    patterns = [
+                        r"root:.*:/bin/(ba)?sh",
+                        r"total \d+",
+                        r"Directory of",
+                        r"uid=\d+",
+                    ]
+                    for pattern in patterns:
+                        if re.search(pattern, text, re.IGNORECASE):
+                            return {
+                                "vulnerable": True,
+                                "type": "command-injection",
+                                "param": param_name,
+                                "payload": payload,
+                                "evidence": "[waf-bypass:" + technique + "] Output: " + pattern,
+                                "confidence": 85,
                             }
         except Exception:
             pass

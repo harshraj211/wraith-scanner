@@ -31,6 +31,14 @@ from scanner.utils.request_metadata import (
     form_request_parts,
     injectable_locations,
 )
+from scanner.utils.waf_evasion import (
+    detect_waf,
+    is_waf_blocked,
+    SQLI_WAF_BYPASS_PAYLOADS,
+    SQLI_TIME_WAF_BYPASS,
+    generate_sqli_evasion_payloads,
+    EvasionLevel,
+)
 
 requests.packages.urllib3.disable_warnings()
 
@@ -241,15 +249,38 @@ class _InteractshClient:
 
 class SQLiScanner:
 
-    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None):
+    def __init__(self, timeout: int = 10, session: Optional[requests.Session] = None,
+                 evasion_level: int = EvasionLevel.MEDIUM):
         self.timeout  = timeout
         self.session  = session or requests.Session()
         self.session.verify = False
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
 
+        # WAF evasion settings
+        self._evasion_level = evasion_level
+        self._detected_waf: Optional[str] = None
+        self._waf_checked = False
+
         # Lazy-init OOB client only if needed
         self._oob: Optional[_InteractshClient] = None
         self._oob_lock = threading.Lock()
+
+    def _check_waf(self, headers=None, status: int = 0, text: str = ""):
+        """Detect WAF on first blocked response and auto-escalate evasion."""
+        if self._waf_checked:
+            return
+        waf = detect_waf(headers or {})
+        if waf:
+            self._detected_waf = waf
+            print(f"[SQLiScanner] WAF detected: {waf} -- activating deep evasion")
+            if self._evasion_level < EvasionLevel.HIGH:
+                self._evasion_level = EvasionLevel.HIGH
+        elif is_waf_blocked(status, text):
+            self._detected_waf = "unknown"
+            print(f"[SQLiScanner] WAF block detected (unknown WAF) -- activating deep evasion")
+            if self._evasion_level < EvasionLevel.HIGH:
+                self._evasion_level = EvasionLevel.HIGH
+        self._waf_checked = True
 
     def _get_oob(self) -> Optional[_InteractshClient]:
         with self._oob_lock:
@@ -473,7 +504,41 @@ class SQLiScanner:
 
     async def _waf_bypass_async(self, url: str, params: Dict[str, str],
                                  target: str, http) -> Optional[Dict[str, Any]]:
-        for payload in WAF_BYPASS_PAYLOADS:
+        """Deep WAF bypass using the evasion engine -- error + time based."""
+
+        # Phase 1: Mutated error payloads from evasion engine
+        for payload, technique in generate_sqli_evasion_payloads(
+            ERROR_PAYLOADS[:6], max_variants=5
+        ):
+            if technique == "none":
+                continue  # already tested in _error_based_async
+            test = dict(params)
+            test[target] = payload
+            resp = await http.get(url, params=test)
+            if not resp:
+                continue
+            # Check for WAF on first response
+            if not self._waf_checked and hasattr(resp, 'headers'):
+                self._check_waf(
+                    headers=dict(getattr(resp, 'headers', {})),
+                    status=resp.status_code,
+                    text=resp.text or "",
+                )
+            if self._has_sql_error(resp.text):
+                return {
+                    "type":       "sqli-waf-bypass",
+                    "param":      target,
+                    "payload":    payload,
+                    "evidence":   "[" + technique + "] " + self._extract_error(resp.text),
+                    "confidence": 85,
+                    "url":        url,
+                    "method":     "waf-bypass-" + technique,
+                }
+
+        # Phase 2: Pre-built WAF bypass payloads (comprehensive)
+        limits = {0: 0, 1: 10, 2: 25, 3: 40, 4: len(SQLI_WAF_BYPASS_PAYLOADS)}
+        limit = limits.get(self._evasion_level, 25)
+        for payload, technique in SQLI_WAF_BYPASS_PAYLOADS[:limit]:
             test = dict(params)
             test[target] = payload
             resp = await http.get(url, params=test)
@@ -482,11 +547,43 @@ class SQLiScanner:
                     "type":       "sqli-waf-bypass",
                     "param":      target,
                     "payload":    payload,
-                    "evidence":   self._extract_error(resp.text),
+                    "evidence":   "[" + technique + "] " + self._extract_error(resp.text),
                     "confidence": 85,
                     "url":        url,
-                    "method":     "waf-bypass",
+                    "method":     "waf-bypass-" + technique,
                 }
+
+        # Phase 3: Time-based WAF bypass (catches blind SQLi behind WAFs)
+        if self._evasion_level >= EvasionLevel.MEDIUM:
+            t0 = time.time()
+            await http.get(url, params=params)
+            baseline_time = time.time() - t0
+            threshold = baseline_time + SLEEP_SECONDS - JITTER_TOLERANCE
+
+            time_limits = {2: 4, 3: 7, 4: len(SQLI_TIME_WAF_BYPASS)}
+            time_limit = time_limits.get(self._evasion_level, 4)
+            for payload, technique in SQLI_TIME_WAF_BYPASS[:time_limit]:
+                test = dict(params)
+                test[target] = payload
+                t0 = time.time()
+                await http.get(url, params=test,
+                              timeout=self.timeout + SLEEP_SECONDS + 2)
+                elapsed = time.time() - t0
+                if elapsed >= threshold:
+                    return {
+                        "type":       "sqli-time-blind-waf-bypass",
+                        "param":      target,
+                        "payload":    payload,
+                        "evidence":   (
+                            "[" + technique + "] Response delayed "
+                            + str(round(elapsed, 1)) + "s "
+                            + "(baseline=" + str(round(baseline_time, 1)) + "s)"
+                        ),
+                        "confidence": 78,
+                        "url":        url,
+                        "method":     "time-waf-bypass-" + technique,
+                    }
+
         return None
 
     async def _oob_inject_async(self, url: str, params: Dict[str, str],
