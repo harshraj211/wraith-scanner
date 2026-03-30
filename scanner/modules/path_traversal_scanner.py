@@ -10,6 +10,11 @@ import re
 from typing import Any, Dict, List, Optional
 
 import requests
+from scanner.utils.request_metadata import (
+    build_request_context,
+    form_request_parts,
+    injectable_locations,
+)
 
 
 # Path traversal payloads for different OS
@@ -74,20 +79,20 @@ class PathTraversalScanner:
 
         action = form_data.get("action")
         method = (form_data.get("method") or "GET").upper()
-        inputs = form_data.get("inputs", [])
-
-        if not action or not inputs:
+        if not action:
             return findings
-
-        baseline = {inp.get("name", ""): "" for inp in inputs if inp.get("name")}
-
-        for param_name in baseline.keys():
+        request_parts = form_request_parts(form_data)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, param_name in injectable_locations(body_fields, header_fields, cookie_fields):
             if self._looks_like_file_param(param_name):
                 print(f"Testing form param {param_name} for path traversal...")
-                original_value = baseline.get(param_name, "")
+                original_value = {"body": body_fields, "header": header_fields, "cookie": cookie_fields}[location].get(param_name, "")
                 
                 for payload in PATH_PAYLOADS:
-                    vuln = self._test_path_traversal(action, param_name, original_value, baseline, payload, method=method)
+                    vuln = self._test_path_traversal(
+                        action, param_name, original_value, request_parts, payload,
+                        method=method, body_format=body_format, target_location=location
+                    )
                     if vuln:
                         findings.append(vuln)
                         break
@@ -113,27 +118,30 @@ class PathTraversalScanner:
         findings: List[Dict[str, Any]] = []
         action = form.get("action")
         method = (form.get("method") or "GET").upper()
-        inputs = form.get("inputs", [])
-        if not action or not inputs:
+        if not action:
             return findings
-        baseline = {inp.get("name", ""): "" for inp in inputs if inp.get("name")}
-        for param_name in baseline.keys():
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, param_name in injectable_locations(body_fields, header_fields, cookie_fields):
             if self._looks_like_file_param(param_name):
                 for payload in PATH_PAYLOADS:
-                    vuln = await self._test_path_async(action, param_name, baseline, payload, http, method=method)
+                    vuln = await self._test_path_async(
+                        action, param_name, request_parts, payload, http,
+                        method=method, body_format=body_format, target_location=location
+                    )
                     if vuln:
                         findings.append(vuln)
                         break
         return findings
 
-    async def _test_path_async(self, test_url, param_name, params, payload, http, method="GET"):
+    async def _test_path_async(self, test_url, param_name, request_parts, payload, http, method="GET", body_format="form", target_location="body"):
         try:
-            data = params.copy()
-            data[param_name] = payload
-            if method.upper() == "GET":
-                resp = await http.get(test_url, params=data)
-            else:
-                resp = await http.post(test_url, data=data)
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
+            data, headers, cookies = build_request_context(
+                body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                target_location, param_name, payload
+            )
+            resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
             if not resp:
                 return None
             text = resp.text or ""
@@ -172,20 +180,22 @@ class PathTraversalScanner:
         test_url: str,
         param_name: str,
         original_value: str,
-        params: Dict[str, Any],
+        request_parts,
         payload: str,
         method: str = "GET",
+        body_format: str = "form",
+        target_location: str = "body",
     ) -> Optional[Dict[str, Any]]:
         """Test a single path traversal payload."""
         try:
             injected = payload  # Replace value entirely for path traversal
-            data = params.copy()
-            data[param_name] = injected
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
+            data, headers, cookies = build_request_context(
+                body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                target_location, param_name, injected
+            )
 
-            if method.upper() == "GET":
-                resp = self.session.get(test_url, params=data, timeout=self.timeout)
-            else:
-                resp = self.session.post(test_url, data=data, timeout=self.timeout)
+            resp = self._send_sync(test_url, method, data, headers, cookies, body_format)
 
             text = resp.text or ""
             
@@ -213,3 +223,38 @@ class PathTraversalScanner:
             print(f"Request failed during path traversal test for {param_name}: {exc}")
 
         return None
+
+    def _form_body_format(self, form: Dict[str, Any]) -> str:
+        if form.get("body_format") == "json":
+            return "json"
+        content_type = str(form.get("content_type", "")).lower()
+        if "application/json" in content_type:
+            return "json"
+        return "form"
+
+    def _send_sync(self, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
+        if method.upper() == "GET":
+            return self.session.get(url, params=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+        if body_format == "json":
+            return self.session.request(
+                method.upper(),
+                url,
+                json=data,
+                timeout=self.timeout,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return self.session.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+
+    async def _send_async(self, http, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
+        if method.upper() == "GET":
+            return await http.get(url, params=data, headers=headers or None, cookies=cookies or None)
+        if body_format == "json":
+            return await http.request(
+                method.upper(),
+                url,
+                json=data,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return await http.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None)

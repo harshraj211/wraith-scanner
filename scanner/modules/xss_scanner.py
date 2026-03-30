@@ -21,6 +21,11 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 
 import requests
+from scanner.utils.request_metadata import (
+    build_request_context,
+    form_request_parts,
+    injectable_locations,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,15 +203,15 @@ class XSSScanner:
         findings = []
         action  = form.get("action", "")
         method  = form.get("method", "get").lower()
-        inputs  = form.get("inputs", [])
 
         if not action:
             return []
 
-        field_names = [i.get("name", "") for i in inputs if i.get("name")]
-        for field in field_names:
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, field in injectable_locations(body_fields, header_fields, cookie_fields):
             findings.extend(
-                self._scan_field_reflected(action, method, inputs, field)
+                self._scan_field_reflected(action, method, request_parts, location, field)
             )
             if findings:
                 break
@@ -239,15 +244,15 @@ class XSSScanner:
         findings = []
         action   = form.get("action", "")
         method   = form.get("method", "get").lower()
-        inputs   = form.get("inputs", [])
 
         if not action:
             return []
 
-        field_names = [i.get("name", "") for i in inputs if i.get("name")]
-        for field in field_names:
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, field in injectable_locations(body_fields, header_fields, cookie_fields):
             reflected = await self._scan_field_reflected_async(
-                action, method, inputs, field, http
+                action, method, request_parts, location, field, http
             )
             findings.extend(reflected)
             if findings:
@@ -289,20 +294,28 @@ class XSSScanner:
         return findings
 
     async def _scan_field_reflected_async(self, action: str, method: str,
-                                           inputs: List[Dict], target_field: str,
+                                           request_parts, target_location: str, target_field: str,
                                            http) -> List[Dict[str, Any]]:
         findings = []
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
         for payload_template in REFLECTED_PAYLOADS[:6]:
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
-            data = {i.get("name", ""): i.get("value", "") for i in inputs if i.get("name")}
-            data[target_field] = payload
+            data, headers, cookies = build_request_context(
+                body_fields,
+                header_fields,
+                cookie_fields,
+                extra_headers,
+                extra_cookies,
+                target_location,
+                target_field,
+                payload,
+            )
 
-            if method == "post":
-                resp = await http.post(action, data=data)
-            else:
-                resp = await http.get(action, params=data)
+            resp = await self._submit_form_async(
+                http, action, method, data, headers, cookies, body_format
+            )
 
             if not resp:
                 continue
@@ -393,21 +406,27 @@ class XSSScanner:
         return findings
 
     def _scan_field_reflected(self, action: str, method: str,
-                               inputs: List[Dict], target_field: str) -> List[Dict[str, Any]]:
+                               request_parts, target_location: str, target_field: str) -> List[Dict[str, Any]]:
         findings = []
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
 
         for payload_template in REFLECTED_PAYLOADS[:6]:  # fewer for forms
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
-            data = {i.get("name", ""): i.get("value", "") for i in inputs if i.get("name")}
-            data[target_field] = payload
+            data, headers, cookies = build_request_context(
+                body_fields,
+                header_fields,
+                cookie_fields,
+                extra_headers,
+                extra_cookies,
+                target_location,
+                target_field,
+                payload,
+            )
 
             try:
-                if method == "post":
-                    resp = self.session.post(action, data=data, timeout=self.timeout)
-                else:
-                    resp = self.session.get(action, params=data, timeout=self.timeout)
+                resp = self._submit_form_sync(action, method, data, headers, cookies, body_format)
                 body = resp.text
             except Exception:
                 continue
@@ -426,6 +445,66 @@ class XSSScanner:
                 return findings
 
         return findings
+
+    def _submit_form_sync(
+        self,
+        action: str,
+        method: str,
+        data: Dict[str, str],
+        headers: Dict[str, str],
+        cookies: Dict[str, str],
+        body_format: str = "form",
+    ) -> requests.Response:
+        if method == "get":
+            return self.session.get(
+                action, params=data, headers=headers or None,
+                cookies=cookies or None, timeout=self.timeout
+            )
+        if body_format == "json":
+            return self.session.request(
+                method.upper(),
+                action,
+                json=data,
+                timeout=self.timeout,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return self.session.request(
+            method.upper(), action, data=data, timeout=self.timeout,
+            headers=headers or None, cookies=cookies or None,
+        )
+
+    async def _submit_form_async(
+        self,
+        http,
+        action: str,
+        method: str,
+        data: Dict[str, str],
+        headers: Dict[str, str],
+        cookies: Dict[str, str],
+        body_format: str = "form",
+    ):
+        if method == "get":
+            return await http.get(action, params=data, headers=headers or None, cookies=cookies or None)
+        if body_format == "json":
+            return await http.request(
+                method.upper(),
+                action,
+                json=data,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return await http.request(
+            method.upper(), action, data=data, headers=headers or None, cookies=cookies or None
+        )
+
+    def _form_body_format(self, form: Dict[str, Any]) -> str:
+        if form.get("body_format") == "json":
+            return "json"
+        content_type = str(form.get("content_type", "")).lower()
+        if "application/json" in content_type:
+            return "json"
+        return "form"
 
     # ------------------------------------------------------------------
     # DOM XSS via Playwright (pooled)

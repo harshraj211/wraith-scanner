@@ -16,8 +16,9 @@ import json
 import re
 import time
 from collections import deque
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse, parse_qs
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qs
 
 import requests
 
@@ -41,6 +42,14 @@ API_PATH_PATTERNS = re.compile(
 
 PAGE_TIMEOUT_MS = 15_000   # 15s hard cap per page (was networkidle — hung forever)
 NAV_WAIT        = "domcontentloaded"  # FIX: was "networkidle"
+OPENAPI_CANDIDATE_PATHS = (
+    "/openapi.json",
+    "/swagger.json",
+    "/api/openapi.json",
+    "/api/swagger.json",
+    "/v3/api-docs",
+)
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
 
 class WebCrawler:
@@ -66,10 +75,11 @@ class WebCrawler:
         """
         if self._playwright_available():
             print("[Crawler] Using async Playwright engine (JS rendering enabled)")
-            return asyncio.run(self._crawl_playwright_async())
+            results = asyncio.run(self._crawl_playwright_async())
         else:
             print("[Crawler] Playwright not available — using BeautifulSoup (static only)")
-            return self._crawl_bs4()
+            results = self._crawl_bs4()
+        return self._augment_with_openapi(results)
 
     # ------------------------------------------------------------------
     # Async Playwright crawler
@@ -738,6 +748,414 @@ class WebCrawler:
             pass
         return urls
 
+    def _augment_with_openapi(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        spec_doc, spec_url = self._fetch_openapi_spec()
+        if not spec_doc:
+            return results
+
+        spec_urls, spec_forms = self._openapi_to_targets(spec_doc, spec_url)
+        if spec_urls or spec_forms:
+            print(
+                f"[Crawler] OpenAPI import: {len(spec_urls)} URLs, "
+                f"{len(spec_forms)} forms from {spec_url}"
+            )
+
+        merged_urls = list(dict.fromkeys(results.get("urls", []) + spec_urls))
+        merged_forms = self._dedup_forms(results.get("forms", []) + spec_forms)
+        return {"urls": merged_urls, "forms": merged_forms}
+
+    def _fetch_openapi_spec(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        origin = self._origin_url()
+        for candidate in OPENAPI_CANDIDATE_PATHS:
+            spec_url = urljoin(f"{origin}/", candidate.lstrip("/"))
+            try:
+                resp = self.session.get(spec_url, timeout=self.timeout)
+            except Exception:
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            doc = self._parse_openapi_document(resp.text)
+            if self._looks_like_openapi(doc):
+                return doc, spec_url
+        return None, None
+
+    def _parse_openapi_document(self, raw_text: str) -> Optional[Dict[str, Any]]:
+        try:
+            parsed = json.loads(raw_text)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            try:
+                import yaml
+
+                parsed = yaml.safe_load(raw_text)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                return None
+
+    def _looks_like_openapi(self, doc: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(doc, dict):
+            return False
+        return bool(doc.get("paths")) and ("openapi" in doc or "swagger" in doc)
+
+    def _openapi_to_targets(
+        self, spec_doc: Dict[str, Any], spec_url: Optional[str]
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        urls: List[str] = []
+        forms: List[Dict[str, Any]] = []
+        paths = spec_doc.get("paths", {}) or {}
+
+        for raw_path, path_item in paths.items():
+            if not isinstance(path_item, dict):
+                continue
+
+            for method, operation in path_item.items():
+                if method.lower() not in HTTP_METHODS or not isinstance(operation, dict):
+                    continue
+
+                resolved_path = self._materialize_openapi_path(
+                    raw_path, path_item, operation, spec_doc
+                )
+                if not resolved_path:
+                    continue
+
+                endpoint_url = urljoin(
+                    f"{self._api_server_base(spec_doc, spec_url)}/",
+                    resolved_path.lstrip("/"),
+                )
+                parameters = self._collect_openapi_parameters(path_item, operation)
+                extra_headers, extra_cookies, extra_query = self._openapi_security_context(
+                    spec_doc, path_item, operation
+                )
+
+                if method.lower() == "get":
+                    query_params = {
+                        param["name"]: self._sample_value_for_schema(
+                            param.get("schema"), param.get("example"), spec_doc
+                        )
+                        for param in parameters
+                        if param.get("in") == "query" and param.get("name")
+                    }
+                    query_params.update(extra_query)
+                    if query_params:
+                        urls.append(f"{endpoint_url}?{urlencode(query_params)}")
+                    else:
+                        urls.append(endpoint_url)
+                form = self._build_openapi_form(
+                    endpoint_url,
+                    method,
+                    operation,
+                    parameters,
+                    spec_doc,
+                    extra_headers,
+                    extra_cookies,
+                    extra_query,
+                )
+                if form:
+                    forms.append(form)
+
+        return urls, forms
+
+    def _api_server_base(
+        self, spec_doc: Dict[str, Any], spec_url: Optional[str]
+    ) -> str:
+        servers = spec_doc.get("servers") or []
+        if servers:
+            first = servers[0]
+            if isinstance(first, dict) and first.get("url"):
+                return urljoin((spec_url or self._origin_url()) + "/", first["url"])
+        return self._origin_url()
+
+    def _origin_url(self) -> str:
+        parsed = urlparse(self.base_url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _collect_openapi_parameters(
+        self, path_item: Dict[str, Any], operation: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str]] = set()
+        for source in (path_item.get("parameters") or [], operation.get("parameters") or []):
+            for param in source:
+                if not isinstance(param, dict):
+                    continue
+                key = (param.get("in", ""), param.get("name", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(param)
+        return merged
+
+    def _materialize_openapi_path(
+        self,
+        raw_path: str,
+        path_item: Dict[str, Any],
+        operation: Dict[str, Any],
+        spec_doc: Dict[str, Any],
+    ) -> Optional[str]:
+        materialized = raw_path
+        for param in self._collect_openapi_parameters(path_item, operation):
+            if param.get("in") != "path" or not param.get("name"):
+                continue
+            placeholder = "{" + param["name"] + "}"
+            sample = self._sample_value_for_schema(
+                param.get("schema"), param.get("example"), spec_doc
+            )
+            materialized = materialized.replace(placeholder, str(sample))
+        return None if "{" in materialized or "}" in materialized else materialized
+
+    def _build_openapi_form(
+        self,
+        endpoint_url: str,
+        method: str,
+        operation: Dict[str, Any],
+        parameters: List[Dict[str, Any]],
+        spec_doc: Dict[str, Any],
+        extra_headers: Dict[str, str],
+        extra_cookies: Dict[str, str],
+        extra_query: Dict[str, str],
+    ) -> Optional[Dict[str, Any]]:
+        request_body = operation.get("requestBody") or {}
+        content = request_body.get("content") or {}
+        header_inputs = self._build_openapi_param_inputs(parameters, "header", spec_doc)
+        cookie_inputs = self._build_openapi_param_inputs(parameters, "cookie", spec_doc)
+
+        for content_type in (
+            "application/json",
+            "application/xml",
+            "text/xml",
+            "application/x-www-form-urlencoded",
+            "multipart/form-data",
+        ):
+            media = content.get(content_type)
+            if not isinstance(media, dict):
+                continue
+
+            schema = media.get("schema") or {}
+            if content_type in ("application/xml", "text/xml"):
+                inputs = [{"name": "xml", "type": "text", "value": "<root>sample</root>"}]
+            else:
+                sample_body = self._sample_object_from_schema(schema, spec_doc)
+                inputs = [
+                    {"name": key, "type": "text", "value": value}
+                    for key, value in sample_body.items()
+                ]
+                if not inputs:
+                    inputs = [{"name": "data", "type": "text", "value": ""}]
+
+            return {
+                "action": endpoint_url,
+                "method": method.lower(),
+                "inputs": [
+                    *inputs,
+                    *[
+                        {"name": key, "type": "text", "value": value}
+                        for key, value in extra_query.items()
+                    ],
+                ],
+                "header_inputs": header_inputs,
+                "cookie_inputs": cookie_inputs,
+                "extra_headers": extra_headers,
+                "extra_cookies": extra_cookies,
+                "content_type": content_type,
+                "body_format": (
+                    "json" if content_type == "application/json"
+                    else "xml" if content_type in ("application/xml", "text/xml")
+                    else "form"
+                ),
+                "_source": "openapi",
+            }
+        if method.lower() == "get" and (header_inputs or cookie_inputs):
+            return {
+                "action": endpoint_url,
+                "method": "get",
+                "inputs": [
+                    {"name": key, "type": "text", "value": value}
+                    for key, value in extra_query.items()
+                ],
+                "header_inputs": header_inputs,
+                "cookie_inputs": cookie_inputs,
+                "extra_headers": extra_headers,
+                "extra_cookies": extra_cookies,
+                "content_type": "text/plain",
+                "body_format": "form",
+                "_source": "openapi",
+            }
+        return None
+
+    def _sample_object_from_schema(
+        self, schema: Dict[str, Any], spec_doc: Dict[str, Any]
+    ) -> Dict[str, str]:
+        resolved = self._resolve_schema(schema, spec_doc)
+        if not isinstance(resolved, dict):
+            return {}
+
+        example = resolved.get("example")
+        if isinstance(example, dict):
+            return {
+                str(key): self._stringify_sample_value(value)
+                for key, value in example.items()
+            }
+
+        properties = resolved.get("properties") or {}
+        if not isinstance(properties, dict):
+            return {}
+
+        samples: Dict[str, str] = {}
+        for name, prop_schema in properties.items():
+            samples[name] = self._sample_value_for_schema(prop_schema, None, spec_doc)
+        return samples
+
+    def _build_openapi_param_inputs(
+        self, parameters: List[Dict[str, Any]], location: str, spec_doc: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        inputs: List[Dict[str, str]] = []
+        for param in parameters:
+            if param.get("in") != location or not param.get("name"):
+                continue
+            inputs.append({
+                "name": param["name"],
+                "type": "text",
+                "value": self._sample_value_for_schema(
+                    param.get("schema"), param.get("example"), spec_doc
+                ),
+            })
+        return inputs
+
+    def _openapi_security_context(
+        self,
+        spec_doc: Dict[str, Any],
+        path_item: Dict[str, Any],
+        operation: Dict[str, Any],
+    ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+        requirements = operation.get("security")
+        if requirements is None:
+            requirements = path_item.get("security")
+        if requirements is None:
+            requirements = spec_doc.get("security")
+        if not requirements:
+            return {}, {}, {}
+
+        schemes = (
+            spec_doc.get("components", {}).get("securitySchemes", {}) or {}
+        )
+        session_headers = dict(self.session.headers or {})
+        session_cookies = {}
+        try:
+            session_cookies = {c.name: c.value for c in self.session.cookies}
+        except Exception:
+            session_cookies = dict(getattr(self.session, "cookies", {}) or {})
+        session_query = dict(getattr(self.session, "_default_query_params", {}) or {})
+
+        extra_headers: Dict[str, str] = {}
+        extra_cookies: Dict[str, str] = {}
+        extra_query: Dict[str, str] = {}
+
+        for requirement in requirements:
+            if not isinstance(requirement, dict):
+                continue
+            local_headers: Dict[str, str] = {}
+            local_cookies: Dict[str, str] = {}
+            local_query: Dict[str, str] = {}
+            satisfied = True
+
+            for scheme_name in requirement.keys():
+                scheme = schemes.get(scheme_name)
+                if not isinstance(scheme, dict):
+                    satisfied = False
+                    break
+
+                scheme_type = scheme.get("type")
+                if scheme_type == "http" and scheme.get("scheme", "").lower() == "bearer":
+                    auth_header = session_headers.get("Authorization")
+                    if auth_header:
+                        local_headers["Authorization"] = auth_header
+                    else:
+                        satisfied = False
+                        break
+                elif scheme_type == "apiKey":
+                    key_name = scheme.get("name")
+                    location = scheme.get("in")
+                    if location == "header" and key_name in session_headers:
+                        local_headers[key_name] = session_headers[key_name]
+                    elif location == "cookie" and key_name in session_cookies:
+                        local_cookies[key_name] = session_cookies[key_name]
+                    elif location == "query" and key_name in session_query:
+                        local_query[key_name] = session_query[key_name]
+                    else:
+                        satisfied = False
+                        break
+
+            if satisfied:
+                extra_headers.update(local_headers)
+                extra_cookies.update(local_cookies)
+                extra_query.update(local_query)
+                return extra_headers, extra_cookies, extra_query
+
+        return {}, {}, {}
+
+    def _sample_value_for_schema(
+        self,
+        schema: Optional[Dict[str, Any]],
+        explicit_example: Any,
+        spec_doc: Dict[str, Any],
+    ) -> str:
+        if explicit_example is not None:
+            return self._stringify_sample_value(explicit_example)
+
+        resolved = self._resolve_schema(schema or {}, spec_doc)
+        if not isinstance(resolved, dict):
+            return "sample"
+        if resolved.get("example") is not None:
+            return self._stringify_sample_value(resolved["example"])
+        if resolved.get("default") is not None:
+            return self._stringify_sample_value(resolved["default"])
+
+        enum = resolved.get("enum")
+        if isinstance(enum, list) and enum:
+            return self._stringify_sample_value(enum[0])
+
+        schema_type = resolved.get("type")
+        if schema_type in {"integer", "number"}:
+            return "1"
+        if schema_type == "boolean":
+            return "true"
+        if schema_type == "array":
+            return ""
+        return "sample"
+
+    def _resolve_schema(
+        self, schema: Dict[str, Any], spec_doc: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if not isinstance(schema, dict):
+            return {}
+
+        ref = schema.get("$ref")
+        if not ref or not ref.startswith("#/"):
+            return schema
+
+        current: Any = spec_doc
+        for part in ref[2:].split("/"):
+            if not isinstance(current, dict):
+                return schema
+            current = current.get(part)
+
+        if isinstance(current, dict):
+            merged = deepcopy(current)
+            merged.update({k: v for k, v in schema.items() if k != "$ref"})
+            return merged
+        return schema
+
+    def _stringify_sample_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return ""
+        return str(value)
+
     def _dedup_forms(self, forms: List[Dict]) -> List[Dict]:
         seen:   Set[tuple]  = set()
         unique: List[Dict]  = []
@@ -745,6 +1163,7 @@ class WebCrawler:
             key = (
                 f.get("action", ""),
                 f.get("method", ""),
+                f.get("content_type", ""),
                 tuple(sorted(i.get("name", "") for i in f.get("inputs", []))),
             )
             if key not in seen:

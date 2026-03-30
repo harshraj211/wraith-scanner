@@ -101,6 +101,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         emit_progress(scan_id, f"Mode: {scan_mode.upper()} | Depth: {depth} | Timeout: {timeout}s", "info")
 
         auth_manager = get_auth_manager()
+        auth_manager.logout()
         authenticated_session = None
 
         if auth_config or mode_config['auth']:
@@ -119,6 +120,70 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                         emit_progress(scan_id, "Authentication successful", "success")
                     else:
                         emit_progress(scan_id, "Authentication failed, continuing without auth", "warning")
+                elif auth_type == 'basic':
+                    username = auth_config.get('username')
+                    password = auth_config.get('password')
+                    if username and password:
+                        auth_manager.login_basic_auth(username, password)
+                        authenticated_session = auth_manager.get_session()
+                        emit_progress(scan_id, f"Basic auth configured for {username}", "success")
+                elif auth_type == 'bearer':
+                    token = auth_config.get('token')
+                    if token:
+                        auth_manager.set_bearer_token(token)
+                        authenticated_session = auth_manager.get_session()
+                        emit_progress(scan_id, "Bearer token configured", "success")
+                elif auth_type == 'api_key':
+                    key_name = auth_config.get('name')
+                    key_value = auth_config.get('value') or auth_config.get('token')
+                    key_location = auth_config.get('location', 'header')
+                    if key_name and key_value:
+                        auth_manager.set_api_key(key_name, key_value, key_location)
+                        authenticated_session = auth_manager.get_session()
+                        emit_progress(
+                            scan_id,
+                            f"API key configured in {key_location}: {key_name}",
+                            "success",
+                        )
+                elif auth_type in ('custom', 'headers'):
+                    headers = auth_config.get('headers') or {}
+                    if headers:
+                        auth_manager.set_custom_headers(headers)
+                        authenticated_session = auth_manager.get_session()
+                        emit_progress(scan_id, "Custom auth headers configured", "success")
+
+                bearer_token = auth_config.get('bearer_token')
+                if bearer_token and auth_type != 'bearer':
+                    auth_manager.set_bearer_token(bearer_token)
+                    authenticated_session = auth_manager.get_session()
+                    emit_progress(scan_id, "Bearer token configured", "success")
+
+                api_keys = auth_config.get('api_keys') or []
+                for api_key in api_keys:
+                    key_name = api_key.get('name')
+                    key_value = api_key.get('value') or api_key.get('token')
+                    key_location = api_key.get('location', 'header')
+                    if not key_name or key_value is None:
+                        continue
+                    auth_manager.set_api_key(key_name, key_value, key_location)
+                    authenticated_session = auth_manager.get_session()
+                    emit_progress(
+                        scan_id,
+                        f"API key configured in {key_location}: {key_name}",
+                        "success",
+                    )
+
+                headers = auth_config.get('headers') or {}
+                if headers and auth_type not in ('custom', 'headers'):
+                    auth_manager.set_custom_headers(headers)
+                    authenticated_session = auth_manager.get_session()
+                    emit_progress(scan_id, "Custom auth headers configured", "success")
+
+                cookies = auth_config.get('cookies') or {}
+                if cookies:
+                    auth_manager.set_cookies(cookies)
+                    authenticated_session = auth_manager.get_session()
+                    emit_progress(scan_id, "Custom auth cookies configured", "success")
 
         emit_progress(scan_id, "Checking for WordPress/CMS...", "phase")
         wp_scanner = WordPressScanner(timeout=timeout)

@@ -222,6 +222,7 @@ def main() -> int:
     # Initialize managers
     mode_mgr = get_mode_manager()
     auth_mgr = get_auth_manager() # <--- Initialize AuthManager
+    auth_mgr.logout()
     
     # Set mode
     if not mode_mgr.set_mode(args.mode):
@@ -279,10 +280,10 @@ def main() -> int:
     all_findings: List[Dict[str, Any]] = []
     errors: List[str] = []
 
-    sqli = SQLiScanner(timeout=config['timeout'])
-    xss = XSSScanner(timeout=config['timeout'])
-    idor = IDORScanner(timeout=config['timeout'])
-    redir = RedirectScanner(timeout=config['timeout'])
+    sqli = SQLiScanner(timeout=config['timeout'], session=session)
+    xss = XSSScanner(timeout=config['timeout'], session=session)
+    idor = IDORScanner(timeout=config['timeout'], session=session)
+    redir = RedirectScanner(timeout=config['timeout'], session=session)
     crypto = CryptoScanner(timeout=config['timeout'], session=session)
     ssrf = SSRFScanner(timeout=config['timeout'], session=session)
     xxe = XXEScanner(timeout=config['timeout'], session=session)

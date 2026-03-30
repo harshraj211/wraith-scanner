@@ -5,12 +5,16 @@ A deliberately vulnerable Flask application for testing the scanner.
 WARNING: Never deploy this to production - it has intentional vulnerabilities!
 """
 
-from flask import Flask, request, render_template_string, redirect, session, url_for
+from flask import Flask, jsonify, request, render_template_string, redirect, session, url_for
 import sqlite3
 import time
 
 app = Flask(__name__)
 app.secret_key = "test-app-secret-key"
+API_BEARER_TOKEN = "test-bearer-token"
+API_HEADER_KEY = "header-key-123"
+API_QUERY_KEY = "query-key-456"
+API_SESSION_COOKIE = "secure-session-789"
 
 # Initialize a simple database
 def init_db():
@@ -36,6 +40,7 @@ def home():
         <li><a href="/comment">Comment (XSS vulnerable)</a></li>
         <li><a href="/profile?id=1">Profile (IDOR vulnerable)</a></li>
         <li><a href="/redirect?url=https://google.com">Redirect (Open redirect)</a></li>
+        <li><a href="/openapi.json">OpenAPI Spec</a></li>
         <li><a href="/auth/login">Protected Area Login</a></li>
     </ul>
     """
@@ -140,6 +145,309 @@ def redirect_page():
     url = request.args.get('url', '/')
     # VULNERABLE: No URL validation
     return f'<meta http-equiv="refresh" content="0;url={url}"><p>Redirecting to {url}...</p>'
+
+
+@app.route('/openapi.json')
+def openapi_spec():
+    return jsonify({
+        "openapi": "3.0.0",
+        "info": {"title": "Vulnerable Test API", "version": "1.0.0"},
+        "servers": [{"url": "/"}],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                },
+                "headerKey": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Key",
+                },
+                "queryKey": {
+                    "type": "apiKey",
+                    "in": "query",
+                    "name": "api_token",
+                },
+                "sessionCookie": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "sessionid",
+                },
+            }
+        },
+        "paths": {
+            "/api/comment": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string", "example": "tester"},
+                                        "comment": {"type": "string", "example": "hello"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Comment echo"}},
+                }
+            },
+            "/api/search": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "q": {"type": "string", "example": "admin"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Search results"}},
+                }
+            },
+            "/api/run": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "command": {"type": "string", "example": "status"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Command output"}},
+                }
+            },
+            "/api/file": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string", "example": "report.txt"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "File contents"}},
+                }
+            },
+            "/api/template": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "template": {"type": "string", "example": "Hello {{ name }}"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Rendered template"}},
+                }
+            },
+            "/api/xml": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/xml": {
+                                "schema": {"type": "string"}
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Parsed XML"}},
+                }
+            },
+            "/api/users/{user_id}": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "user_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer", "example": 1},
+                        },
+                        {
+                            "name": "view",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string", "example": "summary"},
+                        },
+                    ],
+                    "responses": {"200": {"description": "User details"}},
+                }
+            },
+            "/api/secure/reflect": {
+                "get": {
+                    "security": [
+                        {
+                            "bearerAuth": [],
+                            "headerKey": [],
+                            "sessionCookie": [],
+                        }
+                    ],
+                    "parameters": [
+                        {
+                            "name": "X-Trace",
+                            "in": "header",
+                            "required": False,
+                            "schema": {"type": "string", "example": "trace-id"},
+                        },
+                        {
+                            "name": "theme",
+                            "in": "cookie",
+                            "required": False,
+                            "schema": {"type": "string", "example": "light"},
+                        },
+                    ],
+                    "responses": {"200": {"description": "Protected reflection"}},
+                }
+            },
+            "/api/secure/query": {
+                "get": {
+                    "security": [
+                        {
+                            "queryKey": [],
+                        }
+                    ],
+                    "parameters": [
+                        {
+                            "name": "item",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string", "example": "sample"},
+                        },
+                    ],
+                    "responses": {"200": {"description": "Protected query endpoint"}},
+                }
+            },
+        },
+    })
+
+
+@app.route('/api/comment', methods=['POST'])
+def api_comment():
+    payload = request.get_json(silent=True) or {}
+    name = payload.get('name', '')
+    comment = payload.get('comment', '')
+    return render_template_string(
+        f"<h2>API Comment</h2><p><strong>{name}</strong></p><div>{comment}</div>"
+    )
+
+
+@app.route('/api/search', methods=['POST'])
+def api_search():
+    payload = request.get_json(silent=True) or {}
+    query = payload.get('q', '')
+    conn = sqlite3.connect('test.db')
+    c = conn.cursor()
+    try:
+        sql = f"SELECT * FROM users WHERE username LIKE '%{query}%'"
+        c.execute(sql)
+        results = c.fetchall()
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/run', methods=['POST'])
+def api_run():
+    payload = request.get_json(silent=True) or {}
+    command = payload.get('command', '')
+    if 'sleep 2' in command or 'timeout 2' in command:
+        time.sleep(2)
+        return jsonify({"output": "slept"})
+    if 'whoami' in command or 'id' in command:
+        return jsonify({"output": "uid=1000(scanner) gid=1000(scanner)"})
+    if 'cat /etc/passwd' in command:
+        return jsonify({"output": "root:x:0:0:root:/root:/bin/bash"})
+    return jsonify({"output": "command not executed"})
+
+
+@app.route('/api/file', methods=['POST'])
+def api_file():
+    payload = request.get_json(silent=True) or {}
+    file_path = payload.get('file', '')
+    if 'passwd' in file_path:
+        return "root:x:0:0:root:/root:/bin/bash\n"
+    if 'win.ini' in file_path.lower():
+        return "[extensions]\n"
+    return "requested file not found", 404
+
+
+@app.route('/api/template', methods=['POST'])
+def api_template():
+    payload = request.get_json(silent=True) or {}
+    template = payload.get('template', 'Hello')
+    return render_template_string(template)
+
+
+@app.route('/api/xml', methods=['POST'])
+def api_xml():
+    xml_body = request.get_data(as_text=True) or ''
+    if 'file:///etc/passwd' in xml_body:
+        return "root:x:0:0:root:/root:/bin/bash\n"
+    if 'c:/windows/win.ini' in xml_body.lower():
+        return "[extensions]\n"
+    if '169.254.169.254' in xml_body:
+        return "instanceId=i-123456"
+    if '<!entity' in xml_body.lower():
+        return "XML external entity error"
+    return "<ok/>"
+
+
+@app.route('/api/users/<user_id>')
+def api_user(user_id):
+    view = request.args.get('view', 'summary')
+    return jsonify({"user_id": user_id, "view": view})
+
+
+@app.route('/api/secure/reflect')
+def api_secure_reflect():
+    auth_header = request.headers.get("Authorization", "")
+    api_key = request.headers.get("X-API-Key", "")
+    session_cookie = request.cookies.get("sessionid", "")
+    if auth_header != f"Bearer {API_BEARER_TOKEN}" or api_key != API_HEADER_KEY or session_cookie != API_SESSION_COOKIE:
+        return jsonify({"error": "unauthorized"}), 401
+
+    trace = request.headers.get("X-Trace", "")
+    theme = request.cookies.get("theme", "")
+    return render_template_string(
+        f"<h2>Secure Reflection</h2><div>{trace}</div><div>{theme}</div>"
+    )
+
+
+@app.route('/api/secure/query')
+def api_secure_query():
+    if request.args.get("api_token") != API_QUERY_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({"item": request.args.get("item", "")})
 
 
 @app.route('/auth/login', methods=['GET'])

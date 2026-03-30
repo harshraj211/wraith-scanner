@@ -12,6 +12,7 @@ class AuthManager:
         self.is_authenticated = False
         self.auth_type = None
         self.credentials = {}
+        self.query_params = {}
     
     def login_form(self, login_url: str, username: str, password: str, 
                    username_field: str = "username", password_field: str = "password") -> bool:
@@ -132,7 +133,29 @@ class AuthManager:
         self.session.headers.update({'Authorization': f'Bearer {token}'})
         self.is_authenticated = True
         self.auth_type = 'bearer'
+        self.credentials = {'token': token}
         print("[+] Bearer token configured")
+        return True
+
+    def set_api_key(self, name: str, value: str, location: str = "header") -> bool:
+        """
+        Configure API-key authentication for header, cookie, or query schemes.
+        """
+        location = (location or "header").lower()
+        if location == "header":
+            self.session.headers.update({name: value})
+        elif location == "cookie":
+            self.session.cookies.set(name, value)
+        elif location == "query":
+            self.query_params[name] = value
+            setattr(self.session, "_default_query_params", dict(self.query_params))
+        else:
+            raise ValueError(f"Unsupported API key location: {location}")
+
+        self.is_authenticated = True
+        self.auth_type = 'api_key'
+        self.credentials = {'name': name, 'value': value, 'location': location}
+        print(f"[+] API key configured in {location}: {name}")
         return True
     
     def set_custom_headers(self, headers: Dict[str, str]) -> bool:
@@ -150,6 +173,18 @@ class AuthManager:
         self.auth_type = 'custom'
         print("[+] Custom headers configured")
         return True
+
+    def set_cookies(self, cookies: Dict[str, str]) -> bool:
+        """
+        Add custom cookies to the active session.
+        """
+        for name, value in (cookies or {}).items():
+            self.session.cookies.set(name, value)
+        if cookies:
+            self.is_authenticated = True
+            self.auth_type = 'custom'
+            print("[+] Custom cookies configured")
+        return True
     
     def get_session(self) -> requests.Session:
         """Get the authenticated session."""
@@ -161,6 +196,7 @@ class AuthManager:
         self.is_authenticated = False
         self.auth_type = None
         self.credentials = {}
+        self.query_params = {}
         print("[+] Logged out")
 
 

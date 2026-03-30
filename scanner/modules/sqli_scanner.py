@@ -26,6 +26,11 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from scanner.utils.request_metadata import (
+    build_request_context,
+    form_request_parts,
+    injectable_locations,
+)
 
 requests.packages.urllib3.disable_warnings()
 
@@ -61,6 +66,7 @@ SQL_ERROR_PATTERNS = [
     r"sqlite_error",
     r"sqlite3.*operationalerror",
     r"sqlite.exception",
+    r"unrecognized token",
     # Generic
     r"sql syntax.*mysql",
     r"warning.*mysqli",
@@ -267,15 +273,18 @@ class SQLiScanner:
         findings  = []
         action    = form.get("action", "")
         method    = form.get("method", "get").lower()
-        inputs    = form.get("inputs", [])
         if not action:
             return []
-
-        fields = {i.get("name", ""): i.get("value", "")
-                  for i in inputs if i.get("name")}
-
-        for field in list(fields.keys()):
-            result = self._scan_form_field(action, method, fields, field)
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, field in injectable_locations(body_fields, header_fields, cookie_fields):
+            result = self._scan_form_field(
+                action,
+                method,
+                request_parts,
+                location,
+                field,
+            )
             if result:
                 findings.append(result)
         return findings
@@ -300,15 +309,14 @@ class SQLiScanner:
         findings = []
         action   = form.get("action", "")
         method   = form.get("method", "get").lower()
-        inputs   = form.get("inputs", [])
         if not action:
             return []
-
-        fields = {i.get("name", ""): i.get("value", "")
-                  for i in inputs if i.get("name")}
-
-        for field in list(fields.keys()):
-            result = await self._scan_form_field_async(action, method, fields, field, http)
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, field in injectable_locations(body_fields, header_fields, cookie_fields):
+            result = await self._scan_form_field_async(
+                action, method, request_parts, location, field, http
+            )
             if result:
                 findings.append(result)
         return findings
@@ -503,23 +511,33 @@ class SQLiScanner:
         oob.register_injection(oob_url, url, target)
 
     async def _scan_form_field_async(self, action: str, method: str,
-                                      fields: Dict[str, str], target: str,
+                                      request_parts, target_location: str, target: str,
                                       http) -> Optional[Dict[str, Any]]:
-        if method == "post":
-            baseline = await http.post(action, data=fields)
-        else:
-            baseline = await http.get(action, params=fields)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        baseline_body, baseline_headers, baseline_cookies = build_request_context(
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies
+        )
+        baseline = await self._get_form_response_async(
+            http, action, method, baseline_body, baseline_headers, baseline_cookies, body_format
+        )
         if not baseline:
             return None
 
         for payload in ERROR_PAYLOADS[:6]:
-            test = dict(fields)
-            test[target] = payload
-            if method == "post":
-                resp = await http.post(action, data=test)
-            else:
-                resp = await http.get(action, params=test)
-            if resp and self._has_sql_error(resp.text):
+            test_body, test_headers, test_cookies = build_request_context(
+                body_fields,
+                header_fields,
+                cookie_fields,
+                extra_headers,
+                extra_cookies,
+                target_location,
+                target,
+                payload,
+            )
+            resp = await self._get_form_response_async(
+                http, action, method, test_body, test_headers, test_cookies, body_format
+            )
+            if resp is not None and self._has_sql_error(resp.text):
                 return {
                     "type":       "sqli-error",
                     "param":      target,
@@ -576,16 +594,32 @@ class SQLiScanner:
         return None
 
     def _scan_form_field(self, action: str, method: str,
-                         fields: Dict[str, str], target: str) -> Optional[Dict[str, Any]]:
-        baseline = self._get_form_response(action, method, fields)
+                         request_parts, target_location: str, target: str) -> Optional[Dict[str, Any]]:
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        baseline_body, baseline_headers, baseline_cookies = build_request_context(
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies
+        )
+        baseline = self._get_form_response(
+            action, method, baseline_body, baseline_headers, baseline_cookies, body_format
+        )
         if not baseline:
             return None
 
         for payload in ERROR_PAYLOADS[:6]:
-            test = dict(fields)
-            test[target] = payload
-            resp = self._get_form_response(action, method, test)
-            if resp and self._has_sql_error(resp.text):
+            test_body, test_headers, test_cookies = build_request_context(
+                body_fields,
+                header_fields,
+                cookie_fields,
+                extra_headers,
+                extra_cookies,
+                target_location,
+                target,
+                payload,
+            )
+            resp = self._get_form_response(
+                action, method, test_body, test_headers, test_cookies, body_format
+            )
+            if resp is not None and self._has_sql_error(resp.text):
                 return {
                     "type":       "sqli-error",
                     "param":      target,
@@ -810,10 +844,60 @@ class SQLiScanner:
         return "SQL error detected"
 
     def _get_form_response(self, action: str, method: str,
-                            data: Dict[str, str]) -> Optional[requests.Response]:
+                            data: Dict[str, str],
+                            headers: Dict[str, str],
+                            cookies: Dict[str, str],
+                            body_format: str = "form") -> Optional[requests.Response]:
         try:
-            if method == "post":
-                return self.session.post(action, data=data, timeout=self.timeout)
-            return self.session.get(action, params=data, timeout=self.timeout)
+            if method == "get":
+                return self.session.get(
+                    action, params=data, headers=headers or None,
+                    cookies=cookies or None, timeout=self.timeout
+                )
+            if body_format == "json":
+                return self.session.request(
+                    method.upper(),
+                    action,
+                    json=data,
+                    timeout=self.timeout,
+                    headers={**(headers or {}), "Content-Type": "application/json"},
+                    cookies=cookies or None,
+                )
+            return self.session.request(
+                method.upper(), action, data=data, timeout=self.timeout,
+                headers=headers or None, cookies=cookies or None,
+            )
         except Exception:
             return None
+
+    async def _get_form_response_async(
+        self,
+        http,
+        action: str,
+        method: str,
+        data: Dict[str, str],
+        headers: Dict[str, str],
+        cookies: Dict[str, str],
+        body_format: str = "form",
+    ):
+        if method == "get":
+            return await http.get(action, params=data, headers=headers or None, cookies=cookies or None)
+        if body_format == "json":
+            return await http.request(
+                method.upper(),
+                action,
+                json=data,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return await http.request(
+            method.upper(), action, data=data, headers=headers or None, cookies=cookies or None
+        )
+
+    def _form_body_format(self, form: Dict[str, Any]) -> str:
+        if form.get("body_format") == "json":
+            return "json"
+        content_type = str(form.get("content_type", "")).lower()
+        if "application/json" in content_type:
+            return "json"
+        return "form"

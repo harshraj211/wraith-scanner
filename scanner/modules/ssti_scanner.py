@@ -10,6 +10,11 @@ import re
 from typing import Any, Dict, List, Optional
 
 import requests
+from scanner.utils.request_metadata import (
+    build_request_context,
+    form_request_parts,
+    injectable_locations,
+)
 
 
 # Payloads that produce detectable output if evaluated
@@ -49,14 +54,13 @@ class SSTIScanner:
         findings = []
         action = form_data.get('action', '')
         method = (form_data.get('method') or 'GET').upper()
-        inputs = form_data.get('inputs', [])
-        if not action or not inputs:
+        if not action:
             return findings
-
-        baseline = {inp.get('name', ''): '' for inp in inputs if inp.get('name')}
-        for param in baseline:
+        request_parts = form_request_parts(form_data)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, param in injectable_locations(body_fields, header_fields, cookie_fields):
             print(f"Testing SSTI on form param: {param}")
-            result = self._probe_param(action, param, '', baseline, method)
+            result = self._probe_param(action, param, '', request_parts, method, body_format, location)
             if result:
                 findings.append(result)
         return findings
@@ -78,24 +82,24 @@ class SSTIScanner:
         findings = []
         action = form.get('action', '')
         method = (form.get('method') or 'GET').upper()
-        inputs = form.get('inputs', [])
-        if not action or not inputs:
+        if not action:
             return findings
-        baseline = {inp.get('name', ''): '' for inp in inputs if inp.get('name')}
-        for param in baseline:
-            result = await self._probe_param_async(action, param, '', baseline, method, http)
+        request_parts = form_request_parts(form)
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        for location, param in injectable_locations(body_fields, header_fields, cookie_fields):
+            result = await self._probe_param_async(action, param, '', request_parts, method, http, body_format, location)
             if result:
                 findings.append(result)
         return findings
 
-    async def _probe_param_async(self, url, param, original, params, method, http):
+    async def _probe_param_async(self, url, param, original, request_parts, method, http, body_format="form", target_location="body"):
         try:
-            baseline_data = params.copy()
-            baseline_data[param] = 'SSTI_BASELINE_12345'
-            if method.upper() == 'GET':
-                baseline_resp = await http.get(url, params=baseline_data)
-            else:
-                baseline_resp = await http.post(url, data=baseline_data)
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
+            baseline_data, baseline_headers, baseline_cookies = build_request_context(
+                body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                target_location, param, 'SSTI_BASELINE_12345'
+            )
+            baseline_resp = await self._send_async(http, url, method, baseline_data, baseline_headers, baseline_cookies, body_format)
             if not baseline_resp or 'SSTI_BASELINE_12345' not in (baseline_resp.text or ''):
                 return None
         except Exception:
@@ -103,12 +107,11 @@ class SSTIScanner:
 
         for payload, expected, description in SSTI_PAYLOADS:
             try:
-                data = params.copy()
-                data[param] = payload
-                if method.upper() == 'GET':
-                    resp = await http.get(url, params=data)
-                else:
-                    resp = await http.post(url, data=data)
+                data, headers, cookies = build_request_context(
+                    body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                    target_location, param, payload
+                )
+                resp = await self._send_async(http, url, method, data, headers, cookies, body_format)
                 if resp:
                     text = resp.text or ''
                     if expected in text:
@@ -130,16 +133,16 @@ class SSTIScanner:
     # ------------------------------------------------------------------
 
     def _probe_param(
-        self, url, param, original, params, method
+        self, url, param, original, request_parts, method, body_format="form", target_location="body"
     ) -> Optional[Dict[str, Any]]:
         # First get a baseline to detect reflected value
         try:
-            baseline_data = params.copy()
-            baseline_data[param] = 'SSTI_BASELINE_12345'
-            if method.upper() == 'GET':
-                baseline_resp = self.session.get(url, params=baseline_data, timeout=self.timeout)
-            else:
-                baseline_resp = self.session.post(url, data=baseline_data, timeout=self.timeout)
+            body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
+            baseline_data, baseline_headers, baseline_cookies = build_request_context(
+                body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                target_location, param, 'SSTI_BASELINE_12345'
+            )
+            baseline_resp = self._send_sync(url, method, baseline_data, baseline_headers, baseline_cookies, body_format)
 
             # Parameter must be reflected for SSTI to be detectable
             if 'SSTI_BASELINE_12345' not in (baseline_resp.text or ''):
@@ -151,13 +154,12 @@ class SSTIScanner:
         # Now test payloads
         for payload, expected, description in SSTI_PAYLOADS:
             try:
-                data = params.copy()
-                data[param] = payload
+                data, headers, cookies = build_request_context(
+                    body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                    target_location, param, payload
+                )
 
-                if method.upper() == 'GET':
-                    resp = self.session.get(url, params=data, timeout=self.timeout)
-                else:
-                    resp = self.session.post(url, data=data, timeout=self.timeout)
+                resp = self._send_sync(url, method, data, headers, cookies, body_format)
 
                 text = resp.text or ''
                 if expected in text:
@@ -176,3 +178,38 @@ class SSTIScanner:
                 print(f"SSTI test failed on {param}: {exc}")
 
         return None
+
+    def _form_body_format(self, form: Dict[str, Any]) -> str:
+        if form.get("body_format") == "json":
+            return "json"
+        content_type = str(form.get("content_type", "")).lower()
+        if "application/json" in content_type:
+            return "json"
+        return "form"
+
+    def _send_sync(self, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
+        if method.upper() == 'GET':
+            return self.session.get(url, params=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+        if body_format == "json":
+            return self.session.request(
+                method.upper(),
+                url,
+                json=data,
+                timeout=self.timeout,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return self.session.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+
+    async def _send_async(self, http, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
+        if method.upper() == 'GET':
+            return await http.get(url, params=data, headers=headers or None, cookies=cookies or None)
+        if body_format == "json":
+            return await http.request(
+                method.upper(),
+                url,
+                json=data,
+                headers={**(headers or {}), "Content-Type": "application/json"},
+                cookies=cookies or None,
+            )
+        return await http.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None)

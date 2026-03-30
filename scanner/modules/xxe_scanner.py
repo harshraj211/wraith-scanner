@@ -9,6 +9,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import requests
+from scanner.utils.request_metadata import build_request_context, form_request_parts
 
 
 XXE_PAYLOADS = [
@@ -70,19 +71,31 @@ class XXEScanner:
         findings = []
         action = form_data.get('action', '')
         method = (form_data.get('method') or 'GET').upper()
-        inputs = form_data.get('inputs', [])
         enctype = form_data.get('enctype', '').lower()
+        content_type = str(form_data.get('content_type', '')).lower()
+        body_format = str(form_data.get('body_format', '')).lower()
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = form_request_parts(form_data)
 
         # Only test XML-accepting forms or forms with XML-looking params
-        is_xml_form = any(ct in enctype for ct in XML_CONTENT_TYPES)
-        baseline = {inp.get('name', ''): '' for inp in inputs if inp.get('name')}
+        is_xml_form = (
+            any(ct in enctype for ct in XML_CONTENT_TYPES)
+            or any(ct in content_type for ct in XML_CONTENT_TYPES)
+            or body_format == "xml"
+        )
+        baseline = body_fields
 
         for param in baseline:
             if not (is_xml_form or self._looks_like_xml_param(param, '')):
                 continue
             print(f"Testing XXE on form param: {param}")
             for payload, target in XXE_PAYLOADS:
-                result = self._test_xxe(action, param, baseline, payload, target, method=method)
+                result = self._test_xxe(
+                    action, param, baseline, payload, target,
+                    method=method,
+                    body_format=body_format or ("xml" if is_xml_form else "form"),
+                    headers={**extra_headers, **header_fields},
+                    cookies={**extra_cookies, **cookie_fields},
+                )
                 if result:
                     findings.append(result)
                     break
@@ -109,28 +122,48 @@ class XXEScanner:
         findings = []
         action  = form.get('action', '')
         method  = (form.get('method') or 'GET').upper()
-        inputs  = form.get('inputs', [])
         enctype = form.get('enctype', '').lower()
-        is_xml_form = any(ct in enctype for ct in XML_CONTENT_TYPES)
-        baseline = {inp.get('name', ''): '' for inp in inputs if inp.get('name')}
+        content_type = str(form.get('content_type', '')).lower()
+        body_format = str(form.get('body_format', '')).lower()
+        body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = form_request_parts(form)
+        is_xml_form = (
+            any(ct in enctype for ct in XML_CONTENT_TYPES)
+            or any(ct in content_type for ct in XML_CONTENT_TYPES)
+            or body_format == "xml"
+        )
+        baseline = body_fields
         for param in baseline:
             if not (is_xml_form or self._looks_like_xml_param(param, '')):
                 continue
             for payload, target in XXE_PAYLOADS:
-                result = await self._test_xxe_async(action, param, baseline, payload, target, http, method=method)
+                result = await self._test_xxe_async(
+                    action, param, baseline, payload, target, http,
+                    method=method,
+                    body_format=body_format or ("xml" if is_xml_form else "form"),
+                    headers={**extra_headers, **header_fields},
+                    cookies={**extra_cookies, **cookie_fields},
+                )
                 if result:
                     findings.append(result)
                     break
         return findings
 
-    async def _test_xxe_async(self, url, param, params, payload, target, http, method='GET'):
+    async def _test_xxe_async(self, url, param, params, payload, target, http, method='GET', body_format='form', headers=None, cookies=None):
         try:
             data = params.copy()
             data[param] = payload
             if method.upper() == 'GET':
-                resp = await http.get(url, params=data)
+                resp = await http.get(url, params=data, headers=headers or None, cookies=cookies or None)
+            elif body_format == 'xml':
+                resp = await http.request(
+                    method.upper(),
+                    url,
+                    data=payload,
+                    headers={**(headers or {}), 'Content-Type': 'application/xml'},
+                    cookies=cookies or None,
+                )
             else:
-                resp = await http.post(url, data=data)
+                resp = await http.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None)
             if resp:
                 return self._check_xxe_response(url, param, payload, target, resp)
         except Exception:
@@ -169,16 +202,25 @@ class XXEScanner:
         return False
 
     def _test_xxe(
-        self, url, param, params, payload, target, method='GET'
+        self, url, param, params, payload, target, method='GET', body_format='form', headers=None, cookies=None
     ) -> Optional[Dict[str, Any]]:
         try:
             data = params.copy()
             data[param] = payload
 
             if method.upper() == 'GET':
-                resp = self.session.get(url, params=data, timeout=self.timeout)
+                resp = self.session.get(url, params=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+            elif body_format == 'xml':
+                resp = self.session.request(
+                    method.upper(),
+                    url,
+                    data=payload,
+                    headers={**(headers or {}), 'Content-Type': 'application/xml'},
+                    cookies=cookies or None,
+                    timeout=self.timeout,
+                )
             else:
-                resp = self.session.post(url, data=data, timeout=self.timeout)
+                resp = self.session.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
 
             return self._check_xxe_response(url, param, payload, target, resp)
 
