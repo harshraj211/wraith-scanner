@@ -22,6 +22,7 @@ Performance:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -509,14 +510,42 @@ class AsyncScanEngine:
 
 def build_url_param_pairs(urls: List[str]) -> List[Tuple[str, Dict[str, str]]]:
     """
-    Parse query params from URLs, return (url, params) pairs.
-    Only includes URLs that actually have query parameters to test.
+    Build scanner-ready URL targets from crawler output.
+
+    The returned URL is normalized without its query string so scanners can
+    mutate parameters without duplicating them. REST-style object paths like
+    /users/1 are retained even when they do not carry query parameters.
     """
     pairs = []
+    seen = set()
     for url in urls:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
-        flat   = {k: v[0] for k, v in params.items() if v}
-        if flat:
-            pairs.append((url, flat))
+        flat = {k: v[0] for k, v in params.items() if v}
+        base_url = parsed._replace(query="", fragment="").geturl()
+        if not flat and not _looks_like_path_object(base_url):
+            continue
+        key = (base_url, tuple(sorted(flat.items())))
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((base_url, flat))
     return pairs
+
+
+def _looks_like_path_object(url: str) -> bool:
+    parsed = urlparse(url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) < 2:
+        return False
+
+    candidate = segments[-1]
+    container = segments[-2].lower()
+    if not re.fullmatch(r"\d+", candidate):
+        return False
+
+    keywords = (
+        "id", "user", "account", "profile", "order", "invoice",
+        "customer", "member", "record", "doc", "document", "item",
+    )
+    return any(keyword in container for keyword in keywords)

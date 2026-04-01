@@ -80,6 +80,11 @@ def normalize_params_from_url(url: str) -> Dict[str, str]:
     return {k: v[0] for k, v in raw.items() if v}
 
 
+def strip_query_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed._replace(query="", fragment="").geturl()
+
+
 def dedupe_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: Set[Tuple[str, str, str]] = set()
     out: List[Dict[str, Any]] = []
@@ -317,6 +322,7 @@ def main() -> int:
     # Scan URLs
     for u in urls:
         params = normalize_params_from_url(u)
+        scan_url = strip_query_from_url(u)
         
         # --- HUNT FLAGS WITH SHARED SESSION ---
         if flag_hunter:
@@ -344,57 +350,55 @@ def main() -> int:
         if params:
             # SQLi
             try:
-                f = sqli.scan_url(u, params)
-                for item in f: item["url"] = u
+                f = sqli.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
                 all_findings.extend(f)
             except Exception as exc:
                 errors.append(f"SQLi scanner failed on {u}: {exc}")
 
             # XSS
             try:
-                f = xss.scan_url(u, params)
-                for item in f: item["url"] = u
+                f = xss.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
                 all_findings.extend(f)
             except Exception as exc:
                 errors.append(f"XSS scanner failed on {u}: {exc}")
 
-            # IDOR
-            try:
-                f = idor.scan_url(u, params)
-                for item in f: item["url"] = u
-                all_findings.extend(f)
-            except Exception as exc:
-                errors.append(f"IDOR scanner failed on {u}: {exc}")
-
             # SSRF
             try:
-                f = ssrf.scan_url(u, params)
-                for item in f: item["url"] = u
+                f = ssrf.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
                 all_findings.extend(f)
             except Exception as exc:
                 errors.append(f"SSRF scanner failed on {u}: {exc}")
 
             # SSTI
             try:
-                f = ssti.scan_url(u, params)
-                for item in f: item["url"] = u
+                f = ssti.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
                 all_findings.extend(f)
             except Exception as exc:
                 errors.append(f"SSTI scanner failed on {u}: {exc}")
 
             # XXE
             try:
-                f = xxe.scan_url(u, params)
-                for item in f: item["url"] = u
+                f = xxe.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
                 all_findings.extend(f)
             except Exception as exc:
                 errors.append(f"XXE scanner failed on {u}: {exc}")
 
+        try:
+            f = idor.scan_url(scan_url, params)
+            for item in f: item["url"] = scan_url
+            all_findings.extend(f)
+        except Exception as exc:
+            errors.append(f"IDOR scanner failed on {u}: {exc}")
+
         # Redirect check
         try:
-            qp = normalize_params_from_url(u)
-            f = redir.scan_url(u, qp)
-            for item in f: item["url"] = u
+            f = redir.scan_url(scan_url, params)
+            for item in f: item["url"] = scan_url
             all_findings.extend(f)
         except Exception as exc:
             errors.append(f"Redirect scanner failed on {u}: {exc}")

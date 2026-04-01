@@ -2,12 +2,14 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import requests
 from flask import Flask, redirect, request
 from werkzeug.serving import make_server
 
+from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
 from scanner.modules.idor_scanner import IDORScanner
 from scanner.modules.redirect_scanner import RedirectScanner
 from scanner.modules.ssrf_scanner import SSRFScanner
@@ -102,6 +104,33 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(finding["type"], "idor")
         self.assertIn("Object identifier changed", finding["evidence"])
         self.assertGreaterEqual(finding["confidence"], 84)
+
+    def test_idor_detected_on_rest_style_path_object(self):
+        with run_app(vulnerable_app) as base_url:
+            scanner = IDORScanner(timeout=5)
+            findings = scanner.scan_url(f"{base_url}/api/users/1", {"view": "summary"})
+
+        self.assertTrue(findings)
+        finding = findings[0]
+        self.assertEqual(finding["type"], "idor")
+        self.assertEqual(finding["param"], "path:users")
+        self.assertIn("Object identifier changed from 1 to 2", finding["evidence"])
+        self.assertGreaterEqual(finding["confidence"], 84)
+
+    def test_async_pipeline_keeps_path_targets_and_strips_query_before_scan(self):
+        with run_app(vulnerable_app) as base_url:
+            targets = build_url_param_pairs([f"{base_url}/api/users/1?view=summary"])
+            engine = AsyncScanEngine(max_concurrent=4, timeout=5)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                findings = pool.submit(
+                    engine.scan_urls_sync,
+                    targets,
+                    [IDORScanner(timeout=5)],
+                ).result(timeout=10)
+
+        self.assertEqual(targets, [(f"{base_url}/api/users/1", {"view": "summary"})])
+        self.assertTrue(findings)
+        self.assertEqual(findings[0]["param"], "path:users")
 
     def test_redirect_scanner_flags_param_controlled_redirect(self):
         with run_app(build_aux_app()) as base_url:
