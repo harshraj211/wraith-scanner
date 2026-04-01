@@ -30,11 +30,15 @@ except Exception:
     class Style:
         RESET_ALL = ""
 from urllib.parse import urlparse, parse_qs
+from scanner.core.live_scan import LiveDiscoveryScanner
+from scanner.core.workflows import load_workflows
 from scanner.core.crawler import WebCrawler
 from scanner.modules.sqli_scanner import SQLiScanner
 from scanner.modules.xss_scanner import XSSScanner
 from scanner.modules.idor_scanner import IDORScanner
 from scanner.modules.redirect_scanner import RedirectScanner
+from scanner.modules.cmdi_scanner import CMDIScanner
+from scanner.modules.path_traversal_scanner import PathTraversalScanner
 from scanner.modules.csrf_scanner import CSRFScanner
 from scanner.modules.crypto_scanner import CryptoScanner
 from scanner.modules.ssrf_scanner import SSRFScanner
@@ -42,6 +46,9 @@ from scanner.modules.xxe_scanner import XXEScanner
 from scanner.modules.ssti_scanner import SSTIScanner
 from scanner.modules.header_scanner import HeaderScanner
 from scanner.modules.component_scanner import ComponentScanner
+from scanner.modules.graphql_scanner import GraphQLScanner
+from scanner.modules.race_scanner import RaceConditionScanner
+from scanner.modules.websocket_scanner import WebSocketScanner
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
@@ -62,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--password", help="Password for authenticated modes")
     p.add_argument("--depth", type=int, help="Crawl depth (overrides mode default)")
     p.add_argument("--timeout", type=int, help="Request timeout seconds (overrides mode default)")
+    p.add_argument("--workflow", help="Path to a JSON workflow macro file")
     p.add_argument("--output", help="Output file path (.pdf, .html, .json, .txt)")
     p.add_argument("--verbose", action="store_true", help="Enable verbose output")
     return p.parse_args()
@@ -270,31 +278,48 @@ def main() -> int:
     print(f"    Depth: {config['max_depth']}")
     print(f"    Timeout: {config['timeout']}s\n")
 
-    print(Fore.MAGENTA + "CRAWLING" + Style.RESET_ALL)
-    
-    # --- PASS SESSION TO CRAWLER ---
-    # Crawler now uses the authenticated session
-    crawler = WebCrawler(args.url, max_depth=config['max_depth'], 
-                         timeout=config['timeout'], session=session)
-    results = crawler.crawl()
-
-    urls = results.get("urls", [])
-    forms = results.get("forms", [])
-
-    print(Fore.MAGENTA + "SCANNING" + Style.RESET_ALL)
-    all_findings: List[Dict[str, Any]] = []
-    errors: List[str] = []
-
+    workflows = load_workflows(args.workflow) if args.workflow else []
     sqli = SQLiScanner(timeout=config['timeout'], session=session)
     xss = XSSScanner(timeout=config['timeout'], session=session)
     idor = IDORScanner(timeout=config['timeout'], session=session)
     redir = RedirectScanner(timeout=config['timeout'], session=session)
+    cmdi = CMDIScanner(timeout=config['timeout'], session=session)
+    path = PathTraversalScanner(timeout=config['timeout'], session=session)
     crypto = CryptoScanner(timeout=config['timeout'], session=session)
     ssrf = SSRFScanner(timeout=config['timeout'], session=session)
     xxe = XXEScanner(timeout=config['timeout'], session=session)
     ssti = SSTIScanner(timeout=config['timeout'], session=session)
     header_scan = HeaderScanner(timeout=config['timeout'], session=session)
     component_scan = ComponentScanner(timeout=config['timeout'], session=session)
+    graphql = GraphQLScanner(timeout=config['timeout'], session=session)
+    race = RaceConditionScanner(timeout=config['timeout'], session=session)
+    websocket = WebSocketScanner(timeout=config['timeout'], session=session)
+    live_scanner = LiveDiscoveryScanner(
+        form_scanners=[
+            sqli, xss, cmdi, path,
+            CSRFScanner(timeout=config['timeout'], session=session),
+            crypto, ssrf, xxe, ssti, graphql, race,
+        ],
+        websocket_scanner=websocket,
+    )
+
+    print(Fore.MAGENTA + "CRAWLING" + Style.RESET_ALL)
+    
+    # --- PASS SESSION TO CRAWLER ---
+    # Crawler now uses the authenticated session
+    crawler = WebCrawler(args.url, max_depth=config['max_depth'], 
+                         timeout=config['timeout'], session=session,
+                         workflows=workflows,
+                         discovery_callback=live_scanner.handle_discovery)
+    results = crawler.crawl()
+
+    urls = results.get("urls", [])
+    forms = results.get("forms", [])
+    websockets = results.get("websockets", [])
+
+    print(Fore.MAGENTA + "SCANNING" + Style.RESET_ALL)
+    all_findings: List[Dict[str, Any]] = list(live_scanner.findings)
+    errors: List[str] = []
 
     # One-time base URL checks
     for finding in header_scan.scan_url(args.url):
@@ -388,6 +413,22 @@ def main() -> int:
             except Exception as exc:
                 errors.append(f"XXE scanner failed on {u}: {exc}")
 
+            # CMDI
+            try:
+                f = cmdi.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
+                all_findings.extend(f)
+            except Exception as exc:
+                errors.append(f"CMDI scanner failed on {u}: {exc}")
+
+            # Path traversal
+            try:
+                f = path.scan_url(scan_url, params)
+                for item in f: item["url"] = scan_url
+                all_findings.extend(f)
+            except Exception as exc:
+                errors.append(f"Path traversal scanner failed on {u}: {exc}")
+
         try:
             f = idor.scan_url(scan_url, params)
             for item in f: item["url"] = scan_url
@@ -403,65 +444,7 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"Redirect scanner failed on {u}: {exc}")
 
-    # Scan forms
-    for form in forms:
-        action = form.get("action")
-        try:
-            f = sqli.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"SQLi scanner failed on form {action}: {exc}")
-
-        try:
-            f = xss.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"XSS scanner failed on form {action}: {exc}")
-
-        try:
-            f = redir.scan_url(action, normalize_params_from_url(action))
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"Redirect scanner failed on form {action}: {exc}")
-
-        try:
-            csrf_scanner = CSRFScanner()
-            f = csrf_scanner.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"CSRF scanner failed on form {action}: {exc}")
-
-        try:
-            f = crypto.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"Crypto scanner failed on form {action}: {exc}")
-
-        try:
-            f = ssrf.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"SSRF scanner failed on form {action}: {exc}")
-
-        try:
-            f = ssti.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"SSTI scanner failed on form {action}: {exc}")
-
-        try:
-            f = xxe.scan_form(form)
-            for item in f: item["url"] = action
-            all_findings.extend(f)
-        except Exception as exc:
-            errors.append(f"XXE scanner failed on form {action}: {exc}")
+    errors.extend(live_scanner.errors)
 
     # After the scanning loops complete, run stored XSS check
     stored_xss = xss.check_stored(urls, session=session)
@@ -470,6 +453,7 @@ def main() -> int:
     # After all scan_url / scan_form calls — collect blind SSRF callbacks
     blind_ssrf = ssrf.collect_oob_findings()
     all_findings.extend(blind_ssrf)
+    all_findings.extend(websocket.collect_oob_findings())
 
     # Deduplicate and sort
     unique = dedupe_findings(all_findings)

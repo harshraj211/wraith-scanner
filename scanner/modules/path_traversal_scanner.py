@@ -14,6 +14,8 @@ from scanner.utils.request_metadata import (
     build_request_context,
     form_request_parts,
     injectable_locations,
+    send_request_async,
+    send_request_sync,
 )
 from scanner.utils.waf_evasion import (
     PATH_WAF_BYPASS_PAYLOADS,
@@ -278,28 +280,24 @@ class PathTraversalScanner:
         return "form"
 
     def _send_sync(self, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
-        if method.upper() == "GET":
-            return self.session.get(url, params=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
-        if body_format == "json":
-            return self.session.request(
-                method.upper(),
-                url,
-                json=data,
-                timeout=self.timeout,
-                headers={**(headers or {}), "Content-Type": "application/json"},
-                cookies=cookies or None,
-            )
-        return self.session.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+        return send_request_sync(
+            self.session,
+            url,
+            method,
+            data,
+            headers,
+            cookies,
+            self.timeout,
+            body_format,
+        )
 
     async def _send_async(self, http, url: str, method: str, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str], body_format: str):
-        if method.upper() == "GET":
-            return await http.get(url, params=data, headers=headers or None, cookies=cookies or None)
-        if body_format == "json":
-            return await http.request(
-                method.upper(),
-                url,
-                json=data,
-                headers={**(headers or {}), "Content-Type": "application/json"},
-                cookies=cookies or None,
-            )
-        return await http.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None)
+        return await send_request_async(
+            http,
+            url,
+            method,
+            data,
+            headers,
+            cookies,
+            body_format,
+        )

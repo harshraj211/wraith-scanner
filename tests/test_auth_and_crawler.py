@@ -7,7 +7,7 @@ from unittest.mock import patch
 from werkzeug.serving import make_server
 
 from scanner.core.crawler import WebCrawler
-from scanner.utils.auth_manager import AuthManager
+from scanner.utils.auth_manager import AuthManager, extract_browser_storage_auth
 from test_app.vulnerable_app import app as vulnerable_app
 
 
@@ -27,6 +27,27 @@ def run_app(app):
 
 
 class AuthAndCrawlerTests(unittest.TestCase):
+    def test_auth_manager_extracts_and_ingests_browser_storage_tokens(self):
+        storage = {
+            "localStorage": {
+                "authState": '{"accessToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"}',
+            },
+            "sessionStorage": {},
+        }
+
+        extracted = extract_browser_storage_auth(storage)
+        self.assertEqual(
+            extracted.get("authorization"),
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        )
+
+        auth = AuthManager()
+        self.assertTrue(auth.ingest_browser_storage(storage))
+        self.assertEqual(
+            auth.get_session().headers.get("Authorization"),
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        )
+
     def test_auth_manager_logs_into_session_protected_area(self):
         with run_app(vulnerable_app) as base_url:
             auth = AuthManager()

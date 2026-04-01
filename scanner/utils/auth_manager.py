@@ -1,7 +1,105 @@
 """Authentication manager for scanning protected areas."""
-from typing import Optional, Dict
+import json
+import re
+from typing import Any, Dict, Optional
 from urllib.parse import urljoin, urlparse
 import requests
+
+
+_JWT_LIKE_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+_TOKEN_KEYS = (
+    "token",
+    "access_token",
+    "accessToken",
+    "id_token",
+    "idToken",
+    "jwt",
+    "bearer",
+    "authorization",
+)
+
+
+def _extract_token_candidates(value: Any):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _TOKEN_KEYS and isinstance(child, str) and child.strip():
+                yield child.strip()
+            yield from _extract_token_candidates(child)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _extract_token_candidates(item)
+
+
+def extract_browser_storage_auth(storage: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+    storage = storage or {}
+    collected = {
+        "authorization": None,
+        "query_params": {},
+        "sources": [],
+    }
+
+    for location in ("localStorage", "sessionStorage"):
+        bucket = storage.get(location, {}) or {}
+        for key, raw_value in bucket.items():
+            if raw_value is None:
+                continue
+            value = str(raw_value).strip()
+            if not value:
+                continue
+
+            key_lower = str(key).lower()
+            if value.lower().startswith("bearer "):
+                collected["authorization"] = value
+                collected["sources"].append(f"{location}:{key}")
+                return collected
+
+            if _JWT_LIKE_RE.match(value) and any(token_key in key_lower for token_key in ("token", "jwt", "auth", "bearer")):
+                collected["authorization"] = f"Bearer {value}"
+                collected["sources"].append(f"{location}:{key}")
+                return collected
+
+            if any(token_key in key_lower for token_key in ("api_key", "apikey", "api-token")):
+                collected["query_params"][str(key)] = value
+                collected["sources"].append(f"{location}:{key}")
+
+            if not value.startswith(("{", "[")):
+                continue
+
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                continue
+
+            for candidate in _extract_token_candidates(parsed):
+                candidate = str(candidate).strip()
+                if candidate.lower().startswith("bearer "):
+                    collected["authorization"] = candidate
+                    collected["sources"].append(f"{location}:{key}")
+                    return collected
+                if _JWT_LIKE_RE.match(candidate):
+                    collected["authorization"] = f"Bearer {candidate}"
+                    collected["sources"].append(f"{location}:{key}")
+                    return collected
+
+    return collected
+
+
+def apply_browser_storage_auth(session: requests.Session, storage: Dict[str, Dict[str, str]]) -> bool:
+    extracted = extract_browser_storage_auth(storage)
+    applied = False
+
+    authorization = extracted.get("authorization")
+    if authorization:
+        session.headers.update({"Authorization": authorization})
+        applied = True
+
+    query_params = dict(getattr(session, "_default_query_params", {}) or {})
+    if extracted.get("query_params"):
+        query_params.update(extracted["query_params"])
+        setattr(session, "_default_query_params", query_params)
+        applied = True
+
+    return applied
 
 
 class AuthManager:
@@ -189,6 +287,17 @@ class AuthManager:
     def get_session(self) -> requests.Session:
         """Get the authenticated session."""
         return self.session
+
+    def ingest_browser_storage(self, storage: Dict[str, Dict[str, str]]) -> bool:
+        """Promote auth artifacts from browser storage into the shared HTTP session."""
+        if not apply_browser_storage_auth(self.session, storage):
+            return False
+
+        self.is_authenticated = True
+        self.auth_type = "browser-storage"
+        self.credentials = {"storage": storage}
+        print("[+] Browser storage auth synchronized")
+        return True
     
     def logout(self) -> None:
         """Clear authentication."""

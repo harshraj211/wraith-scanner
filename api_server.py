@@ -15,6 +15,8 @@ from datetime import datetime
 
 from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
 from scanner.core.crawler import WebCrawler
+from scanner.core.live_scan import LiveDiscoveryScanner
+from scanner.core.workflows import load_workflows
 from scanner.modules.sqli_scanner import SQLiScanner
 from scanner.modules.xss_scanner import XSSScanner
 from scanner.modules.idor_scanner import IDORScanner
@@ -33,6 +35,9 @@ from scanner.modules.xxe_scanner import XXEScanner
 from scanner.modules.ssti_scanner import SSTIScanner
 from scanner.modules.header_scanner import HeaderScanner
 from scanner.modules.component_scanner import ComponentScanner
+from scanner.modules.graphql_scanner import GraphQLScanner
+from scanner.modules.race_scanner import RaceConditionScanner
+from scanner.modules.websocket_scanner import WebSocketScanner
 # NOTE: SemgrepScanner import removed — Semgrep now runs via subprocess directly.
 #       If you need to call SemgrepScanner class elsewhere, re-add the import there.
 from scanner.modules.sast_scanner import SASTScanner
@@ -193,21 +198,9 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             emit_progress(scan_id, f"WordPress detected! Found {len(wp_findings)} WP-specific issues", "warning")
 
         scan_start_time = time.time()
-
-        emit_progress(scan_id, "Phase 1: Crawling target...", "phase")
-        crawler = WebCrawler(
-            target_url,
-            max_depth=depth,
-            timeout=timeout,
-            session=authenticated_session,
+        workflows = load_workflows(
+            (auth_config or {}).get("workflows") or (auth_config or {}).get("workflow")
         )
-        results = crawler.crawl()
-        urls = results.get("urls", [])
-        forms = results.get("forms", [])
-
-        crawl_duration = round(time.time() - scan_start_time, 1)
-        emit_progress(scan_id, f"Crawl complete in {crawl_duration}s: {len(urls)} URLs, {len(forms)} forms", "success")
-
         sqli = SQLiScanner(timeout=timeout, session=authenticated_session)
         xss = XSSScanner(timeout=timeout, session=authenticated_session)
         idor = IDORScanner(timeout=timeout, session=authenticated_session)
@@ -221,9 +214,39 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         ssti = SSTIScanner(timeout=timeout, session=authenticated_session)
         header_scan = HeaderScanner(timeout=timeout, session=authenticated_session)
         component_scan = ComponentScanner(timeout=timeout, session=authenticated_session)
+        graphql = GraphQLScanner(timeout=timeout, session=authenticated_session)
+        race = RaceConditionScanner(timeout=timeout, session=authenticated_session)
+        websocket = WebSocketScanner(timeout=timeout, session=authenticated_session)
+        live_scanner = LiveDiscoveryScanner(
+            form_scanners=[sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe, graphql, race],
+            websocket_scanner=websocket,
+            progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
+        )
+
+        emit_progress(scan_id, "Phase 1: Crawling target...", "phase")
+        crawler = WebCrawler(
+            target_url,
+            max_depth=depth,
+            timeout=timeout,
+            session=authenticated_session,
+            workflows=workflows,
+            discovery_callback=live_scanner.handle_discovery,
+        )
+        results = crawler.crawl()
+        urls = results.get("urls", [])
+        forms = results.get("forms", [])
+        websockets = results.get("websockets", [])
+
+        crawl_duration = round(time.time() - scan_start_time, 1)
+        emit_progress(
+            scan_id,
+            f"Crawl complete in {crawl_duration}s: {len(urls)} URLs, {len(forms)} forms, {len(websockets)} websockets",
+            "success",
+        )
 
         # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
+        all_findings.extend(live_scanner.findings)
         emit_progress(scan_id, "Running passive checks (headers, components, crypto)...", "info")
         with ThreadPoolExecutor(max_workers=4) as pool:
             f_header    = pool.submit(header_scan.scan_url, target_url)
@@ -236,7 +259,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             except Exception:
                 pass
 
-        emit_progress(scan_id, "Phase 2: Testing for vulnerabilities (native async aiohttp)...", "phase")
+        emit_progress(scan_id, "Phase 2: Testing URL targets while forms are scanned during crawl...", "phase")
         engine = AsyncScanEngine(
             max_concurrent=20 if mode_config['aggressive'] else 10,
             timeout=timeout,
@@ -244,13 +267,12 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         )
         url_param_pairs = build_url_param_pairs(urls)
         dast_scanners = [sqli, xss, idor, cmdi, path, ssrf, ssti, xxe, redir]
-        form_scanners = [sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe]
 
         # Single event loop — URLs + forms scan concurrently (full I/O overlap)
         all_findings.extend(
-            engine.scan_all_sync(
-                url_param_pairs, dast_scanners,
-                forms, form_scanners,
+            engine.scan_urls_sync(
+                url_param_pairs,
+                dast_scanners,
                 progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
             )
         )
@@ -262,6 +284,10 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         # Blind SSRF OOB callback collection
         blind_ssrf = ssrf.collect_oob_findings()
         all_findings.extend(blind_ssrf)
+        all_findings.extend(websocket.collect_oob_findings())
+
+        for live_error in live_scanner.errors:
+            emit_progress(scan_id, live_error, "warning")
 
         emit_progress(scan_id, "Phase 3: Generating report...", "phase")
 
@@ -279,6 +305,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             'target': target_url,
             'urls': urls,
             'forms': forms,
+            'websockets': websockets,
             'findings': unique_findings,
             'report_path': report_path,
             'total_vulnerabilities': len(unique_findings),

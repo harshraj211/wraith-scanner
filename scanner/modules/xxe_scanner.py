@@ -9,7 +9,12 @@ import re
 from typing import Any, Dict, List, Optional
 
 import requests
-from scanner.utils.request_metadata import build_request_context, form_request_parts
+from scanner.utils.request_metadata import (
+    build_request_context,
+    form_request_parts,
+    send_request_async,
+    send_request_sync,
+)
 
 
 XXE_PAYLOADS = [
@@ -152,18 +157,17 @@ class XXEScanner:
         try:
             data = params.copy()
             data[param] = payload
-            if method.upper() == 'GET':
-                resp = await http.get(url, params=data, headers=headers or None, cookies=cookies or None)
-            elif body_format == 'xml':
-                resp = await http.request(
-                    method.upper(),
-                    url,
-                    data=payload,
-                    headers={**(headers or {}), 'Content-Type': 'application/xml'},
-                    cookies=cookies or None,
-                )
-            else:
-                resp = await http.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None)
+            if body_format == 'xml':
+                data = {"xml": payload}
+            resp = await send_request_async(
+                http,
+                url,
+                method,
+                data,
+                headers or {},
+                cookies or {},
+                body_format,
+            )
             if resp:
                 return self._check_xxe_response(url, param, payload, target, resp)
         except Exception:
@@ -207,20 +211,18 @@ class XXEScanner:
         try:
             data = params.copy()
             data[param] = payload
-
-            if method.upper() == 'GET':
-                resp = self.session.get(url, params=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
-            elif body_format == 'xml':
-                resp = self.session.request(
-                    method.upper(),
-                    url,
-                    data=payload,
-                    headers={**(headers or {}), 'Content-Type': 'application/xml'},
-                    cookies=cookies or None,
-                    timeout=self.timeout,
-                )
-            else:
-                resp = self.session.request(method.upper(), url, data=data, headers=headers or None, cookies=cookies or None, timeout=self.timeout)
+            if body_format == 'xml':
+                data = {"xml": payload}
+            resp = send_request_sync(
+                self.session,
+                url,
+                method,
+                data,
+                headers or {},
+                cookies or {},
+                self.timeout,
+                body_format,
+            )
 
             return self._check_xxe_response(url, param, payload, target, resp)
 

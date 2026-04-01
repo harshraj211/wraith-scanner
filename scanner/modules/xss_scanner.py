@@ -25,6 +25,8 @@ from scanner.utils.request_metadata import (
     build_request_context,
     form_request_parts,
     injectable_locations,
+    send_request_async,
+    send_request_sync,
 )
 from scanner.utils.waf_evasion import (
     generate_xss_evasion_payloads,
@@ -403,6 +405,67 @@ class XSSScanner:
     # Async reflected XSS
     # ------------------------------------------------------------------
 
+    def _scan_param_reflected(self, url: str, params: Dict[str, str],
+                              target_param: str) -> List[Dict[str, Any]]:
+        findings = []
+
+        for payload_template in REFLECTED_PAYLOADS:
+            marker = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
+            payload = payload_template.replace("{MARKER}", marker)
+
+            test_params = dict(params)
+            test_params[target_param] = payload
+
+            try:
+                resp = self.session.get(url, params=test_params, timeout=self.timeout)
+            except Exception:
+                continue
+
+            body = resp.text or ""
+            self._injected[marker] = {
+                "param": target_param,
+                "payload": payload,
+                "inject_url": url,
+            }
+
+            analysis = self._analyze_reflected_xss(
+                url, payload, body, marker, target_param
+            )
+            if analysis:
+                findings.append(analysis)
+                return findings
+
+        if not findings and self._evasion_level >= EvasionLevel.LOW:
+            limit = {1: 10, 2: 20, 3: 35, 4: 60}.get(self._evasion_level, 20)
+            marker = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
+            count = 0
+            for evasion_payload, technique in generate_xss_evasion_payloads(marker):
+                test_params = dict(params)
+                test_params[target_param] = evasion_payload
+                try:
+                    resp = self.session.get(url, params=test_params, timeout=self.timeout)
+                except Exception:
+                    continue
+
+                body = resp.text or ""
+                self._injected[marker] = {
+                    "param": target_param,
+                    "payload": evasion_payload,
+                    "inject_url": url,
+                }
+                analysis = self._analyze_reflected_xss(
+                    url, evasion_payload, body, marker, target_param
+                )
+                if analysis:
+                    analysis["method"] = "waf-bypass-" + technique
+                    findings.append(analysis)
+                    return findings
+                count += 1
+                if count >= limit:
+                    break
+
+        return findings
+
     async def _scan_param_reflected_async(self, url: str, params: Dict[str, str],
                                            target_param: str, http) -> List[Dict[str, Any]]:
         findings = []
@@ -486,29 +549,22 @@ class XSSScanner:
             resp = await self._submit_form_async(
                 http, action, method, data, headers, cookies, body_format
             )
-
-            test_params = dict(params)
-            test_params[target_param] = payload
-
-            try:
-                resp = self.session.get(url, params=test_params, timeout=self.timeout)
-                body = resp.text
-            except Exception:
+            if not resp:
                 continue
+            body = resp.text or ""
 
-            # Track for stored XSS check
             self._injected[marker] = {
-                "param":      target_param,
+                "param":      target_field,
                 "payload":    payload,
-                "inject_url": url,
+                "inject_url": action,
             }
 
             analysis = self._analyze_reflected_xss(
-                url, payload, body, marker, target_param
+                action, payload, body, marker, target_field, method=method
             )
             if analysis:
                 findings.append(analysis)
-                return findings  # one finding per param is enough
+                return findings
 
         return findings
 
@@ -562,23 +618,15 @@ class XSSScanner:
         cookies: Dict[str, str],
         body_format: str = "form",
     ) -> requests.Response:
-        if method == "get":
-            return self.session.get(
-                action, params=data, headers=headers or None,
-                cookies=cookies or None, timeout=self.timeout
-            )
-        if body_format == "json":
-            return self.session.request(
-                method.upper(),
-                action,
-                json=data,
-                timeout=self.timeout,
-                headers={**(headers or {}), "Content-Type": "application/json"},
-                cookies=cookies or None,
-            )
-        return self.session.request(
-            method.upper(), action, data=data, timeout=self.timeout,
-            headers=headers or None, cookies=cookies or None,
+        return send_request_sync(
+            self.session,
+            action,
+            method,
+            data,
+            headers,
+            cookies,
+            self.timeout,
+            body_format,
         )
 
     async def _submit_form_async(
@@ -591,18 +639,14 @@ class XSSScanner:
         cookies: Dict[str, str],
         body_format: str = "form",
     ):
-        if method == "get":
-            return await http.get(action, params=data, headers=headers or None, cookies=cookies or None)
-        if body_format == "json":
-            return await http.request(
-                method.upper(),
-                action,
-                json=data,
-                headers={**(headers or {}), "Content-Type": "application/json"},
-                cookies=cookies or None,
-            )
-        return await http.request(
-            method.upper(), action, data=data, headers=headers or None, cookies=cookies or None
+        return await send_request_async(
+            http,
+            action,
+            method,
+            data,
+            headers,
+            cookies,
+            body_format,
         )
 
     def _form_body_format(self, form: Dict[str, Any]) -> str:
@@ -673,6 +717,83 @@ class XSSScanner:
 
         try:
             page = ctx.new_page()
+            try:
+                page.add_init_script(
+                    """
+                    (() => {
+                        if (window.__wraithHooksInstalled) {
+                            return;
+                        }
+                        window.__wraithHooksInstalled = true;
+                        const hits = [];
+                        const record = (sink, value) => {
+                            try {
+                                hits.push({ sink, value: String(value ?? '') });
+                            } catch (_) {}
+                        };
+                        Object.defineProperty(window, '__wraithSinkHits', {
+                            configurable: true,
+                            enumerable: false,
+                            value: hits,
+                            writable: false,
+                        });
+
+                        const wrapFunction = (obj, name, sink) => {
+                            try {
+                                const original = obj[name];
+                                if (typeof original !== 'function') {
+                                    return;
+                                }
+                                obj[name] = function (...args) {
+                                    if (args.length) {
+                                        record(sink, args[0]);
+                                    }
+                                    return original.apply(this, args);
+                                };
+                            } catch (_) {}
+                        };
+
+                        const wrapSetter = (proto, name, sink) => {
+                            try {
+                                const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+                                if (!descriptor || typeof descriptor.set !== 'function') {
+                                    return;
+                                }
+                                Object.defineProperty(proto, name, {
+                                    configurable: descriptor.configurable,
+                                    enumerable: descriptor.enumerable,
+                                    get: descriptor.get,
+                                    set(value) {
+                                        record(sink, value);
+                                        return descriptor.set.call(this, value);
+                                    },
+                                });
+                            } catch (_) {}
+                        };
+
+                        wrapFunction(window, 'eval', 'eval');
+                        wrapFunction(window, 'setTimeout', 'setTimeout');
+                        wrapFunction(window, 'setInterval', 'setInterval');
+                        wrapFunction(document, 'write', 'document.write');
+                        wrapFunction(Element.prototype, 'insertAdjacentHTML', 'insertAdjacentHTML');
+                        wrapSetter(Element.prototype, 'innerHTML', 'innerHTML');
+                        wrapSetter(Element.prototype, 'outerHTML', 'outerHTML');
+
+                        try {
+                            const OriginalFunction = Function;
+                            window.Function = function (...args) {
+                                if (args.length) {
+                                    record('Function', args.join(','));
+                                }
+                                return OriginalFunction(...args);
+                            };
+                            window.Function.prototype = OriginalFunction.prototype;
+                        } catch (_) {}
+                    })();
+                    """
+                )
+            except Exception:
+                pass
 
             # Hook alert() BEFORE navigation
             def handle_dialog(dialog):
@@ -694,6 +815,23 @@ class XSSScanner:
             # Check 1: alert() was triggered with our marker
             if dialog_triggered["value"] and marker in str(dialog_triggered["value"]):
                 return f"alert() triggered with marker in DOM: {url}"
+
+            # Check 2: marker flowed into an instrumented runtime sink.
+            try:
+                taint_hit = page.evaluate(
+                    """
+                    marker => {
+                        const hits = Array.isArray(window.__wraithSinkHits) ? window.__wraithSinkHits : [];
+                        const hit = hits.find(item => (item.value || '').includes(marker));
+                        return hit ? hit.sink : null;
+                    }
+                    """,
+                    marker,
+                )
+                if taint_hit:
+                    return f"Marker flowed into instrumented DOM sink ({taint_hit}) at {url}"
+            except Exception:
+                pass
 
             # Check 2: marker flowed into an actually dangerous DOM sink
             try:

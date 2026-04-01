@@ -94,6 +94,15 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(findings[0]["type"], "xss-reflected")
         self.assertGreaterEqual(findings[0]["confidence"], 78)
 
+    def test_dom_xss_sink_tracking_detects_runtime_innerhtml_flow(self):
+        with run_app(vulnerable_app) as base_url:
+            scanner = XSSScanner(timeout=5)
+            findings = scanner.scan_url(f"{base_url}/dom", {"dom": "hello"})
+
+        self.assertTrue(findings)
+        self.assertEqual(findings[0]["type"], "xss-dom")
+        self.assertIn("instrumented dom sink", findings[0]["evidence"].lower())
+
     def test_idor_detected_with_object_change_evidence(self):
         with run_app(vulnerable_app) as base_url:
             scanner = IDORScanner(timeout=5)

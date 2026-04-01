@@ -17,10 +17,13 @@ import re
 import time
 from collections import deque
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qs
 
 import requests
+from scanner.core.workflows import execute_workflow, load_workflows, workflow_matches
+from scanner.utils.auth_manager import apply_browser_storage_auth
+from scanner.utils.request_metadata import flatten_json_fields
 
 requests.packages.urllib3.disable_warnings()
 
@@ -55,37 +58,50 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 class WebCrawler:
 
     def __init__(self, base_url: str, max_depth: int = 3, timeout: int = 10,
-                 session: Optional[requests.Session] = None):
+                 session: Optional[requests.Session] = None,
+                 workflows: Optional[Any] = None,
+                 discovery_callback: Optional[Callable[[str, Any], None]] = None):
         self.base_url  = base_url.rstrip("/")
         self.max_depth = max_depth
         self.timeout   = timeout
         self.domain    = urlparse(base_url).netloc
+        self.workflows = load_workflows(workflows)
+        self.discovery_callback = discovery_callback
+        self._workflow_traces: List[Dict[str, Any]] = []
 
         self.session = session or requests.Session()
         self.session.verify = False
         if "User-Agent" not in self.session.headers:
             self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
 
-    def crawl(self) -> Dict[str, Any]:
+    def crawl(self, discovery_callback: Optional[Callable[[str, Any], None]] = None) -> Dict[str, Any]:
         """
-        Crawl the target. Returns {"urls": [...], "forms": [...]}.
+        Crawl the target. Returns {"urls": [...], "forms": [...], "websockets": [...]}.
 
         Tries async Playwright first (JS-rendered SPA support).
         Falls back to BeautifulSoup (static HTML) if Playwright unavailable.
         """
+        callback = discovery_callback or self.discovery_callback
+        self._workflow_traces = []
         if self._playwright_available():
             print("[Crawler] Using async Playwright engine (JS rendering enabled)")
-            results = asyncio.run(self._crawl_playwright_async())
+            results = asyncio.run(self._crawl_playwright_async(callback))
         else:
             print("[Crawler] Playwright not available — using BeautifulSoup (static only)")
-            results = self._crawl_bs4()
-        return self._augment_with_openapi(results)
+            results = self._crawl_bs4(callback)
+        results = self._augment_with_openapi(results, callback)
+        results = self._augment_with_graphql(results, callback)
+        results["workflow_traces"] = list(self._workflow_traces)
+        return results
 
     # ------------------------------------------------------------------
     # Async Playwright crawler
     # ------------------------------------------------------------------
 
-    async def _crawl_playwright_async(self) -> Dict[str, Any]:
+    async def _crawl_playwright_async(
+        self,
+        discovery_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> Dict[str, Any]:
         from playwright.async_api import async_playwright
 
         visited: Set[str]       = set()
@@ -93,6 +109,9 @@ class WebCrawler:
         network_urls: Set[str]  = set()
         api_requests: List[Dict] = []
         api_seen: Set[str]       = set()
+        websocket_targets: Dict[str, Dict[str, Any]] = {}
+        published_websockets: Set[str] = set()
+        executed_workflows: Set[str] = set()
 
         queue: deque = deque()
         queue.append((self.base_url, 0))
@@ -145,6 +164,7 @@ class WebCrawler:
                                     "method": req.method.upper(),
                                     "post_data": None,
                                     "content_type": "",
+                                    "headers": {},
                                 }
                                 try:
                                     api_req["post_data"] = req.post_data
@@ -153,12 +173,43 @@ class WebCrawler:
                                 try:
                                     headers = req.headers
                                     api_req["content_type"] = headers.get("content-type", "")
+                                    api_req["headers"] = dict(headers)
                                 except Exception:
                                     pass
                                 api_requests.append(api_req)
                                 print(f"[Crawler]   API: {req.method} {base_req_url}")
 
+                    def handle_websocket(ws):
+                        ws_url = ws.url
+                        if not self._same_domain(self._http_url_equivalent(ws_url)):
+                            return
+                        target = websocket_targets.setdefault(
+                            ws_url,
+                            {
+                                "url": ws_url,
+                                "messages": [],
+                                "responses": [],
+                                "extra_headers": self._replayable_headers(dict(self.session.headers or {})),
+                                "_source": "playwright-websocket",
+                            },
+                        )
+                        try:
+                            ws.on(
+                                "framesent",
+                                lambda payload: self._record_websocket_frame(target["messages"], payload),
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            ws.on(
+                                "framereceived",
+                                lambda payload: self._record_websocket_frame(target["responses"], payload),
+                            )
+                        except Exception:
+                            pass
+
                     page.on("request", handle_request)
+                    page.on("websocket", handle_websocket)
 
                     # ── Navigation: load the page ──────────────────────
                     try:
@@ -189,9 +240,11 @@ class WebCrawler:
                     #    finish any deferred rendering, lazy-loaded modules,
                     #    and background API calls after initial bootstrap.
                     await page.wait_for_timeout(2000)
+                    await self._run_matching_workflows_async(page, url, executed_workflows)
 
                     # ── User interaction: uncover hidden content ───────
                     await self._simulate_user_interaction_async(page)
+                    await self._sync_browser_state_async(page)
 
                     page_urls = await self._extract_links_async(page, url)
                     page_forms = await self._extract_forms_async(page, url)
@@ -204,6 +257,13 @@ class WebCrawler:
                         visited.update(hash_urls)
                         page_forms.extend(hash_forms)
                         network_urls.update(hash_urls)
+                    self._notify_discoveries(discovery_callback, "url", list(page_urls))
+                    self._notify_discoveries(discovery_callback, "form", page_forms)
+                    for ws_url, target in websocket_targets.items():
+                        if ws_url in published_websockets:
+                            continue
+                        published_websockets.add(ws_url)
+                        self._notify_discovery(discovery_callback, "websocket", target)
 
                 except Exception as e:
                     print(f"[Crawler] Error on {url}: {e}")
@@ -232,14 +292,16 @@ class WebCrawler:
         all_forms.extend(synthetic_forms)
         if synthetic_forms:
             print(f"[Crawler] Converted {len(synthetic_forms)} API endpoints into injectable forms")
+            self._notify_discoveries(discovery_callback, "form", synthetic_forms)
 
         all_urls = list(dict.fromkeys(
             list(visited) + list(network_urls) + list(extra)
         ))
         forms    = self._dedup_forms(all_forms)
+        websockets = self._dedup_websocket_targets(list(websocket_targets.values()))
 
-        print(f"[Crawler] Complete: {len(all_urls)} URLs, {len(forms)} forms")
-        return {"urls": all_urls, "forms": forms}
+        print(f"[Crawler] Complete: {len(all_urls)} URLs, {len(forms)} forms, {len(websockets)} websockets")
+        return {"urls": all_urls, "forms": forms, "websockets": websockets}
 
     # ------------------------------------------------------------------
     # Async Playwright helpers
@@ -484,6 +546,117 @@ class WebCrawler:
             await context.add_cookies(cookies)
             print(f"[Crawler] Synced {len(cookies)} session cookies to Playwright")
 
+    async def _sync_browser_state_async(self, page):
+        try:
+            for cookie in await page.context.cookies():
+                name = cookie.get("name")
+                value = cookie.get("value")
+                if name and value is not None:
+                    self.session.cookies.set(
+                        name,
+                        value,
+                        domain=cookie.get("domain"),
+                        path=cookie.get("path", "/"),
+                    )
+        except Exception:
+            pass
+
+        try:
+            storage = await page.evaluate(
+                """
+                () => ({
+                    localStorage: Object.fromEntries(
+                        Array.from({ length: window.localStorage.length }, (_, i) => {
+                            const key = window.localStorage.key(i);
+                            return [key, window.localStorage.getItem(key)];
+                        })
+                    ),
+                    sessionStorage: Object.fromEntries(
+                        Array.from({ length: window.sessionStorage.length }, (_, i) => {
+                            const key = window.sessionStorage.key(i);
+                            return [key, window.sessionStorage.getItem(key)];
+                        })
+                    ),
+                })
+                """
+            )
+        except Exception:
+            storage = {}
+
+        if apply_browser_storage_auth(self.session, storage):
+            print("[Crawler] Promoted browser storage auth into the HTTP session")
+
+    async def _run_matching_workflows_async(
+        self,
+        page: Any,
+        current_url: str,
+        executed_workflows: Set[str],
+    ) -> None:
+        if not self.workflows:
+            return
+
+        for workflow in self.workflows:
+            workflow_name = str(workflow.get("name", "workflow"))
+            if workflow.get("once", True) and workflow_name in executed_workflows:
+                continue
+            if not workflow_matches(workflow, current_url):
+                continue
+
+            trace = await execute_workflow(page, workflow, self.base_url, PAGE_TIMEOUT_MS)
+            self._workflow_traces.append(
+                {
+                    "name": workflow_name,
+                    "url": current_url,
+                    "trace": trace,
+                }
+            )
+            executed_workflows.add(workflow_name)
+            if any(step.get("status") == "error" for step in trace):
+                print(f"[Crawler] Workflow '{workflow_name}' hit an error on {current_url}")
+            else:
+                print(f"[Crawler] Workflow '{workflow_name}' executed on {current_url}")
+            await self._sync_browser_state_async(page)
+
+    def _notify_discovery(
+        self,
+        discovery_callback: Optional[Callable[[str, Any], None]],
+        kind: str,
+        item: Any,
+    ) -> None:
+        if discovery_callback is None:
+            return
+        try:
+            discovery_callback(kind, item)
+        except Exception as exc:
+            print(f"[Crawler] Discovery callback failed for {kind}: {exc}")
+
+    def _notify_discoveries(
+        self,
+        discovery_callback: Optional[Callable[[str, Any], None]],
+        kind: str,
+        items: List[Any],
+    ) -> None:
+        for item in items:
+            self._notify_discovery(discovery_callback, kind, item)
+
+    def _record_websocket_frame(self, bucket: List[Any], payload: Any) -> None:
+        if payload in (None, ""):
+            return
+        if len(bucket) >= 10:
+            return
+        text = payload
+        if isinstance(payload, bytes):
+            text = payload.decode("utf-8", errors="ignore")
+        bucket.append(text)
+
+    def _http_url_equivalent(self, url: str) -> str:
+        parsed = urlparse(str(url or ""))
+        if parsed.scheme == "ws":
+            return urlunparse(parsed._replace(scheme="http"))
+        if parsed.scheme == "wss":
+            return urlunparse(parsed._replace(scheme="https"))
+        return str(url or "")
+
     def _api_requests_to_forms(self, api_requests: List[Dict]) -> List[Dict]:
         """
         Convert intercepted fetch/XHR requests into synthetic form dicts
@@ -492,16 +665,20 @@ class WebCrawler:
         forms: List[Dict] = []
 
         for api in api_requests:
-            url         = api.get("url", "")
-            method      = api.get("method", "GET").lower()
-            post_data   = api.get("post_data")
+            url = api.get("url", "")
+            method = api.get("method", "GET").lower()
+            post_data = api.get("post_data")
             content_type = api.get("content_type", "")
-            parsed      = urlparse(url)
-            base_url    = urlunparse(parsed._replace(query="", fragment=""))
+            parsed = urlparse(url)
+            base_url = urlunparse(parsed._replace(query="", fragment=""))
+            action_url = base_url if method == "get" else urlunparse(parsed._replace(fragment=""))
             inputs: List[Dict] = []
+            extra_headers = self._replayable_headers(api.get("headers", {}) or {})
+            body_format = "form"
+            is_graphql = False
 
-            # Extract query parameters as inputs
-            if parsed.query:
+            # Preserve POST query params on the replay URL instead of turning them into body fields.
+            if parsed.query and method == "get":
                 for key, values in parse_qs(parsed.query).items():
                     inputs.append({
                         "name": key,
@@ -515,11 +692,15 @@ class WebCrawler:
                     try:
                         body = json.loads(post_data)
                         if isinstance(body, dict):
-                            for key, val in body.items():
+                            body_format = "json"
+                            is_graphql = self._looks_like_graphql_request(url, content_type, body)
+                            if is_graphql:
+                                body_format = "graphql"
+                            for key, val in flatten_json_fields(body).items():
                                 inputs.append({
                                     "name": key,
                                     "type": "text",
-                                    "value": str(val) if not isinstance(val, (dict, list)) else "",
+                                    "value": val,
                                 })
                     except (json.JSONDecodeError, TypeError):
                         pass
@@ -536,17 +717,25 @@ class WebCrawler:
 
             if inputs:
                 forms.append({
-                    "action": base_url,
+                    "action": action_url,
                     "method": method,
                     "inputs": inputs,
+                    "extra_headers": extra_headers,
+                    "content_type": content_type,
+                    "body_format": body_format,
+                    "graphql": is_graphql,
                     "_source": "network-intercept",
                 })
             elif method != "get":
-                # POST/PUT/DELETE with no extractable body — still worth testing
+                # POST/PUT/DELETE with no extractable body - still worth testing
                 forms.append({
-                    "action": base_url,
+                    "action": action_url,
                     "method": method,
                     "inputs": [{"name": "data", "type": "text", "value": ""}],
+                    "extra_headers": extra_headers,
+                    "content_type": content_type,
+                    "body_format": body_format,
+                    "graphql": is_graphql,
                     "_source": "network-intercept",
                 })
 
@@ -585,7 +774,10 @@ class WebCrawler:
     # BeautifulSoup fallback crawler
     # ------------------------------------------------------------------
 
-    def _crawl_bs4(self) -> Dict[str, Any]:
+    def _crawl_bs4(
+        self,
+        discovery_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> Dict[str, Any]:
         try:
             from bs4 import BeautifulSoup
         except ImportError:
@@ -628,6 +820,7 @@ class WebCrawler:
                 ):
                     if link not in visited:
                         queue.append((link, depth + 1))
+                    self._notify_discovery(discovery_callback, "url", link)
 
             # Forms
             for form in soup.find_all("form"):
@@ -644,11 +837,13 @@ class WebCrawler:
                             "value": inp.get("value", ""),
                         })
                 if inputs:
-                    all_forms.append({
+                    form_record = {
                         "action": action,
                         "method": (form.get("method", "get") or "get").lower(),
                         "inputs": inputs,
-                    })
+                    }
+                    all_forms.append(form_record)
+                    self._notify_discovery(discovery_callback, "form", form_record)
 
         extra = set()
         extra.update(self._fetch_robots_txt())
@@ -658,7 +853,7 @@ class WebCrawler:
         forms    = self._dedup_forms(all_forms)
 
         print(f"[Crawler] BS4 complete: {len(all_urls)} URLs, {len(forms)} forms")
-        return {"urls": all_urls, "forms": forms}
+        return {"urls": all_urls, "forms": forms, "websockets": []}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -748,7 +943,11 @@ class WebCrawler:
             pass
         return urls
 
-    def _augment_with_openapi(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def _augment_with_openapi(
+        self,
+        results: Dict[str, Any],
+        discovery_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> Dict[str, Any]:
         spec_doc, spec_url = self._fetch_openapi_spec()
         if not spec_doc:
             return results
@@ -759,10 +958,73 @@ class WebCrawler:
                 f"[Crawler] OpenAPI import: {len(spec_urls)} URLs, "
                 f"{len(spec_forms)} forms from {spec_url}"
             )
+            self._notify_discoveries(discovery_callback, "url", spec_urls)
+            self._notify_discoveries(discovery_callback, "form", spec_forms)
 
         merged_urls = list(dict.fromkeys(results.get("urls", []) + spec_urls))
         merged_forms = self._dedup_forms(results.get("forms", []) + spec_forms)
-        return {"urls": merged_urls, "forms": merged_forms}
+        return {
+            "urls": merged_urls,
+            "forms": merged_forms,
+            "websockets": results.get("websockets", []),
+        }
+
+    def _augment_with_graphql(
+        self,
+        results: Dict[str, Any],
+        discovery_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> Dict[str, Any]:
+        forms = list(results.get("forms", []))
+        urls = list(results.get("urls", []))
+        if any(form.get("graphql") for form in forms):
+            return results
+
+        candidates = [
+            url for url in urls
+            if "/graphql" in str(url).lower()
+        ]
+        if not candidates:
+            candidates = [
+                urljoin(f"{self._origin_url()}/", "graphql"),
+                urljoin(f"{self._origin_url()}/", "api/graphql"),
+            ]
+
+        synthetic_forms: List[Dict[str, Any]] = []
+        for candidate in dict.fromkeys(candidates):
+            try:
+                resp = self.session.get(candidate, timeout=self.timeout)
+            except Exception:
+                continue
+
+            text = (resp.text or "").lower()
+            content_type = resp.headers.get("content-type", "").lower()
+            if resp.status_code not in (200, 400, 405):
+                continue
+            if "graphql" not in candidate.lower() and "graphql" not in text and "json" not in content_type:
+                continue
+
+            synthetic_forms.append({
+                "action": candidate,
+                "method": "post",
+                "inputs": [
+                    {"name": "query", "type": "text", "value": "query IntrospectionQuery { __typename }"},
+                ],
+                "content_type": "application/json",
+                "body_format": "graphql",
+                "graphql": True,
+                "_source": "graphql-probe",
+            })
+
+        if synthetic_forms:
+            self._notify_discoveries(discovery_callback, "form", synthetic_forms)
+            self._notify_discoveries(
+                discovery_callback,
+                "url",
+                [form["action"] for form in synthetic_forms],
+            )
+            forms = self._dedup_forms(forms + synthetic_forms)
+            urls = list(dict.fromkeys(urls + [form["action"] for form in synthetic_forms]))
+        return {"urls": urls, "forms": forms, "websockets": results.get("websockets", [])}
 
     def _fetch_openapi_spec(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         origin = self._origin_url()
@@ -920,6 +1182,11 @@ class WebCrawler:
         content = request_body.get("content") or {}
         header_inputs = self._build_openapi_param_inputs(parameters, "header", spec_doc)
         cookie_inputs = self._build_openapi_param_inputs(parameters, "cookie", spec_doc)
+        query_inputs = self._build_openapi_param_inputs(parameters, "query", spec_doc)
+        action_with_query = endpoint_url
+        if extra_query and method.lower() != "get":
+            parsed = urlparse(endpoint_url)
+            action_with_query = urlunparse(parsed._replace(query=urlencode(extra_query)))
 
         for content_type in (
             "application/json",
@@ -933,46 +1200,46 @@ class WebCrawler:
                 continue
 
             schema = media.get("schema") or {}
+            sample_body: Dict[str, Any] = {}
             if content_type in ("application/xml", "text/xml"):
                 inputs = [{"name": "xml", "type": "text", "value": "<root>sample</root>"}]
             else:
                 sample_body = self._sample_object_from_schema(schema, spec_doc)
                 inputs = [
                     {"name": key, "type": "text", "value": value}
-                    for key, value in sample_body.items()
+                    for key, value in flatten_json_fields(sample_body).items()
                 ]
                 if not inputs:
                     inputs = [{"name": "data", "type": "text", "value": ""}]
 
             return {
-                "action": endpoint_url,
+                "action": action_with_query,
                 "method": method.lower(),
-                "inputs": [
-                    *inputs,
-                    *[
-                        {"name": key, "type": "text", "value": value}
-                        for key, value in extra_query.items()
-                    ],
-                ],
+                "inputs": inputs,
                 "header_inputs": header_inputs,
                 "cookie_inputs": cookie_inputs,
                 "extra_headers": extra_headers,
                 "extra_cookies": extra_cookies,
                 "content_type": content_type,
                 "body_format": (
-                    "json" if content_type == "application/json"
+                    "graphql" if self._looks_like_graphql_request(endpoint_url, content_type, sample_body)
+                    else "json" if content_type == "application/json"
                     else "xml" if content_type in ("application/xml", "text/xml")
                     else "form"
                 ),
+                "graphql": self._looks_like_graphql_request(endpoint_url, content_type, sample_body),
                 "_source": "openapi",
             }
-        if method.lower() == "get" and (header_inputs or cookie_inputs):
+        if method.lower() == "get" and (header_inputs or cookie_inputs or query_inputs or extra_query):
             return {
                 "action": endpoint_url,
                 "method": "get",
                 "inputs": [
-                    {"name": key, "type": "text", "value": value}
-                    for key, value in extra_query.items()
+                    *query_inputs,
+                    *[
+                        {"name": key, "type": "text", "value": value}
+                        for key, value in extra_query.items()
+                    ],
                 ],
                 "header_inputs": header_inputs,
                 "cookie_inputs": cookie_inputs,
@@ -1152,9 +1419,46 @@ class WebCrawler:
             return "true" if value else "false"
         if value is None:
             return ""
-        if isinstance(value, (dict, list)):
-            return ""
         return str(value)
+
+    def _replayable_headers(self, headers: Dict[str, Any]) -> Dict[str, str]:
+        ignored = {
+            "host",
+            "content-length",
+            "accept-encoding",
+            "connection",
+            "origin",
+            "referer",
+            "cookie",
+            "content-type",
+        }
+        replayable: Dict[str, str] = {}
+        for name, value in (headers or {}).items():
+            lower_name = str(name).lower()
+            if lower_name in ignored:
+                continue
+            if lower_name == "authorization" or lower_name.startswith("x-"):
+                replayable[str(name)] = str(value)
+        return replayable
+
+    def _looks_like_graphql_request(self, url: str, content_type: str, body: Any) -> bool:
+        if "/graphql" in (url or "").lower():
+            return True
+        if "application/graphql" in str(content_type or "").lower():
+            return True
+        if isinstance(body, dict):
+            query = str(body.get("query", "") or "")
+            if any(key in body for key in ("query", "variables", "operationName")):
+                return any(
+                    token in query
+                    for token in ("query ", "mutation ", "subscription ", "__schema", "__type")
+                )
+        if isinstance(body, str):
+            return any(
+                token in body
+                for token in ("query ", "mutation ", "subscription ", "__schema", "__type")
+            )
+        return False
 
     def _dedup_forms(self, forms: List[Dict]) -> List[Dict]:
         seen:   Set[tuple]  = set()
@@ -1169,4 +1473,15 @@ class WebCrawler:
             if key not in seen:
                 seen.add(key)
                 unique.append(f)
+        return unique
+
+    def _dedup_websocket_targets(self, targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen: Set[str] = set()
+        unique: List[Dict[str, Any]] = []
+        for target in targets:
+            url = str(target.get("url", "") or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            unique.append(target)
         return unique

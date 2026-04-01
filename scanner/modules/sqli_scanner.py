@@ -30,6 +30,8 @@ from scanner.utils.request_metadata import (
     build_request_context,
     form_request_parts,
     injectable_locations,
+    send_request_async,
+    send_request_sync,
 )
 from scanner.utils.waf_evasion import (
     detect_waf,
@@ -946,23 +948,15 @@ class SQLiScanner:
                             cookies: Dict[str, str],
                             body_format: str = "form") -> Optional[requests.Response]:
         try:
-            if method == "get":
-                return self.session.get(
-                    action, params=data, headers=headers or None,
-                    cookies=cookies or None, timeout=self.timeout
-                )
-            if body_format == "json":
-                return self.session.request(
-                    method.upper(),
-                    action,
-                    json=data,
-                    timeout=self.timeout,
-                    headers={**(headers or {}), "Content-Type": "application/json"},
-                    cookies=cookies or None,
-                )
-            return self.session.request(
-                method.upper(), action, data=data, timeout=self.timeout,
-                headers=headers or None, cookies=cookies or None,
+            return send_request_sync(
+                self.session,
+                action,
+                method,
+                data,
+                headers,
+                cookies,
+                self.timeout,
+                body_format,
             )
         except Exception:
             return None
@@ -977,18 +971,14 @@ class SQLiScanner:
         cookies: Dict[str, str],
         body_format: str = "form",
     ):
-        if method == "get":
-            return await http.get(action, params=data, headers=headers or None, cookies=cookies or None)
-        if body_format == "json":
-            return await http.request(
-                method.upper(),
-                action,
-                json=data,
-                headers={**(headers or {}), "Content-Type": "application/json"},
-                cookies=cookies or None,
-            )
-        return await http.request(
-            method.upper(), action, data=data, headers=headers or None, cookies=cookies or None
+        return await send_request_async(
+            http,
+            action,
+            method,
+            data,
+            headers,
+            cookies,
+            body_format,
         )
 
     def _form_body_format(self, form: Dict[str, Any]) -> str:

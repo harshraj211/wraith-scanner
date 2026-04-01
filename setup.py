@@ -37,6 +37,7 @@ setup(
         "flask-socketio>=5.3.0",
         "playwright>=1.40.0",
         "aiohttp>=3.9.0",
+        "websockets>=12.0",
         "semgrep>=1.0.0",
     ],
     entry_points={

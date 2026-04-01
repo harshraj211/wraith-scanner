@@ -6,6 +6,7 @@ WARNING: Never deploy this to production - it has intentional vulnerabilities!
 """
 
 from flask import Flask, jsonify, request, render_template_string, redirect, session, url_for
+import re
 import sqlite3
 import time
 
@@ -40,6 +41,8 @@ def home():
         <li><a href="/comment">Comment (XSS vulnerable)</a></li>
         <li><a href="/profile?id=1">Profile (IDOR vulnerable)</a></li>
         <li><a href="/redirect?url=https://google.com">Redirect (Open redirect)</a></li>
+        <li><a href="/dom?dom=test">DOM XSS</a></li>
+        <li><a href="/graphql">GraphQL Endpoint</a></li>
         <li><a href="/openapi.json">OpenAPI Spec</a></li>
         <li><a href="/auth/login">Protected Area Login</a></li>
     </ul>
@@ -145,6 +148,21 @@ def redirect_page():
     url = request.args.get('url', '/')
     # VULNERABLE: No URL validation
     return f'<meta http-equiv="refresh" content="0;url={url}"><p>Redirecting to {url}...</p>'
+
+
+@app.route('/dom')
+def dom_page():
+    return render_template_string("""
+    <h2>DOM XSS Playground</h2>
+    <div id="dom-target"></div>
+    <script>
+      const rawHash = decodeURIComponent(window.location.hash.slice(1));
+      const hashPayload = rawHash.includes('=') ? rawHash.split('=').slice(1).join('=') : rawHash;
+      if (hashPayload) {
+        document.getElementById('dom-target').innerHTML = hashPayload;
+      }
+    </script>
+    """)
 
 
 @app.route('/openapi.json')
@@ -448,6 +466,153 @@ def api_secure_query():
     if request.args.get("api_token") != API_QUERY_KEY:
         return jsonify({"error": "unauthorized"}), 401
     return jsonify({"item": request.args.get("item", "")})
+
+
+GRAPHQL_SCHEMA = {
+    "queryType": {"name": "Query"},
+    "mutationType": {"name": "Mutation"},
+    "types": [
+        {
+            "kind": "OBJECT",
+            "name": "Query",
+            "fields": [
+                {
+                    "name": "searchUsers",
+                    "args": [
+                        {
+                            "name": "q",
+                            "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+                        }
+                    ],
+                    "type": {"kind": "OBJECT", "name": "SearchResult", "ofType": None},
+                },
+                {
+                    "name": "user",
+                    "args": [
+                        {
+                            "name": "userId",
+                            "type": {"kind": "SCALAR", "name": "ID", "ofType": None},
+                        }
+                    ],
+                    "type": {"kind": "OBJECT", "name": "User", "ofType": None},
+                },
+            ],
+        },
+        {
+            "kind": "OBJECT",
+            "name": "Mutation",
+            "fields": [
+                {
+                    "name": "updateProfile",
+                    "args": [
+                        {
+                            "name": "displayName",
+                            "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+                        }
+                    ],
+                    "type": {"kind": "OBJECT", "name": "MutationResult", "ofType": None},
+                }
+            ],
+        },
+        {
+            "kind": "OBJECT",
+            "name": "SearchResult",
+            "fields": [
+                {
+                    "name": "result",
+                    "args": [],
+                    "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+                }
+            ],
+        },
+        {
+            "kind": "OBJECT",
+            "name": "User",
+            "fields": [
+                {
+                    "name": "userId",
+                    "args": [],
+                    "type": {"kind": "SCALAR", "name": "ID", "ofType": None},
+                },
+                {
+                    "name": "username",
+                    "args": [],
+                    "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+                },
+            ],
+        },
+        {
+            "kind": "OBJECT",
+            "name": "MutationResult",
+            "fields": [
+                {
+                    "name": "ok",
+                    "args": [],
+                    "type": {"kind": "SCALAR", "name": "Boolean", "ofType": None},
+                },
+                {
+                    "name": "message",
+                    "args": [],
+                    "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+                },
+            ],
+        },
+        {"kind": "SCALAR", "name": "String", "fields": None},
+        {"kind": "SCALAR", "name": "ID", "fields": None},
+        {"kind": "SCALAR", "name": "Boolean", "fields": None},
+    ],
+}
+
+
+def _graphql_value(payload, name, default="sample"):
+    variables = payload.get("variables") or {}
+    if isinstance(variables, dict) and name in variables:
+        return variables.get(name)
+
+    query = payload.get("query", "") or ""
+    pattern = rf'{name}\s*:\s*"([^"]*)"'
+    match = re.search(pattern, query)
+    if match:
+        return match.group(1)
+    return default
+
+
+@app.route('/graphql', methods=['GET', 'POST'])
+def graphql_endpoint():
+    if request.method == 'GET':
+        return render_template_string(
+            "<h2>GraphQL Endpoint</h2><p>POST GraphQL queries here.</p>"
+        )
+
+    payload = request.get_json(silent=True) or {}
+    query = payload.get("query", "") or ""
+
+    if "__schema" in query or "__type" in query:
+        return jsonify({"data": {"__schema": GRAPHQL_SCHEMA}})
+
+    if "searchUsers" in query:
+        search = _graphql_value(payload, "q", "sample")
+        if "'" in str(search):
+            return jsonify({
+                "errors": [
+                    {"message": f"sqlite3.OperationalError: unrecognized token near {search}"}
+                ]
+            }), 200
+        return jsonify({"data": {"searchUsers": {"result": str(search)}}})
+
+    if "updateProfile" in query:
+        display_name = _graphql_value(payload, "displayName", "anon")
+        return jsonify({"data": {"updateProfile": {"ok": True, "message": str(display_name)}}})
+
+    if "user" in query:
+        user_id = _graphql_value(payload, "userId", "1")
+        user_map = {
+            "1": {"userId": "1", "username": "admin"},
+            "2": {"userId": "2", "username": "user"},
+        }
+        return jsonify({"data": {"user": user_map.get(str(user_id), {"userId": str(user_id), "username": "guest"})}})
+
+    return jsonify({"errors": [{"message": "Unsupported GraphQL operation"}]}), 400
 
 
 @app.route('/auth/login', methods=['GET'])
