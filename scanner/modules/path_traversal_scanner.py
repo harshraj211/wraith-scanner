@@ -16,30 +16,9 @@ from scanner.utils.request_metadata import (
     injectable_locations,
 )
 from scanner.utils.waf_evasion import (
-    PATH_TRAVERSAL_WAF_BYPASS,
+    PATH_WAF_BYPASS_PAYLOADS,
     EvasionLevel,
 )
-
-
-# Path traversal payloads for different OS
-PATH_PAYLOADS = [
-    # Linux/Unix
-    "../../../etc/passwd",
-    "....//....//....//etc/passwd",
-    "..%2F..%2F..%2Fetc%2Fpasswd",
-    "..%252F..%252F..%252Fetc%252Fpasswd",
-    
-    # Windows
-    "..\\..\\..\\windows\\win.ini",
-    "..%5C..%5C..%5Cwindows%5Cwin.ini",
-    
-    # Null byte bypass (older systems)
-    "../../../etc/passwd%00",
-    
-    # Absolute paths
-    "/etc/passwd",
-    "C:\\windows\\win.ini",
-    
 
 
 # Path traversal payloads for different OS
@@ -66,6 +45,8 @@ PATH_PAYLOADS = [
     "../../../etc/hosts",
     "../../../proc/self/environ",
 ]
+
+PATH_TRAVERSAL_WAF_BYPASS = PATH_WAF_BYPASS_PAYLOADS
 
 
 class PathTraversalScanner:
@@ -188,6 +169,7 @@ class PathTraversalScanner:
 
     async def _test_path_async(self, test_url, param_name, request_parts, payload, http, method="GET", body_format="form", target_location="body"):
         try:
+            request_parts = self._coerce_request_parts(request_parts, param_name, "")
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             data, headers, cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -227,6 +209,16 @@ class PathTraversalScanner:
         param_lower = param_name.lower()
         return any(keyword in param_lower for keyword in file_keywords)
 
+    def _coerce_request_parts(self, request_parts, param_name: str, original_value: str):
+        """Normalize URL params and form metadata into one request-parts shape."""
+        if isinstance(request_parts, tuple):
+            return request_parts
+
+        params = dict(request_parts or {})
+        body_fields = {key: str(value) for key, value in params.items()}
+        body_fields.setdefault(param_name, original_value)
+        return body_fields, {}, {}, {}, {}, "form"
+
     def _test_path_traversal(
         self,
         test_url: str,
@@ -241,6 +233,7 @@ class PathTraversalScanner:
         """Test a single path traversal payload."""
         try:
             injected = payload  # Replace value entirely for path traversal
+            request_parts = self._coerce_request_parts(request_parts, param_name, original_value)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             data, headers, cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,

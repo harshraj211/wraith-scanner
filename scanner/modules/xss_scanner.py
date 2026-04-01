@@ -886,6 +886,96 @@ class XSSScanner:
             return "html-attribute"
         return "html-body"
 
+    def _find_marker_sink(self, body: str, marker: str) -> Optional[str]:
+        """Best-effort sink detection for stored-XSS revisits where payload may be transformed."""
+        if marker not in body:
+            return None
+
+        decoded_body = unescape(body)
+        idx = decoded_body.find(marker)
+        if idx == -1:
+            idx = body.find(marker)
+            haystack = body
+        else:
+            haystack = decoded_body
+
+        surrounding = haystack[max(0, idx - 180):idx + 180]
+        context = self._detect_context(haystack, marker)
+
+        if context in {"javascript", "event-handler", "url-attribute"}:
+            return context
+        if "<script" in surrounding.lower():
+            return "script-tag"
+        if re.search(r'on\w+\s*=\s*["\'][^"\']*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "event-handler"
+        if re.search(r'(href|src|action|formaction)\s*=\s*["\']\s*javascript:[^"\']*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "url-attribute"
+        if re.search(r'<(img|svg|iframe|body|details)\b[^>]*' + re.escape(marker), surrounding, re.IGNORECASE):
+            return "active-html"
+        return None
+
+    def check_stored(
+        self,
+        urls: List[str],
+        session: Optional[requests.Session] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Revisit crawled URLs looking for previously injected XSS markers.
+
+        This is a best-effort stored-XSS sweep. It confirms with Playwright
+        when possible and otherwise records a lower-confidence dangerous sink.
+        """
+        if not self._injected:
+            return []
+
+        scan_session = session or self.session
+        findings: List[Dict[str, Any]] = []
+        seen = set()
+        pool = self._get_pool()
+
+        for url in urls:
+            try:
+                resp = scan_session.get(url, timeout=self.timeout)
+            except Exception:
+                continue
+
+            body = resp.text or ""
+            if not body:
+                continue
+
+            for marker, meta in self._injected.items():
+                if marker not in body:
+                    continue
+
+                sink = (
+                    self._find_dangerous_reflection_sink(body, marker, meta.get("payload", ""))
+                    or self._find_marker_sink(body, marker)
+                )
+                if not sink:
+                    continue
+
+                evidence = None
+                if pool and not pool._unavailable:
+                    evidence = self._playwright_check(pool, url, marker)
+
+                key = (url, marker)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                findings.append({
+                    "type": "xss-stored",
+                    "param": meta.get("param", "unknown"),
+                    "payload": meta.get("payload", marker),
+                    "evidence": evidence or f"Stored marker reached dangerous sink ({sink}) at {url}",
+                    "confidence": 96 if evidence else 82,
+                    "url": url,
+                    "context": sink,
+                    "inject_url": meta.get("inject_url", ""),
+                })
+
+        return findings
+
     def shutdown(self):
         """Call after scan completes to release Playwright resources."""
         if self._pool:

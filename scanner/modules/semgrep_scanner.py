@@ -49,7 +49,7 @@ BASE_RULESETS = [
 
 # Language-specific rulesets -- also require login
 LANG_RULESETS = {
-    "javascript": ["p/javascript", "p/nodejs", "p/react", "p/express"],
+    "javascript": ["p/javascript", "p/nodejs", "p/react"],
     "typescript": ["p/typescript", "p/nodejs"],
     "python":     ["p/python", "p/django", "p/flask"],
     "php":        ["p/php"],
@@ -147,12 +147,22 @@ rules:
   # -- Express: req.query/body -> db.query / pool.query (SQLi) -----------------
   - id: custom-express-sqli
     patterns:
-      - pattern: |
-          $DB.$QUERY(`...${$INPUT}...`)
       - pattern-either:
-          - pattern: $INPUT = req.query.$FIELD
-          - pattern: $INPUT = req.body.$FIELD
-          - pattern: $INPUT = req.params.$FIELD
+          - pattern: $DB.$QUERY(`...${req.query.$FIELD}...`)
+          - pattern: $DB.$QUERY(`...${req.body.$FIELD}...`)
+          - pattern: $DB.$QUERY(`...${req.params.$FIELD}...`)
+          - pattern-inside: |
+              $INPUT = req.query.$FIELD
+              ...
+              $DB.$QUERY(`...${$INPUT}...`)
+          - pattern-inside: |
+              $INPUT = req.body.$FIELD
+              ...
+              $DB.$QUERY(`...${$INPUT}...`)
+          - pattern-inside: |
+              $INPUT = req.params.$FIELD
+              ...
+              $DB.$QUERY(`...${$INPUT}...`)
     message: >
       SQL Injection: user input flows into a database query via template literal.
       Use parameterized queries: db.query('SELECT ... WHERE id = ?', [input])
@@ -166,12 +176,21 @@ rules:
   # -- Express: req.query -> fs.readFile (Path Traversal) ---------------------
   - id: custom-express-path-traversal
     patterns:
-      - pattern: |
-          fs.$READ($PATH, ...)
       - pattern-either:
-          - pattern: $PATH = req.query.$FIELD
-          - pattern: $PATH = req.params.$FIELD
-          - pattern: $PATH = path.join(..., req.query.$FIELD, ...)
+          - pattern: fs.$READ(req.query.$FIELD, ...)
+          - pattern: fs.$READ(req.params.$FIELD, ...)
+          - pattern-inside: |
+              $PATH = req.query.$FIELD
+              ...
+              fs.$READ($PATH, ...)
+          - pattern-inside: |
+              $PATH = req.params.$FIELD
+              ...
+              fs.$READ($PATH, ...)
+          - pattern-inside: |
+              $PATH = path.join(..., req.query.$FIELD, ...)
+              ...
+              fs.$READ($PATH, ...)
     message: >
       Path Traversal: user-controlled path flows into fs.$READ().
       Canonicalize with path.resolve() and verify it stays within the base dir.
@@ -270,7 +289,8 @@ rules:
     patterns:
       - pattern-either:
           - pattern: render_template_string(..., $REQ.$SOURCE.$FIELD, ...)
-          - pattern: TemplateResponse(..., {"$KEY": $REQ.$SOURCE.$FIELD, ...}, ...)
+          - pattern: |
+              TemplateResponse(..., {"$KEY": $REQ.$SOURCE.$FIELD, ...}, ...)
       - metavariable-regex:
           metavariable: $SOURCE
           regex: (args|form|values|cookies|headers|query_params|path_params)
@@ -395,17 +415,13 @@ rules:
 
   # -- Python: weak password hashing -------------------------------------------
   - id: custom-python-weak-password-hash
-    patterns:
-      - pattern-either:
-          - pattern: hashlib.md5($DATA)
-          - pattern: hashlib.sha1($DATA)
-      - pattern-either:
-          - pattern-inside: |
-              $PWD = ...
-          - pattern-inside: |
-              $PASSWORD = ...
-          - pattern-inside: |
-              $PASSWD = ...
+    pattern-either:
+      - pattern: hashlib.md5($PASSWORD)
+      - pattern: hashlib.sha1($PASSWORD)
+      - pattern: hashlib.md5($PWD)
+      - pattern: hashlib.sha1($PWD)
+      - pattern: hashlib.md5($PASSWD)
+      - pattern: hashlib.sha1($PASSWD)
     message: >
       Weak password hashing detected. MD5 and SHA1 are unsuitable for passwords.
       Use a dedicated password hashing function such as bcrypt, scrypt, or Argon2.
@@ -606,8 +622,37 @@ class SemgrepScanner:
         else:
             print(f"[*] Semgrep rulesets: --config auto (fallback)")
 
-        # Run Semgrep
-        findings_raw = self._run_semgrep(repo_path, rulesets)
+        findings_raw = {"results": [], "errors": []}
+
+        custom_rulesets = None
+        if self._rules_path and os.path.exists(self._rules_path):
+            custom_rulesets = [self._rules_path]
+
+        registry_rulesets = None
+        if rulesets:
+            registry_rulesets = [r for r in rulesets if r != self._rules_path]
+
+        # Stage 1: local custom rules. This keeps fixture scans and CI fast,
+        # and ensures custom detections still work even if registry access is slow.
+        if custom_rulesets:
+            print("[*] Running Semgrep custom rules stage")
+            findings_raw = self._merge_semgrep_outputs(
+                findings_raw,
+                self._run_semgrep(repo_path, custom_rulesets, subprocess_timeout=90),
+            )
+
+        # Stage 2: registry / extra rulesets, best-effort.
+        if registry_rulesets:
+            if findings_raw.get("results") and self._count_semgrep_targets(repo_path) <= 1:
+                print("[*] Skipping Semgrep registry stage for tiny repo; custom rules already produced findings")
+            else:
+                print("[*] Running Semgrep registry rules stage")
+                findings_raw = self._merge_semgrep_outputs(
+                    findings_raw,
+                    self._run_semgrep(repo_path, registry_rulesets, subprocess_timeout=90),
+                )
+        elif not custom_rulesets and not rulesets:
+            findings_raw = self._run_semgrep(repo_path, None, subprocess_timeout=180)
 
         # Parse into unified format
         self._parse_results(findings_raw, repo_path)
@@ -658,7 +703,12 @@ class SemgrepScanner:
 
         return rulesets if rulesets else None
 
-    def _run_semgrep(self, repo_path: str, rulesets: Optional[List[str]]) -> Dict:
+    def _run_semgrep(
+        self,
+        repo_path: str,
+        rulesets: Optional[List[str]],
+        subprocess_timeout: int = 300,
+    ) -> Dict:
         """Execute semgrep CLI and return parsed JSON output."""
 
         # Build --config flags
@@ -676,6 +726,7 @@ class SemgrepScanner:
             *config_flags,
             "--json",
             "--quiet",
+            "--disable-version-check",
             "--no-git-ignore",
             "--max-target-bytes", "5000000",
             "--timeout", "30",
@@ -690,7 +741,7 @@ class SemgrepScanner:
                 capture_output=True,
                 text=True,
                 check=False,   # Semgrep exits non-zero when it finds issues
-                timeout=300,
+                timeout=subprocess_timeout,
                 env={**os.environ, "PYTHONUTF8": "1"},
             )
 
@@ -723,7 +774,7 @@ class SemgrepScanner:
             return data
 
         except subprocess.TimeoutExpired:
-            print("[[x]] Semgrep timed out after 5 minutes")
+            print(f"[[x]] Semgrep timed out after {subprocess_timeout}s")
             return {"results": [], "errors": []}
         except json.JSONDecodeError as e:
             print(f"[[x]] Failed to parse Semgrep JSON: {e}")
@@ -733,6 +784,33 @@ class SemgrepScanner:
         except Exception as e:
             print(f"[[x]] Semgrep execution error: {e}")
             return {"results": [], "errors": []}
+
+    def _merge_semgrep_outputs(self, left: Dict, right: Dict) -> Dict:
+        merged_results = list(left.get("results", []))
+        seen = {
+            (
+                item.get("check_id", ""),
+                item.get("path", ""),
+                item.get("start", {}).get("line", 0),
+            )
+            for item in merged_results
+        }
+
+        for item in right.get("results", []):
+            key = (
+                item.get("check_id", ""),
+                item.get("path", ""),
+                item.get("start", {}).get("line", 0),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_results.append(item)
+
+        return {
+            "results": merged_results,
+            "errors": [*left.get("errors", []), *right.get("errors", [])],
+        }
 
     def _parse_results(self, semgrep_data: Dict, repo_path: str) -> None:
         """Map Semgrep JSON schema -> scanner's unified finding format."""
@@ -748,7 +826,7 @@ class SemgrepScanner:
                 start_line = issue.get("start", {}).get("line", 0)
                 extra      = issue.get("extra", {})
                 metadata   = extra.get("metadata", {})
-                check_id   = issue.get("check_id", "")
+                check_id   = self._normalize_rule_id(issue.get("check_id", ""))
                 severity   = extra.get("severity", "WARNING")
                 message    = extra.get("message", "Security issue detected")
                 code_line  = extra.get("lines", "").strip()
@@ -799,6 +877,24 @@ class SemgrepScanner:
                 continue
 
     # -- Helpers --------------------------------------------------------------
+
+    def _normalize_rule_id(self, check_id: str) -> str:
+        if not check_id:
+            return ""
+        custom_idx = check_id.find("custom-")
+        if custom_idx != -1:
+            return check_id[custom_idx:]
+        return check_id
+
+    def _count_semgrep_targets(self, repo_path: str) -> int:
+        total = 0
+        for root, dirs, files in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "venv", ".venv", "__pycache__"}]
+            for filename in files:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in {".py", ".js", ".ts", ".jsx", ".tsx", ".php", ".java", ".rb", ".go"}:
+                    total += 1
+        return total
 
     def _write_custom_rules(self, repo_path: str) -> Optional[str]:
         """Write custom YAML rules to a temp file in the repo dir."""

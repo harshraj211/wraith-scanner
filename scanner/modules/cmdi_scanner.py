@@ -158,6 +158,7 @@ class CMDIScanner:
     async def _test_cmdi_async(self, test_url, param_name, original_value, request_parts, payload, http, method="GET", body_format="form", target_location="body"):
         try:
             injected = original_value + payload if original_value else payload
+            request_parts = self._coerce_request_parts(request_parts, param_name, original_value)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             data, headers, cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -207,6 +208,7 @@ class CMDIScanner:
         """WAF bypass command injection test with technique tracking."""
         try:
             injected = original_value + payload if original_value else payload
+            request_parts = self._coerce_request_parts(request_parts, param_name, original_value)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             data, headers, cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -267,6 +269,7 @@ class CMDIScanner:
         """Test a single command injection payload."""
         try:
             injected = original_value + payload if original_value else payload
+            request_parts = self._coerce_request_parts(request_parts, param_name, original_value)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             data, headers, cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -322,6 +325,16 @@ class CMDIScanner:
             print(f"Request failed during command injection test for {param_name}: {exc}")
 
         return None
+
+    def _coerce_request_parts(self, request_parts, param_name: str, original_value: str):
+        """Normalize URL params and form metadata into one request-parts shape."""
+        if isinstance(request_parts, tuple):
+            return request_parts
+
+        params = dict(request_parts or {})
+        body_fields = {key: str(value) for key, value in params.items()}
+        body_fields.setdefault(param_name, original_value)
+        return body_fields, {}, {}, {}, {}, "form"
 
     def _form_body_format(self, form: Dict[str, Any]) -> str:
         if form.get("body_format") == "json":

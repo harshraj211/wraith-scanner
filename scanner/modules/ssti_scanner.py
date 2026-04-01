@@ -94,6 +94,7 @@ class SSTIScanner:
 
     async def _probe_param_async(self, url, param, original, request_parts, method, http, body_format="form", target_location="body"):
         try:
+            request_parts = self._coerce_request_parts(request_parts, param, original)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             baseline_data, baseline_headers, baseline_cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -137,6 +138,7 @@ class SSTIScanner:
     ) -> Optional[Dict[str, Any]]:
         # First get a baseline to detect reflected value
         try:
+            request_parts = self._coerce_request_parts(request_parts, param, original)
             body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, _ = request_parts
             baseline_data, baseline_headers, baseline_cookies = build_request_context(
                 body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
@@ -178,6 +180,16 @@ class SSTIScanner:
                 print(f"SSTI test failed on {param}: {exc}")
 
         return None
+
+    def _coerce_request_parts(self, request_parts, param: str, original: str):
+        """Normalize URL params and form metadata into one request-parts shape."""
+        if isinstance(request_parts, tuple):
+            return request_parts
+
+        params = dict(request_parts or {})
+        body_fields = {key: str(value) for key, value in params.items()}
+        body_fields.setdefault(param, original)
+        return body_fields, {}, {}, {}, {}, "form"
 
     def _form_body_format(self, form: Dict[str, Any]) -> str:
         if form.get("body_format") == "json":
