@@ -274,7 +274,7 @@ def main() -> int:
     print(f"    Target: {args.url}")
     print(f"    Exploit: {'YES' if config['exploit'] else 'NO'}")
     print(f"    Auth: {'YES' if config['auth'] else 'NO'}")
-    print(f"    Flags: {'YES' if config['flags'] else 'NO'}")
+    print(f"    Flags: {'YES' if config.get('flags', False) else 'NO'}")
     print(f"    Depth: {config['max_depth']}")
     print(f"    Timeout: {config['timeout']}s\n")
 
@@ -338,9 +338,14 @@ def main() -> int:
         finding['url'] = args.url
         all_findings.append(finding)
 
-    # Initialize flag hunter if in CTF mode
+    # Initialize flag hunter only when mode manager exposes CTF hooks.
     flag_hunter = None
-    if mode_mgr.should_hunt_flags():
+    can_hunt_flags = (
+        hasattr(mode_mgr, 'should_hunt_flags')
+        and hasattr(mode_mgr, 'get_flag_patterns')
+        and mode_mgr.should_hunt_flags()
+    )
+    if can_hunt_flags:
         flag_hunter = FlagHunter(mode_mgr.get_flag_patterns())
         print(Fore.CYAN + "[*] Flag hunting enabled!" + Style.RESET_ALL)
 

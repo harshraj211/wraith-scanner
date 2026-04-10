@@ -7,7 +7,7 @@ import axios from 'axios';
 import 'xterm/css/xterm.css';
 import './App.css';
 
-const API_URL = 'http://localhost:5001';
+const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
 
 // ─────────────────────────────────────────────
 // ANSI color helpers — real escape chars, never raw \x1b strings
@@ -161,6 +161,10 @@ function App() {
 
     ws.on('disconnect', () => {
       term.writeln(c('1;31', '[ws] connection lost'));
+    });
+
+    ws.on('connect_error', () => {
+      term.writeln(c('1;31', `[ws] unable to reach api server at ${API_URL}`));
     });
 
     const handleResize = () => fitAddon.fit();
@@ -465,6 +469,12 @@ async function executeCommand(command, term) {
         term.writeln(c('38;5;196', '[✗]') + ' Unknown command: ' + c('0;37', cmd) + ' — type ' + c('38;5;220', 'help') + ' for commands');
     }
   } catch (err) {
+    if (err?.code === 'ERR_NETWORK') {
+      term.writeln(c('38;5;196', '[✗]') + ' API server not reachable at ' + c('38;5;220', API_URL));
+      term.writeln(c('38;5;240', '    start backend: python api_server.py'));
+      return;
+    }
+
     term.writeln(c('38;5;196', '[✗]') + ' ' + err.message);
     if (err.response?.data?.error) {
       term.writeln(c('38;5;240', '    ' + err.response.data.error));
