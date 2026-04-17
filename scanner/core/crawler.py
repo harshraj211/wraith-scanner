@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qs
 
 import requests
+from scanner.core.deep_state import DeepStateMutator
 from scanner.core.workflows import execute_workflow, load_workflows, workflow_matches
 from scanner.utils.auth_manager import apply_browser_storage_auth
 from scanner.utils.request_metadata import flatten_json_fields
@@ -68,6 +69,7 @@ class WebCrawler:
         self.workflows = load_workflows(workflows)
         self.discovery_callback = discovery_callback
         self._workflow_traces: List[Dict[str, Any]] = []
+        self._deep_state_mutator = DeepStateMutator()
 
         self.session = session or requests.Session()
         self.session.verify = False
@@ -92,6 +94,7 @@ class WebCrawler:
         results = self._augment_with_openapi(results, callback)
         results = self._augment_with_graphql(results, callback)
         results["workflow_traces"] = list(self._workflow_traces)
+        results.setdefault("deep_state", [])
         return results
 
     # ------------------------------------------------------------------
@@ -112,6 +115,7 @@ class WebCrawler:
         websocket_targets: Dict[str, Dict[str, Any]] = {}
         published_websockets: Set[str] = set()
         executed_workflows: Set[str] = set()
+        deep_state_reports: List[Dict[str, Any]] = []
 
         queue: deque = deque()
         queue.append((self.base_url, 0))
@@ -246,9 +250,20 @@ class WebCrawler:
                     await self._simulate_user_interaction_async(page)
                     await self._sync_browser_state_async(page)
 
+                    deep_state_report = await self._deep_state_mutator.mutate_page(page)
+                    if deep_state_report.get("mutations") or deep_state_report.get("wizard", {}).get("clicked_steps"):
+                        deep_state_reports.append({"url": url, **deep_state_report})
+                        self._notify_discovery(discovery_callback, "deep-state", deep_state_reports[-1])
+                        await self._sync_browser_state_async(page)
+
                     page_urls = await self._extract_links_async(page, url)
                     page_forms = await self._extract_forms_async(page, url)
                     page_urls.update(await self._extract_spa_routes_async(page))
+
+                    if deep_state_report.get("mutations") or deep_state_report.get("wizard", {}).get("clicked_steps"):
+                        page_urls.update(await self._extract_links_async(page, url))
+                        page_urls.update(await self._extract_spa_routes_async(page))
+                        page_forms.extend(await self._extract_forms_async(page, url))
 
                     if "#/" not in url:
                         hash_urls, hash_forms = await self._explore_hash_routes_async(
@@ -301,7 +316,12 @@ class WebCrawler:
         websockets = self._dedup_websocket_targets(list(websocket_targets.values()))
 
         print(f"[Crawler] Complete: {len(all_urls)} URLs, {len(forms)} forms, {len(websockets)} websockets")
-        return {"urls": all_urls, "forms": forms, "websockets": websockets}
+        return {
+            "urls": all_urls,
+            "forms": forms,
+            "websockets": websockets,
+            "deep_state": deep_state_reports,
+        }
 
     # ------------------------------------------------------------------
     # Async Playwright helpers
@@ -782,7 +802,7 @@ class WebCrawler:
             from bs4 import BeautifulSoup
         except ImportError:
             print("[Crawler] BeautifulSoup not installed — install with: pip install beautifulsoup4")
-            return {"urls": [self.base_url], "forms": []}
+            return {"urls": [self.base_url], "forms": [], "websockets": [], "deep_state": []}
 
         visited: Set[str]     = set()
         all_forms: List[Dict] = []
@@ -853,7 +873,7 @@ class WebCrawler:
         forms    = self._dedup_forms(all_forms)
 
         print(f"[Crawler] BS4 complete: {len(all_urls)} URLs, {len(forms)} forms")
-        return {"urls": all_urls, "forms": forms, "websockets": []}
+        return {"urls": all_urls, "forms": forms, "websockets": [], "deep_state": []}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -967,6 +987,7 @@ class WebCrawler:
             "urls": merged_urls,
             "forms": merged_forms,
             "websockets": results.get("websockets", []),
+            "deep_state": results.get("deep_state", []),
         }
 
     def _augment_with_graphql(
@@ -1024,7 +1045,12 @@ class WebCrawler:
             )
             forms = self._dedup_forms(forms + synthetic_forms)
             urls = list(dict.fromkeys(urls + [form["action"] for form in synthetic_forms]))
-        return {"urls": urls, "forms": forms, "websockets": results.get("websockets", [])}
+        return {
+            "urls": urls,
+            "forms": forms,
+            "websockets": results.get("websockets", []),
+            "deep_state": results.get("deep_state", []),
+        }
 
     def _fetch_openapi_spec(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         origin = self._origin_url()
