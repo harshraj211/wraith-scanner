@@ -118,11 +118,13 @@ class _OOBClient:
     def available(self) -> bool:
         return self._available
 
-    def get_payload_url(self, tag: str = "") -> str:
+    def get_payload_url(self, tag: str = "", profile: str = "direct") -> str:
         if not self._available:
             return ""
         uid = uuid.uuid4().hex[:8]
-        return f"http://{uid}.{self._domain}"
+        safe_tag = re.sub(r"[^a-z0-9-]", "-", str(tag or "probe").lower())[:16].strip("-") or "probe"
+        safe_profile = re.sub(r"[^a-z0-9-]", "-", str(profile or "direct").lower())[:12].strip("-") or "direct"
+        return f"http://{safe_profile}-{safe_tag}-{uid}.{self._domain}"
 
     def poll(self, seconds: int = 3) -> List[Dict]:
         if not self._available or not self._secret:
@@ -154,6 +156,12 @@ class SSRFScanner:
 
         self._oob = _OOBClient()
         self._oob_injections: Dict[str, Dict[str, str]] = {}
+        self._network_map: Dict[str, Dict[str, Any]] = {}
+        self.mapping_stats: Dict[str, Any] = {
+            "tracked_injections": 0,
+            "callbacks": 0,
+            "profiles": {},
+        }
 
     def scan_url(self, url: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
@@ -230,11 +238,16 @@ class SSRFScanner:
                         "confidence": 95,
                         "url": meta["url"],
                         "oob_url": oob_url,
+                        "mapping_inference": meta.get("mapping_inference", ""),
                     })
+                    self._record_network_map(oob_url, meta, interaction)
                     break
 
         self._oob.close()
         return findings
+
+    def get_network_map(self) -> List[Dict[str, Any]]:
+        return list(self._network_map.values())
 
     async def scan_url_async(self, url: str, params: Dict[str, Any], http) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
@@ -308,10 +321,11 @@ class SSRFScanner:
         return None
 
     async def _inject_oob_async(self, url, param, params, method, http):
-        oob_url = self._oob.get_payload_url(tag=param)
+        oob_url = self._oob.get_payload_url(tag=param, profile="query")
         if not oob_url:
             return
         data = {**params, param: oob_url}
+        started = time.time()
         if method.upper() == "GET":
             await http.get(url, params=data)
         else:
@@ -320,7 +334,12 @@ class SSRFScanner:
             "url": url,
             "param": param,
             "match_token": urlparse(oob_url).netloc.lower(),
+            "profile": "query",
+            "request_latency_ms": int((time.time() - started) * 1000),
+            "mapping_inference": self._infer_mapping(param, "query", time.time() - started),
         }
+        self.mapping_stats["tracked_injections"] += 1
+        self.mapping_stats["profiles"]["query"] = self.mapping_stats["profiles"].get("query", 0) + 1
 
     async def _json_body_ssrf_async(self, url, method, http):
         if method.upper() not in ("POST", "PUT", "PATCH"):
@@ -352,8 +371,9 @@ class SSRFScanner:
                             "method": "json-body",
                         }
                 if self._oob.available:
-                    oob_url = self._oob.get_payload_url(tag=key)
+                    oob_url = self._oob.get_payload_url(tag=key, profile="json")
                     if oob_url:
+                        started = time.time()
                         await http.request(
                             method, url,
                             json={key: oob_url},
@@ -363,7 +383,12 @@ class SSRFScanner:
                             "url": url,
                             "param": f"json:{key}",
                             "match_token": urlparse(oob_url).netloc.lower(),
+                            "profile": "json",
+                            "request_latency_ms": int((time.time() - started) * 1000),
+                            "mapping_inference": self._infer_mapping(f"json:{key}", "json", time.time() - started),
                         }
+                        self.mapping_stats["tracked_injections"] += 1
+                        self.mapping_stats["profiles"]["json"] = self.mapping_stats["profiles"].get("json", 0) + 1
         return None
 
     async def _header_injection_async(self, url, http):
@@ -389,14 +414,20 @@ class SSRFScanner:
                             "method": "header-injection",
                         }
                 if self._oob.available:
-                    oob_url = self._oob.get_payload_url(tag=header_name)
+                    oob_url = self._oob.get_payload_url(tag=header_name, profile="header")
                     if oob_url:
+                        started = time.time()
                         await http.get(url, headers={header_name: oob_url})
                         self._oob_injections[oob_url] = {
                             "url": url,
                             "param": f"header:{header_name}",
                             "match_token": urlparse(oob_url).netloc.lower(),
+                            "profile": "header",
+                            "request_latency_ms": int((time.time() - started) * 1000),
+                            "mapping_inference": self._infer_mapping(f"header:{header_name}", "header", time.time() - started),
                         }
+                        self.mapping_stats["tracked_injections"] += 1
+                        self.mapping_stats["profiles"]["header"] = self.mapping_stats["profiles"].get("header", 0) + 1
         return None
 
     def _inband(self, url: str, param: str,
@@ -425,17 +456,23 @@ class SSRFScanner:
 
     def _inject_oob(self, url: str, param: str,
                     params: Dict[str, Any], method: str) -> None:
-        oob_url = self._oob.get_payload_url(tag=param)
+        oob_url = self._oob.get_payload_url(tag=param, profile="query")
         if not oob_url:
             return
 
         data = {**params, param: oob_url}
+        started = time.time()
         self._fetch(url, data, method)
         self._oob_injections[oob_url] = {
             "url": url,
             "param": param,
             "match_token": urlparse(oob_url).netloc.lower(),
+            "profile": "query",
+            "request_latency_ms": int((time.time() - started) * 1000),
+            "mapping_inference": self._infer_mapping(param, "query", time.time() - started),
         }
+        self.mapping_stats["tracked_injections"] += 1
+        self.mapping_stats["profiles"]["query"] = self.mapping_stats["profiles"].get("query", 0) + 1
         print(f"    [OOB] Injected interactsh URL into '{param}': {oob_url}")
 
     def _json_body_ssrf(self, url: str, method: str) -> Optional[Dict]:
@@ -479,8 +516,9 @@ class SSRFScanner:
                         }
 
                     if self._oob.available:
-                        oob_url = self._oob.get_payload_url(tag=key)
+                        oob_url = self._oob.get_payload_url(tag=key, profile="json")
                         if oob_url:
+                            started = time.time()
                             self.session.request(
                                 method, url,
                                 json={key: oob_url},
@@ -491,7 +529,12 @@ class SSRFScanner:
                                 "url": url,
                                 "param": f"json:{key}",
                                 "match_token": urlparse(oob_url).netloc.lower(),
+                                "profile": "json",
+                                "request_latency_ms": int((time.time() - started) * 1000),
+                                "mapping_inference": self._infer_mapping(f"json:{key}", "json", time.time() - started),
                             }
+                            self.mapping_stats["tracked_injections"] += 1
+                            self.mapping_stats["profiles"]["json"] = self.mapping_stats["profiles"].get("json", 0) + 1
                 except requests.RequestException:
                     continue
 
@@ -530,8 +573,9 @@ class SSRFScanner:
                         }
 
                     if self._oob.available:
-                        oob_url = self._oob.get_payload_url(tag=header_name)
+                        oob_url = self._oob.get_payload_url(tag=header_name, profile="header")
                         if oob_url:
+                            started = time.time()
                             self.session.get(
                                 url,
                                 timeout=self.timeout,
@@ -541,11 +585,62 @@ class SSRFScanner:
                                 "url": url,
                                 "param": f"header:{header_name}",
                                 "match_token": urlparse(oob_url).netloc.lower(),
+                                "profile": "header",
+                                "request_latency_ms": int((time.time() - started) * 1000),
+                                "mapping_inference": self._infer_mapping(f"header:{header_name}", "header", time.time() - started),
                             }
+                            self.mapping_stats["tracked_injections"] += 1
+                            self.mapping_stats["profiles"]["header"] = self.mapping_stats["profiles"].get("header", 0) + 1
                 except requests.RequestException:
                     continue
 
         return None
+
+    def _infer_mapping(self, param: str, profile: str, latency_seconds: float) -> str:
+        hints: List[str] = [f"profile={profile}", f"param={param}"]
+        if latency_seconds >= 4:
+            hints.append("slow-fetch-path")
+        elif latency_seconds >= 1.5:
+            hints.append("deferred-backend-fetch")
+        else:
+            hints.append("fast-egress")
+        if any(token in str(param).lower() for token in ("webhook", "callback", "url", "host")):
+            hints.append("url-fetch-surface")
+        return "inference: " + ", ".join(hints)
+
+    def _record_network_map(self, oob_url: str, meta: Dict[str, Any], interaction: Dict[str, Any]) -> None:
+        key = f"{meta.get('url')}::{meta.get('param')}"
+        entry = self._network_map.setdefault(
+            key,
+            {
+                "url": meta.get("url"),
+                "param": meta.get("param"),
+                "profiles": [],
+                "protocols": [],
+                "remote_addresses": [],
+                "latencies_ms": [],
+                "inferences": [],
+                "callback_hosts": [],
+            },
+        )
+
+        for field, value in (
+            ("profiles", meta.get("profile", "query")),
+            ("protocols", str(interaction.get("protocol", "unknown")).lower()),
+            ("remote_addresses", str(interaction.get("remote-address", "?"))),
+            ("inferences", meta.get("mapping_inference", "")),
+            ("callback_hosts", urlparse(oob_url).netloc),
+        ):
+            if value and value not in entry[field]:
+                entry[field].append(value)
+
+        entry["latencies_ms"].append(meta.get("request_latency_ms", 0))
+        entry["profiles"].sort()
+        entry["protocols"].sort()
+        entry["remote_addresses"].sort()
+        entry["inferences"].sort()
+        entry["callback_hosts"].sort()
+        self.mapping_stats["callbacks"] += 1
 
     def _identify_ssrf_params(self, params: Dict[str, Any]) -> List[str]:
         found = []
