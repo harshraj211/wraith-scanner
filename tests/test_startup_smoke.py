@@ -13,7 +13,10 @@ class StartupSmokeTests(unittest.TestCase):
             REPO_ROOT / "main.py",
             REPO_ROOT / "api_server.py",
             REPO_ROOT / "scanner" / "utils" / "waf_evasion.py",
+            REPO_ROOT / "scanner" / "utils" / "response_intelligence.py",
+            REPO_ROOT / "scanner" / "core" / "deep_state.py",
             REPO_ROOT / "scanner" / "modules" / "xss_scanner.py",
+            REPO_ROOT / "scanner" / "modules" / "taint_analyzer.py",
             REPO_ROOT / "scanner" / "modules" / "path_traversal_scanner.py",
         ]
 
@@ -26,6 +29,7 @@ class StartupSmokeTests(unittest.TestCase):
             "api_server",
             "scanner.modules.xss_scanner",
             "scanner.modules.sqli_scanner",
+            "scanner.modules.taint_analyzer",
             "scanner.modules.path_traversal_scanner",
             "scanner.modules.semgrep_scanner",
         ]
