@@ -46,8 +46,17 @@ const VULN_META = {
 
   // A03 – Injection
   'error-based':                { label: 'SQLi (ERROR)',      color: RED,    owasp: 'A03' },
+  'sqli-error':                 { label: 'SQLi (ERROR)',      color: RED,    owasp: 'A03' },
+  'sqli-boolean-blind':         { label: 'SQLi (BOOLEAN)',    color: RED,    owasp: 'A03' },
+  'sqli-time-blind':            { label: 'SQLi (TIME)',       color: RED,    owasp: 'A03' },
+  'sqli-oob':                   { label: 'SQLi (OOB)',        color: RED,    owasp: 'A03' },
+  'sqli-waf-bypass':            { label: 'SQLi (BYPASS)',     color: RED,    owasp: 'A03' },
+  'sqli-time-blind-waf-bypass': { label: 'SQLi (TIME BYPASS)',color: RED,    owasp: 'A03' },
   'time-based':                 { label: 'SQLi (TIME)',       color: RED,    owasp: 'A03' },
   'reflected-xss':              { label: 'XSS (REFLECTED)',  color: RED,    owasp: 'A03' },
+  'xss-reflected':              { label: 'XSS (REFLECTED)',   color: RED,    owasp: 'A03' },
+  'xss-dom':                    { label: 'XSS (DOM)',         color: RED,    owasp: 'A03' },
+  'xss-stored':                 { label: 'XSS (STORED)',      color: RED,    owasp: 'A03' },
   'command-injection':          { label: 'CMD INJECTION',    color: RED,    owasp: 'A03' },
   'xxe':                        { label: 'XXE',              color: RED,    owasp: 'A03' },
   'ssti':                       { label: 'SSTI',             color: RED,    owasp: 'A03' },
@@ -73,6 +82,7 @@ const VULN_META = {
 
   // A10 – SSRF
   'ssrf':                       { label: 'SSRF',             color: RED,    owasp: 'A10' },
+  'blind-ssrf':                 { label: 'SSRF (OOB)',       color: RED,    owasp: 'A10' },
 
 };
 
@@ -241,7 +251,7 @@ function printBanner(term) {
     c('38;5;240', '  │') +
     c('0;37', '  OWASP Top 10 Coverage') +
     c('38;5;240', '  │') +
-    c('38;5;220', '  v3.1')
+    c('38;5;220', '  v4.0')
   );
   w(div);
   w('');
@@ -278,6 +288,7 @@ function printBanner(term) {
     c('38;5;220', 'help') + c('38;5;245', '  ') +
     c('38;5;220', 'clear')
   );
+  w(c('38;5;240', '  Engines: intelligent payload mutation  │  deep-state SPA  │  cross-file taint  │  OOB mapping'));
   w('');
 }
 
@@ -382,8 +393,32 @@ async function executeCommand(command, term) {
         term.writeln(c('38;5;220', ' Scan Status') + c('38;5;240', ' ──────────────────────────────────────'));
         term.writeln('  ' + c('38;5;245', 'ID        ') + c('0;37', d.scan_id));
         term.writeln('  ' + c('38;5;245', 'Target    ') + c('0;37', d.target));
+        if (d.scan_type) term.writeln('  ' + c('38;5;245', 'Type      ') + c('0;37', d.scan_type));
         term.writeln('  ' + c('38;5;245', 'Status    ') + c('38;5;' + statusColor, d.status));
         term.writeln('  ' + c('38;5;245', 'Vulns     ') + c('38;5;196', String(d.total_vulnerabilities || 0)));
+        if (d.deep_state_summary?.mutations || d.deep_state_summary?.wizard_steps) {
+          term.writeln('  ' + c('38;5;245', 'DeepState ') + c('0;37', `${d.deep_state_summary.mutations || 0} mutations · ${d.deep_state_summary.wizard_steps || 0} wizard steps · ${d.deep_state_summary.revealed_hints || 0} hints`));
+        }
+        if (d.intelligent_mutation?.mutation_attempts) {
+          term.writeln('  ' + c('38;5;245', 'Mutation  ') + c('0;37', `${d.intelligent_mutation.mutation_attempts} adaptive retries · ${d.intelligent_mutation.confirmed || 0} confirmed`));
+        }
+        if (d.oob_mapping_summary?.tracked_injections) {
+          term.writeln('  ' + c('38;5;245', 'OOB Map   ') + c('0;37', `${d.oob_mapping_summary.tracked_injections} probes · ${d.oob_mapping_summary.callbacks || 0} callbacks`));
+        }
+        if (d.summary && Object.keys(d.summary).length > 0) {
+          const parts = Object.entries(d.summary)
+            .filter(([, value]) => value)
+            .map(([key, value]) => `${key}:${value}`);
+          if (parts.length) {
+            term.writeln('  ' + c('38;5;245', 'Summary   ') + c('0;37', parts.join(' · ')));
+          }
+        }
+        if (d.tech_stack?.primary_language) {
+          const frameworks = Array.isArray(d.tech_stack.frameworks) && d.tech_stack.frameworks.length
+            ? d.tech_stack.frameworks.join(', ')
+            : 'none';
+          term.writeln('  ' + c('38;5;245', 'Stack     ') + c('0;37', `${d.tech_stack.primary_language} · ${frameworks}`));
+        }
         term.writeln('');
         if (d.status === 'completed') {
           term.writeln(c('38;5;240', '  run ') + c('38;5;245', 'download ' + d.scan_id) + c('38;5;240', ' for PDF report'));
@@ -420,6 +455,7 @@ async function executeCommand(command, term) {
           term.writeln('  ' + c('38;5;220', cmd2.padEnd(28)) + c('38;5;245', ' ' + desc));
         });
         term.writeln('');
+        term.writeln(c('38;5;240', ' Engines: adaptive XSS bypass · deep-state SPA mutation · cross-file taint · OOB network profiling'));
         term.writeln(c('38;5;240', ' OWASP Coverage: A01 A02 A03 A05 A06 A08 A10'));
         term.writeln('');
         break;
