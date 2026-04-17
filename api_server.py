@@ -38,9 +38,11 @@ from scanner.modules.component_scanner import ComponentScanner
 from scanner.modules.graphql_scanner import GraphQLScanner
 from scanner.modules.race_scanner import RaceConditionScanner
 from scanner.modules.websocket_scanner import WebSocketScanner
+from scanner.modules.semgrep_scanner import SemgrepScanner, _find_semgrep
 # NOTE: SemgrepScanner import removed — Semgrep now runs via subprocess directly.
 #       If you need to call SemgrepScanner class elsewhere, re-add the import there.
 from scanner.modules.sast_scanner import SASTScanner
+from scanner.modules.taint_analyzer import TaintAnalyzer
 from scanner.utils.github_manager import get_github_manager, detect_tech_stack
 from scanner.reporting.pdf_generator_sast_patch import (
     _render_sast_finding, _render_sast_summary,
@@ -49,10 +51,10 @@ from scanner.reporting.pdf_generator_sast_patch import (
 
 
 def _check_semgrep():
-    if shutil.which("semgrep"):
-        print("[✓] Semgrep found — SAST engine ready")
+    if _find_semgrep():
+        print("[OK] Semgrep found - SAST engine ready")
     else:
-        print("[!] Semgrep not installed — SAST code analysis will be skipped")
+        print("[!] Semgrep not installed - SAST code analysis will be skipped")
         print("    Install with: pip install semgrep")
 
 
@@ -236,6 +238,11 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         urls = results.get("urls", [])
         forms = results.get("forms", [])
         websockets = results.get("websockets", [])
+        deep_state = results.get("deep_state", [])
+
+        deep_state_mutations = sum(len(item.get("mutations", [])) for item in deep_state)
+        deep_state_revealed = sum((item.get("revealed", {}) or {}).get("count", 0) for item in deep_state)
+        deep_state_wizard_steps = sum(len((item.get("wizard", {}) or {}).get("clicked_steps", [])) for item in deep_state)
 
         crawl_duration = round(time.time() - scan_start_time, 1)
         emit_progress(
@@ -243,6 +250,12 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             f"Crawl complete in {crawl_duration}s: {len(urls)} URLs, {len(forms)} forms, {len(websockets)} websockets",
             "success",
         )
+        if deep_state_mutations or deep_state_wizard_steps:
+            emit_progress(
+                scan_id,
+                f"Deep-state mutator flipped {deep_state_mutations} client-side flags, stepped through {deep_state_wizard_steps} wizard actions, and exposed {deep_state_revealed} privileged UI hints",
+                "info",
+            )
 
         # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
@@ -281,10 +294,28 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         stored_xss = xss.check_stored(urls, session=authenticated_session)
         all_findings.extend(stored_xss)
 
+        blind_sqli = sqli.collect_oob_findings()
+        all_findings.extend(blind_sqli)
+
         # Blind SSRF OOB callback collection
         blind_ssrf = ssrf.collect_oob_findings()
         all_findings.extend(blind_ssrf)
         all_findings.extend(websocket.collect_oob_findings())
+
+        xss_intel = dict(xss.intelligence_stats)
+        ssrf_network_map = ssrf.get_network_map()
+        if xss_intel.get("mutation_attempts"):
+            emit_progress(
+                scan_id,
+                f"Adaptive mutation engine ran {xss_intel.get('mutation_attempts', 0)} retries and confirmed {xss_intel.get('confirmed', 0)} exploit paths",
+                "info",
+            )
+        if ssrf.mapping_stats.get("tracked_injections"):
+            emit_progress(
+                scan_id,
+                f"OOB mapper tracked {ssrf.mapping_stats.get('tracked_injections', 0)} probes across {len(ssrf_network_map)} callback groups",
+                "info",
+            )
 
         for live_error in live_scanner.errors:
             emit_progress(scan_id, live_error, "warning")
@@ -303,12 +334,23 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         active_scans[scan_id] = {
             'status': 'completed',
             'target': target_url,
+            'mode': 'dast',
             'urls': urls,
             'forms': forms,
             'websockets': websockets,
             'findings': unique_findings,
             'report_path': report_path,
             'total_vulnerabilities': len(unique_findings),
+            'deep_state': deep_state,
+            'deep_state_summary': {
+                'mutations': deep_state_mutations,
+                'wizard_steps': deep_state_wizard_steps,
+                'revealed_hints': deep_state_revealed,
+            },
+            'intelligent_mutation': xss_intel,
+            'oob_mapping': ssrf_network_map,
+            'oob_mapping_summary': dict(ssrf.mapping_stats),
+            'scan_type': 'DAST',
         }
 
         emit_progress(scan_id, f"Scan complete! Found {len(unique_findings)} vulnerabilities", "success")
@@ -333,7 +375,7 @@ def start_scan():
         return jsonify({'error': 'URL is required'}), 400
 
     scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {'status': 'running', 'target': target_url}
+    active_scans[scan_id] = {'status': 'running', 'target': target_url, 'mode': 'dast', 'scan_type': 'DAST'}
 
     thread = threading.Thread(target=run_scan, args=(scan_id, target_url, depth, timeout, auth_config, scan_mode))
     thread.daemon = True
@@ -358,7 +400,7 @@ def scan_repo():
         return jsonify({'error': 'url is required'}), 400
 
     scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {'status': 'running', 'target': repo_url, 'mode': 'sast'}
+    active_scans[scan_id] = {'status': 'running', 'target': repo_url, 'mode': 'sast', 'scan_type': 'SAST'}
 
     def run_sast(scan_id, repo_url, token, branch):
         """
@@ -402,9 +444,10 @@ def scan_repo():
 
             findings = []
             semgrep_count = 0
+            semgrep_bin = _find_semgrep()
 
             # ── PHASE 1: Semgrep via subprocess — MANDATORY ────────────────
-            if not shutil.which("semgrep"):
+            if not semgrep_bin:
                 emit_progress(
                     scan_id,
                     "Semgrep NOT installed — code vulnerability analysis SKIPPED. "
@@ -422,7 +465,7 @@ def scan_repo():
                 def _semgrep_logged_in():
                     try:
                         r = _sp.run(
-                            [shutil.which("semgrep"), "show", "identity"],
+                            [semgrep_bin, "show", "identity"],
                             capture_output=True, text=True, timeout=15,
                             env=_utf8_env,
                         )
@@ -473,7 +516,7 @@ def scan_repo():
                 all_rulesets.insert(0, custom_rules_path)  # custom rules first
 
                 semgrep_cmd = (
-                    ["semgrep", "--json", "--quiet", "--timeout=30"]
+                    [semgrep_bin, "--json", "--quiet", "--timeout=30"]
                     + [arg for r in all_rulesets for arg in ["--config", r]]
                     + [repo_path]
                 )
@@ -575,6 +618,11 @@ def scan_repo():
                     pass
 
             # ── PHASE 2: SASTScanner — secrets + deps ONLY ─────────────────
+            emit_progress(scan_id, "Running cross-file taint analysis...", "phase")
+            taint_scanner = TaintAnalyzer()
+            taint_findings = taint_scanner.scan_repo(repo_path, file_tree, stack)
+            emit_progress(scan_id, f"Taint analysis: {len(taint_findings)} findings", "info")
+
             emit_progress(scan_id, "Running secrets/dependency scanner...", "phase")
             regex_scanner  = SASTScanner()
             regex_findings = regex_scanner.scan_repo(repo_path, file_tree)
@@ -583,11 +631,19 @@ def scan_repo():
 
             # Merge + deduplicate on (file, line, type)
             existing_keys = {
-                (f.get("file"), f.get("line"), f.get("type")) for f in findings
+                (f.get("file"), f.get("line"), f.get("type"), f.get("source")) for f in findings
             }
+            taint_added = 0
+            for tf in taint_findings:
+                key = (tf.get("file"), tf.get("line"), tf.get("type"), tf.get("source"))
+                if key in existing_keys:
+                    continue
+                findings.append(tf)
+                existing_keys.add(key)
+                taint_added += 1
             added = 0
             for rf in regex_findings:
-                key = (rf.get("file"), rf.get("line"), rf.get("type"))
+                key = (rf.get("file"), rf.get("line"), rf.get("type"), rf.get("source"))
                 if key not in existing_keys:
                     findings.append(rf)
                     existing_keys.add(key)
@@ -595,7 +651,7 @@ def scan_repo():
 
             emit_progress(scan_id,
                 f"Combined: {len(findings)} total "
-                f"({semgrep_count} semgrep + {added} secrets/deps)",
+                f"({semgrep_count} semgrep + {taint_added} taint + {added} secrets/deps)",
                 "success")
 
             # ── Category summary ───────────────────────────────────────────
@@ -604,10 +660,11 @@ def scan_repo():
                 "code":       len([f for f in findings if f.get("category") == "code"]),
                 "dependency": len([f for f in findings if f.get("category") == "dependency"]),
                 "config":     len([f for f in findings if f.get("category") == "config"]),
+                "taint":      len([f for f in findings if f.get("source") == "taint-analyzer"]),
             }
             emit_progress(scan_id,
                 f"Breakdown — code: {cats['code']} | secrets: {cats['secret']} | "
-                f"deps: {cats['dependency']} | config: {cats['config']}",
+                f"deps: {cats['dependency']} | config: {cats['config']} | taint: {cats['taint']}",
                 "warning" if findings else "success")
 
             # ── PDF ────────────────────────────────────────────────────────
@@ -622,7 +679,7 @@ def scan_repo():
                 "status":                "completed",
                 "target":                repo_url,
                 "mode":                  "sast",
-                "scan_type":             "SAST (Semgrep AST + Secrets/Deps)",
+                "scan_type":             "SAST (Semgrep AST + Cross-File Taint + Secrets/Deps)",
                 "findings":              findings,
                 "report_path":           report_path,
                 "total_vulnerabilities": len(findings),
@@ -654,7 +711,7 @@ def _generate_sast_pdf(repo_url: str, findings: list, stack: dict, output_path: 
 
     # Warn in PDF if Semgrep wasn't available and produced zero code findings
     code_findings = [f for f in findings if f.get("category") == "code"]
-    if not code_findings and not shutil.which("semgrep"):
+    if not code_findings and not _find_semgrep():
         findings.insert(0, {
             "type":       "scanner-error",
             "category":   "config",
@@ -698,6 +755,16 @@ def get_scan_status(scan_id):
         'status':               scan.get('status'),
         'target':               scan.get('target'),
         'total_vulnerabilities': scan.get('total_vulnerabilities', 0),
+        'mode':                 scan.get('mode', 'dast'),
+        'scan_type':            scan.get('scan_type', 'DAST'),
+        'summary':              scan.get('summary', {}),
+        'deep_state_summary':   scan.get('deep_state_summary', {}),
+        'intelligent_mutation': scan.get('intelligent_mutation', {}),
+        'oob_mapping_summary':  scan.get('oob_mapping_summary', {}),
+        'tech_stack':           scan.get('tech_stack', {}),
+        'findings':             scan.get('findings', []),
+        'report_path':          scan.get('report_path'),
+        'error':                scan.get('error'),
     })
 
 
@@ -732,13 +799,26 @@ def handle_disconnect():
 
 
 if __name__ == '__main__':
+    debug_enabled = os.environ.get("SCANNER_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    host = os.environ.get("SCANNER_HOST", "0.0.0.0")
+    port = int(os.environ.get("SCANNER_PORT", "5001"))
+
     print("=" * 60)
-    print("Vulnerability Scanner API Server v3.1")
+    print("Vulnerability Scanner API Server v4.0")
     print("=" * 60)
-    print("Server:   http://localhost:5001")
-    print("SAST:     Semgrep (subprocess) + Secrets/Deps scanner")
+    print(f"Server:   http://localhost:{port}")
+    print("SAST:     Semgrep + Cross-File Taint + Secrets/Deps")
     print("Scanners: SQLi, XSS (reflected+stored+DOM), IDOR, CSRF,")
     print("          CMDi, Path Traversal, Open Redirect, SSRF (OOB),")
     print("          XXE, SSTI, Headers, Components, WordPress")
+    print("Upgrades: Adaptive payload mutation, Deep-state SPA, OOB mapping")
+    print(f"Debug:    {'enabled' if debug_enabled else 'disabled'}")
     print("=" * 60)
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True)
+    socketio.run(
+        app,
+        host=host,
+        port=port,
+        debug=debug_enabled,
+        use_reloader=debug_enabled,
+        allow_unsafe_werkzeug=True,
+    )
