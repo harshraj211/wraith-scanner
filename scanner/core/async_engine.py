@@ -211,6 +211,24 @@ class AsyncScanEngine:
     # Public API (sync entry points for api_server.py)
     # ------------------------------------------------------------------
 
+    def _run_sync_entrypoint(self, coro_factory):
+        """
+        Run an async scan entrypoint from sync code.
+
+        Some callers reach these wrappers after Playwright- or asyncio-backed
+        crawl phases have already executed in the same thread. If a loop is
+        still active, delegate the coroutine to a worker thread with its own
+        event loop instead of raising "asyncio.run() cannot be called from a
+        running event loop".
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro_factory())
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro_factory())).result()
+
     def scan_all_sync(
         self,
         url_param_pairs: List[Tuple[str, Dict[str, str]]],
@@ -220,9 +238,14 @@ class AsyncScanEngine:
         progress_cb:     Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Run URL *and* form scanning in one event-loop — full I/O overlap."""
-        return asyncio.run(
-            self._scan_all(url_param_pairs, url_scanners,
-                           forms, form_scanners, progress_cb)
+        return self._run_sync_entrypoint(
+            lambda: self._scan_all(
+                url_param_pairs,
+                url_scanners,
+                forms,
+                form_scanners,
+                progress_cb,
+            )
         )
 
     def scan_urls_sync(
@@ -231,8 +254,8 @@ class AsyncScanEngine:
         scanners:        List[Any],
         progress_cb:     Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
-        return asyncio.run(
-            self._scan_all_urls(url_param_pairs, scanners, progress_cb)
+        return self._run_sync_entrypoint(
+            lambda: self._scan_all_urls(url_param_pairs, scanners, progress_cb)
         )
 
     def scan_forms_sync(
@@ -241,8 +264,8 @@ class AsyncScanEngine:
         scanners:    List[Any],
         progress_cb: Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
-        return asyncio.run(
-            self._scan_all_forms(forms, scanners, progress_cb)
+        return self._run_sync_entrypoint(
+            lambda: self._scan_all_forms(forms, scanners, progress_cb)
         )
 
     # ------------------------------------------------------------------
