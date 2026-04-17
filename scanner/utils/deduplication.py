@@ -84,7 +84,7 @@ def deduplicate_and_group(findings):
 
     result = []
     for data in active_grouped.values():
-        result.append({
+        merged = {
             'url': data['url'],
             'type': data['type'],
             'param': ', '.join(sorted(set(filter(None, data['params'])))),
@@ -92,7 +92,18 @@ def deduplicate_and_group(findings):
             'evidence': data['evidence'][0],
             'confidence': data['confidence'],
             'affected_params_count': len(set(filter(None, data['params']))),
-        })
+        }
+        exemplar = next(
+            (
+                finding for finding in active
+                if finding.get('url', '') == data['url'] and finding.get('type', '') == data['type']
+            ),
+            {},
+        )
+        for key, value in exemplar.items():
+            if key not in merged:
+                merged[key] = value
+        result.append(merged)
 
     # ── Group passive by (type, param) across all URLs ────────────────
     passive_grouped = {}
@@ -117,7 +128,7 @@ def deduplicate_and_group(findings):
 
     for data in passive_grouped.values():
         urls = data['affected_urls']
-        result.append({
+        merged = {
             'url': urls[0] if urls else '',
             'type': data['type'],
             'param': data['param'],
@@ -126,6 +137,17 @@ def deduplicate_and_group(findings):
             'confidence': data['confidence'],
             'affected_urls': urls,
             'affected_urls_count': len(urls),
-        })
+        }
+        exemplar = next(
+            (
+                finding for finding in passive
+                if finding.get('type', '') == data['type'] and finding.get('param', '') == data['param']
+            ),
+            {},
+        )
+        for key, value in exemplar.items():
+            if key not in merged:
+                merged[key] = value
+        result.append(merged)
 
     return result
