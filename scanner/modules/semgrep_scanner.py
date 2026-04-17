@@ -18,19 +18,33 @@ import os
 import json
 import subprocess
 import shutil
+import site
 import sys
+import sysconfig
 from typing import Any, Dict, List, Optional
 
 
 def _find_semgrep():
-    scripts_dir = os.path.dirname(sys.executable)
-    for candidate in [
-        os.path.join(scripts_dir, "semgrep.exe"),
-        os.path.join(scripts_dir, "semgrep"),
+    script_dirs = []
+    version_dir = f"Python{sys.version_info.major}{sys.version_info.minor}"
+
+    for candidate_dir in [
+        os.path.dirname(sys.executable),
+        sysconfig.get_path("scripts"),
+        os.path.join(site.getuserbase(), "Scripts"),
+        os.path.join(site.getuserbase(), version_dir, "Scripts"),
+        os.path.join(os.path.dirname(site.getusersitepackages()), "Scripts"),
     ]:
-        if os.path.isfile(candidate):
-            return candidate
-    return shutil.which("semgrep")
+        if candidate_dir and candidate_dir not in script_dirs:
+            script_dirs.append(candidate_dir)
+
+    for directory in script_dirs:
+        for executable in ("semgrep.exe", "semgrep.cmd", "semgrep"):
+            candidate = os.path.join(directory, executable)
+            if os.path.isfile(candidate):
+                return candidate
+
+    return shutil.which("semgrep") or shutil.which("semgrep.exe")
 
 
 SEMGREP_BIN = _find_semgrep()
