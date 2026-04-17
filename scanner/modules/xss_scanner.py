@@ -28,6 +28,7 @@ from scanner.utils.request_metadata import (
     send_request_async,
     send_request_sync,
 )
+from scanner.utils.response_intelligence import ResponseIntelligenceAgent
 from scanner.utils.waf_evasion import (
     generate_xss_evasion_payloads,
     EvasionLevel,
@@ -319,6 +320,13 @@ class XSSScanner:
 
         # Pool is lazy-initialized on first DOM XSS check
         self._pool: Optional[_PlaywrightPool] = None
+        self._response_agent = ResponseIntelligenceAgent()
+        self.intelligence_stats: Dict[str, Any] = {
+            "mode": self._response_agent.mode,
+            "mutation_attempts": 0,
+            "confirmed": 0,
+            "contexts": [],
+        }
 
     def _get_pool(self) -> Optional[_PlaywrightPool]:
         if self._pool is None:
@@ -435,6 +443,13 @@ class XSSScanner:
                 findings.append(analysis)
                 return findings
 
+            contextual = self._try_contextual_mutations_sync(
+                url, params, target_param, marker, payload, resp
+            )
+            if contextual:
+                findings.append(contextual)
+                return findings
+
         if not findings and self._evasion_level >= EvasionLevel.LOW:
             limit = {1: 10, 2: 20, 3: 35, 4: 60}.get(self._evasion_level, 20)
             marker = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
@@ -494,6 +509,13 @@ class XSSScanner:
             )
             if analysis:
                 findings.append(analysis)
+                return findings
+
+            contextual = await self._try_contextual_mutations_async(
+                url, params, target_param, marker, payload, http, resp
+            )
+            if contextual:
+                findings.append(contextual)
                 return findings
 
         # Phase 2: WAF evasion payloads if standard failed
@@ -648,6 +670,157 @@ class XSSScanner:
             cookies,
             body_format,
         )
+
+    async def _try_contextual_mutations_async(
+        self,
+        url: str,
+        params: Dict[str, str],
+        target_param: str,
+        marker: str,
+        original_payload: str,
+        http,
+        response,
+    ) -> Optional[Dict[str, Any]]:
+        body = response.text or ""
+        analysis = self._response_agent.analyze_response(
+            family="xss",
+            payload=original_payload,
+            marker=marker,
+            status_code=getattr(response, "status_code", 0),
+            text=body,
+            headers=dict(getattr(response, "headers", {}) or {}),
+            reflection_context=self._detect_context(body, marker),
+        )
+        if not self._response_agent.should_retry(analysis):
+            return None
+
+        self.intelligence_stats["mutation_attempts"] += 1
+        self.intelligence_stats["contexts"].append(
+            {
+                "url": url,
+                "param": target_param,
+                "outcome": analysis.get("outcome"),
+                "vendor": analysis.get("vendor"),
+                "status_code": analysis.get("status_code"),
+            }
+        )
+
+        for candidate in self._response_agent.generate_mutations(
+            family="xss",
+            payload=original_payload,
+            marker=marker,
+            analysis=analysis,
+            max_variants=6,
+        ):
+            test_params = dict(params)
+            test_params[target_param] = candidate["payload"]
+
+            mutated_response = await http.get(url, params=test_params)
+            if not mutated_response:
+                continue
+            mutated_body = mutated_response.text or ""
+
+            self._injected[marker] = {
+                "param": target_param,
+                "payload": candidate["payload"],
+                "inject_url": url,
+            }
+
+            finding = await self._analyze_reflected_xss_async(
+                url,
+                candidate["payload"],
+                mutated_body,
+                marker,
+                http,
+                params,
+                target_param,
+            )
+            if not finding:
+                continue
+
+            finding["method"] = f"contextual-bypass-{candidate['technique']}"
+            finding["evidence"] = (
+                f"[intel:{candidate['technique']}] {candidate['rationale']}. "
+                f"{finding.get('evidence', '')}"
+            )
+            finding["source"] = "response-intelligence"
+            self.intelligence_stats["confirmed"] += 1
+            return finding
+        return None
+
+    def _try_contextual_mutations_sync(
+        self,
+        url: str,
+        params: Dict[str, str],
+        target_param: str,
+        marker: str,
+        original_payload: str,
+        response,
+    ) -> Optional[Dict[str, Any]]:
+        body = response.text or ""
+        analysis = self._response_agent.analyze_response(
+            family="xss",
+            payload=original_payload,
+            marker=marker,
+            status_code=getattr(response, "status_code", 0),
+            text=body,
+            headers=dict(getattr(response, "headers", {}) or {}),
+            reflection_context=self._detect_context(body, marker),
+        )
+        if not self._response_agent.should_retry(analysis):
+            return None
+
+        self.intelligence_stats["mutation_attempts"] += 1
+        self.intelligence_stats["contexts"].append(
+            {
+                "url": url,
+                "param": target_param,
+                "outcome": analysis.get("outcome"),
+                "vendor": analysis.get("vendor"),
+                "status_code": analysis.get("status_code"),
+            }
+        )
+
+        for candidate in self._response_agent.generate_mutations(
+            family="xss",
+            payload=original_payload,
+            marker=marker,
+            analysis=analysis,
+            max_variants=6,
+        ):
+            test_params = dict(params)
+            test_params[target_param] = candidate["payload"]
+            try:
+                mutated_response = self.session.get(url, params=test_params, timeout=self.timeout)
+            except Exception:
+                continue
+
+            mutated_body = mutated_response.text or ""
+            self._injected[marker] = {
+                "param": target_param,
+                "payload": candidate["payload"],
+                "inject_url": url,
+            }
+
+            finding = self._analyze_reflected_xss(
+                url,
+                candidate["payload"],
+                mutated_body,
+                marker,
+                target_param,
+            )
+            if not finding:
+                continue
+
+            finding["method"] = f"contextual-bypass-{candidate['technique']}"
+            finding["evidence"] = (
+                f"[intel:{candidate['technique']}] {candidate['rationale']}. "
+                f"{finding.get('evidence', '')}"
+            )
+            finding["source"] = "response-intelligence"
+            self.intelligence_stats["confirmed"] += 1
+            return finding
+        return None
 
     def _form_body_format(self, form: Dict[str, Any]) -> str:
         if form.get("body_format") == "json":
