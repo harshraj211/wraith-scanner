@@ -1,223 +1,226 @@
-<div align="center">
-```
- __        __              _   _     
- \ \      / / __ __ _(_) |_| |__  
-  \ \ /\ / / '__/ _` | | __| '_ \ 
-   \ V  V /| | | (_| | | |_| | | |
-    \_/\_/ |_|  \__,_|_|\__|_| |_|
-```
+# Wraith v4
 
-# Wraith
-**Silent. Fast. Lethal.**
+Async DAST and SAST scanner for modern web applications, SPAs, and GitHub repositories.
 
-[![Python Version](https://img.shields.io/badge/Python-3.9+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![Node.js Version](https://img.shields.io/badge/Node.js-16+-green.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
+Wraith now ships with four major engine upgrades:
 
-<p align="center">
-  What others miss, Wraith finds. An async DAST & SAST scanning engine built for ethical hackers, red teams, and DevSecOps pipelines.
-</p>
+- Intelligent payload mutation for noisy DAST responses like WAF block pages, `403`s, and `5xx` responses.
+- Cross-file taint analysis for SAST, layered on top of Semgrep and the existing secrets and dependency scanner.
+- Deep-state SPA exploration that mutates browser storage and walks multi-step flows before fuzzing.
+- Richer OOB profiling for blind SSRF-style callbacks with per-parameter correlation and egress hints.
 
-</div>
+## What It Scans
 
----
+### DAST
 
-## 📖 Table of Contents
-- [Overview](#-overview)
-- [Key Features](#-key-features)
-- [Architecture](#-architecture)
-- [Getting Started](#-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Usage](#-usage)
-  - [Web Terminal UI](#1-web-terminal-ui-recommended)
-  - [Command Line Interface](#2-command-line-interface-cli)
-- [Testing Environment](#-testing-environment)
-- [Disclaimer](#-responsible-use-disclaimer)
-- [License & Author](#-license--author)
+- SQL injection
+- Reflected, DOM, and stored XSS
+- SSRF with in-band and OOB confirmation
+- XXE
+- SSTI
+- Command injection
+- Path traversal
+- IDOR
+- Open redirect
+- CSRF
+- Headers and crypto misconfigurations
+- GraphQL and WebSocket surfaces
+- WordPress-specific checks
 
----
+### SAST
 
-## 📖 Overview
+- Semgrep AST findings
+- Cross-file taint findings from route or request source to dangerous sink
+- Hardcoded secrets and credential patterns
+- Dependency CVEs through OSV-backed manifest parsing
+- Common misconfiguration patterns
 
-**Wraith** is an advanced web vulnerability scanner that unifies **Dynamic Application Security Testing (DAST)** and **Static Application Security Testing (SAST)** into a single, highly concurrent platform.
+## Architecture
 
-Unlike traditional scanners that rely on static HTML scraping, Wraith uses a headless browser to dynamically map modern Single Page Applications (SPAs) and intercept hidden API routes. Built on `aiohttp` and `asyncio`, its core engine runs hundreds of non-blocking vulnerability checks simultaneously — without hammering the target server.
-
----
-
-## ✨ Key Features
-
-### 🚀 High-Performance Core Architecture
-* **True Asynchronous Engine:** Powered by `aiohttp`, the matrix dispatcher runs concurrent scanning modules bypassing GIL bottlenecks, reducing comprehensive scan times from hours to minutes.
-* **SPA-Aware Reconnaissance:** Utilizes `async_playwright` to dynamically execute JavaScript, hydrate modern web frameworks (React, Angular, Vue), and capture background `fetch`/`XHR` API requests.
-* **Smart Concurrency & Throttling:** Implements `asyncio.Semaphore` rate-limiting, exponential backoff, and `429/503` retry logic to ensure stability and prevent accidental Denial-of-Service (DoS).
-* **Out-of-Band (OAST) Detection:** Natively integrates with `interactsh` to capture blind, asynchronous vulnerabilities (e.g., SSRF, blind SQLi) via DNS/HTTP callbacks.
-
-### 🔍 Dynamic Scanning (DAST)
-Proactively detects critical vulnerabilities across 17 specialized modules:
-* **Injection Flaws:** Error-based, boolean-blind, and time-based SQLi, Command Injection (CMDi), and XXE.
-* **Client-Side Attacks:** Reflected and DOM-based Cross-Site Scripting (XSS).
-* **Broken Access Control:** Insecure Direct Object Reference (IDOR) and Path Traversal.
-* **Network & Configuration:** Server-Side Request Forgery (SSRF), Open Redirects, CSRF, and Security Header misconfigurations.
-
-### 🛡️ Static Scanning (SAST)
-Analyzes remote GitHub repositories for source-code level vulnerabilities:
-* **Semgrep Integration:** AST-based static analysis utilizing both community-driven and custom rulesets.
-* **Secrets Detection:** High-entropy string analysis to uncover hardcoded credentials, tokens, and API keys.
-* **Dependency Auditing:** Interfaces with the OSV API to identify known CVEs in `package.json` and `requirements.txt` files.
-
-### 📊 Professional Reporting
-Generates comprehensive, deduplicated PDF reports featuring:
-* Executive summaries coupled with **CVSS v3.1** scoring.
-* Granular vulnerability distribution metrics and charts.
-* Dynamic, context-aware remediation guidelines.
-* Direct mapping to the **OWASP Top 10** framework.
-
----
-
-## 🏗️ Architecture
-```mermaid
-graph TD
-    A[Web Terminal UI / React] -->|WebSocket / HTTP| B(Flask API Server)
-    B --> C{AsyncScanEngine}
-    C -->|Matrix Dispatch| D[DAST Modules]
-    C -->|Subprocess| E[SAST Modules]
-    D --> F[Playwright Crawler]
-    D --> G[aiohttp Payload Delivery]
-    F -->|Maps SPAs & APIs| G
-    G -->|Identifies Vulns| H[Reporting Engine]
-    E -->|Semgrep / OSV| H
-    H --> I((PDF Report))
+```text
+React Terminal UI
+        |
+        v
+Flask API Server  --->  PDF Reporting
+        |
+        +--> WebCrawler + Playwright
+        |      |
+        |      +--> Deep-state storage mutation
+        |      +--> SPA/API/WebSocket discovery
+        |
+        +--> AsyncScanEngine
+        |      |
+        |      +--> DAST modules
+        |      +--> Adaptive response intelligence
+        |      +--> OOB correlation
+        |
+        +--> Repo SAST
+               |
+               +--> Semgrep
+               +--> Cross-file taint analyzer
+               +--> Secrets/dependency scanner
 ```
 
----
+## Install
 
-## 🚀 Getting Started
+### Requirements
 
-### Prerequisites
-Ensure your system meets the following minimum requirements before installing Wraith:
+- Python 3.9+
+- Node.js 16+
+- Git
+- Chromium for Playwright
 
-- **Python:** v3.9 or higher
-- **Node.js:** v16 or higher (required for Web Terminal)
-- **npm:** v8 or higher
-- **Git:** Required for cloning target repositories during SAST scans
+### Python dependencies
 
-### Installation
-
-#### Windows (PowerShell)
-```powershell
-# 1. Clone the repository
-git clone https://github.com/harshraj211/wraith-scanner.git
-cd wraith-scanner
-
-# 2. Create and activate a virtual environment
+```bash
 python -m venv venv
-.\venv\Scripts\Activate.ps1
-
-# 3. Install Python dependencies
+venv\Scripts\activate
 pip install -r requirements.txt
-
-# 4. Install Playwright browser binaries
 playwright install chromium
+```
 
-# 5. Initialize required directories
-mkdir reports
+### Frontend dependencies
 
-# 6. Install Web Terminal dependencies
+```bash
 cd scanner-terminal
 npm install
 cd ..
 ```
 
-#### Linux / macOS (Bash)
+## Optional Integrations
+
+- `semgrep`: recommended for the full SAST experience. Without it, Wraith still runs taint, secret, and dependency analysis.
+- `OPENAI_API_KEY`: enables optional LLM-assisted payload mutation in the response-intelligence layer. Without it, Wraith uses the built-in heuristic mutator.
+
+## Run
+
+### Backend API
+
 ```bash
-# Clone the repository
-git clone https://github.com/harshraj211/wraith-scanner.git
-cd wraith-scanner
-
-# Run the automated install script
-chmod +x install.sh
-./install.sh
-```
-
----
-
-## 💻 Usage
-
-Wraith can be operated via an interactive browser-based Web Terminal or a traditional Command Line Interface.
-
-### 1. Web Terminal UI (Recommended)
-
-**Start the Backend API:**
-```bash
-# make sure your virtualenv is active first
 python api_server.py
-# runs on http://localhost:5001
 ```
 
-**Start the Frontend Terminal:**
+The API listens on `http://127.0.0.1:5001`.
+
+### Frontend terminal
+
 ```bash
-# open a second terminal window
 cd scanner-terminal
 npm start
-# opens at http://localhost:3000
 ```
 
-**Available Terminal Commands:**
+The terminal UI opens on `http://127.0.0.1:3000`.
 
-| Command | Description |
-|---|---|
-| `scan <url>` | Launch an async DAST scan against a target URL |
-| `scanrepo <github-url>` | Clone and run SAST analysis on a remote repository |
-| `status <scan-id>` | Check live progress of a running scan |
-| `report <scan-id>` | Download the final PDF report |
-| `help` | List all available commands |
+### CLI
 
-### 2. Command Line Interface (CLI)
 ```bash
-# standard scan
-python main.py --url http://target.com --output reports/report.pdf
-
-# aggressive mode (higher concurrency)
-python main.py --url http://target.com --mode aggressive
-
-# custom timeout
-python main.py --url http://target.com --timeout 15
+python main.py --url http://127.0.0.1:5000 --output reports/local.pdf
 ```
 
----
+## Terminal Commands
 
-## 🧪 Testing Environment
+- `scan <url>`
+- `scan <url> --depth 3`
+- `scan <url> --timeout 20`
+- `scanrepo <github-url>`
+- `scanrepo <github-url> --token <token>`
+- `scanrepo <github-url> --branch <branch>`
+- `status <scan-id>`
+- `download <scan-id>`
+- `help`
+- `clear`
 
-A deliberately vulnerable Flask app lives in `/test_app` — use it to verify your install and see Wraith in action without touching a real target.
+## New Engine Details
+
+### Intelligent Payload Mutation
+
+When a target reflects input but responds with a likely block page or noisy error, Wraith:
+
+1. fingerprints the response context,
+2. classifies the likely block condition,
+3. generates a small batch of context-aware mutations,
+4. retries only those payloads,
+5. validates exploitability with sink-aware checks.
+
+This is designed to cut false positives and avoid blasting static payload lists at every endpoint.
+
+### Cross-File Taint Analysis
+
+The taint analyzer walks Python and JavaScript repository code, tracks request-derived values across assignments and function calls, and reports only when tainted data reaches sinks like:
+
+- database execution functions,
+- OS command execution,
+- path/file access,
+- SSRF-style outbound request helpers,
+- dangerous template or response sinks.
+
+### Deep-State SPA Fuzzing
+
+Before fuzzing a hydrated SPA, Wraith now:
+
+- snapshots `localStorage`, `sessionStorage`, and IndexedDB samples,
+- flips privileged flags and role-like values,
+- advances likely wizard flows,
+- re-extracts routes, forms, and privileged UI hints.
+
+### OOB Network Mapping
+
+Blind SSRF callbacks are now labeled per vector and parameter, then correlated into a lightweight network map with:
+
+- callback protocol,
+- callback host,
+- remote address,
+- request latency bucket,
+- vector profile,
+- inference notes.
+
+These hints are heuristic and should be treated as supporting evidence, not ground truth infrastructure attribution.
+
+## Safe Demo
+
+Wraith includes a local vulnerable target under `test_app`.
+
+### 1. Start the demo app
+
 ```bash
-# terminal 1 — start the vulnerable app
 python test_app/vulnerable_app.py
-
-# terminal 2 — run wraith against it
-python main.py --url http://127.0.0.1:5000 --output reports/local_test.pdf
 ```
 
----
+### 2. Start the API
 
-## ⚖️ Responsible Use Disclaimer
+```bash
+python api_server.py
+```
 
-Wraith is an ethical hacking tool built exclusively for authorized security assessments and educational purposes.
+### 3. Run a scan
 
-* **Authorization Required:** Only scan targets you own or have explicit written permission to test.
-* **Legality:** Unauthorized scanning is a cybercrime in most jurisdictions.
-* **Non-Destructive:** Wraith identifies and reports vulnerabilities — it does not exploit, persist, or exfiltrate.
+```bash
+python -c "import requests; print(requests.post('http://127.0.0.1:5001/api/scan', json={'url': 'http://127.0.0.1:5000'}).json())"
+```
 
-The developer assumes no liability for misuse, damage, or legal consequences.
+Or use the frontend terminal and run:
 
----
+```text
+scan http://127.0.0.1:5000
+```
 
-## 👨‍💻 License & Author
+## Tests
 
-**License:** MIT
+```bash
+python -m unittest
+```
 
-**Author:** Harsh Raj — Cyber Security Student & Developer
+Focused upgrade regression tests live in:
 
-> *Built Wraith — an async DAST/SAST security scanner with SPA crawling, Semgrep integration, and automated CVSS-scored PDF reporting.*
+- `tests/test_advanced_engine_upgrades.py`
+- `tests/test_startup_smoke.py`
+
+## Notes
+
+- The React terminal keeps the original terminal-style UX and now exposes deep-state, mutation, taint, and OOB status summaries.
+- PDF reports include the merged findings from DAST, Semgrep, taint analysis, and secrets or dependency scanning.
+- The repo may contain local artifacts like `reports/` or `test.db`; Wraith does not require them for installation.
+
+## Responsible Use
+
+Scan only systems you own or are explicitly authorized to assess.
