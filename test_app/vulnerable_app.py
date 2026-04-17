@@ -706,9 +706,9 @@ def auth_logout():
     return redirect(url_for('auth_login'))
 
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("⚠️  VULNERABLE TEST APPLICATION - DO NOT USE IN PRODUCTION")
-    print("="*60)
+    print("\n" + "=" * 60)
+    print("WARNING: VULNERABLE TEST APPLICATION - DO NOT USE IN PRODUCTION")
+    print("=" * 60)
     print("\nStarting server at http://127.0.0.1:5000")
     print("\nVulnerable endpoints:")
     print("  - http://127.0.0.1:5000/search?q=test")
