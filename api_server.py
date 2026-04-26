@@ -16,6 +16,7 @@ from datetime import datetime
 from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
 from scanner.core.crawler import WebCrawler
 from scanner.core.live_scan import LiveDiscoveryScanner
+from scanner.core.sequence_runner import run_sequence_workflows
 from scanner.core.workflows import load_workflows
 from scanner.modules.sqli_scanner import SQLiScanner
 from scanner.modules.xss_scanner import XSSScanner
@@ -206,7 +207,16 @@ def deduplicate_findings(findings):
     return unique
 
 
-def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='scan', import_config=None):
+def run_scan(
+    scan_id,
+    target_url,
+    depth,
+    timeout,
+    auth_config=None,
+    scan_mode='scan',
+    import_config=None,
+    sequence_config=None,
+):
     """Main scanning function with WordPress, auth, and mode support."""
     try:
         emit_progress(scan_id, f"Starting scan of {target_url}", "info")
@@ -219,6 +229,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         auth_role = auth_profile.role or auth_role
         auth_health = {"status": "skipped", "reason": "no health check configured"}
         import_summary = {}
+        sequence_results = []
 
         mode_mgr = get_mode_manager()
         mode_mgr.set_mode(scan_mode)
@@ -441,6 +452,31 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             )
         _persist_discovered_requests(storage_repo, scan_id, crawled_urls, crawled_forms, auth_role)
 
+        if sequence_config:
+            try:
+                sequence_results = run_sequence_workflows(
+                    sequence_config,
+                    base_url=target_url,
+                    session=authenticated_session or auth_manager.get_session(),
+                    storage_repo=storage_repo,
+                    scan_id=scan_id,
+                    auth_profile_id=auth_profile.profile_id,
+                    auth_role=auth_role,
+                    safety_mode=scan_config.safety_mode,
+                    timeout=timeout,
+                )
+                executed = sum(
+                    1 for workflow in sequence_results for step in workflow.steps if step.status == "executed"
+                )
+                skipped = sum(workflow.skipped for workflow in sequence_results)
+                emit_progress(
+                    scan_id,
+                    f"Sequence workflows executed {executed} step(s), skipped {skipped}",
+                    "success",
+                )
+            except Exception as exc:
+                emit_progress(scan_id, f"Sequence workflow failed: {exc}", "warning")
+
         # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
         all_findings.extend(live_scanner.findings)
@@ -546,6 +582,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                 "oob_mapping_summary": dict(ssrf.mapping_stats),
                 "auth_health": auth_health,
                 "api_imports": import_summary,
+                "sequence_workflows": [workflow.to_dict() for workflow in sequence_results],
             },
         )
 
@@ -569,6 +606,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             'intelligent_mutation': xss_intel,
             'oob_mapping': ssrf_network_map,
             'api_imports': import_summary,
+            'sequence_workflows': [workflow.to_dict() for workflow in sequence_results],
             'oob_mapping_summary': dict(ssrf.mapping_stats),
             'auth_health': auth_health,
             'scan_type': 'DAST',
@@ -592,6 +630,12 @@ def start_scan():
     timeout = data.get('timeout')
     auth_config = data.get('auth')
     import_config = data.get('imports') or data.get('api_imports') or {}
+    sequence_config = (
+        data.get('sequence_workflows')
+        or data.get('sequence_workflow')
+        or data.get('api_workflows')
+        or []
+    )
     scan_mode = 'scan'
 
     if not target_url:
@@ -602,7 +646,7 @@ def start_scan():
 
     thread = threading.Thread(
         target=run_scan,
-        args=(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config),
+        args=(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config, sequence_config),
     )
     thread.daemon = True
     thread.start()

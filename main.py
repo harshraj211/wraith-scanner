@@ -33,6 +33,7 @@ except Exception:
         RESET_ALL = ""
 from urllib.parse import urlparse, parse_qs
 from scanner.core.live_scan import LiveDiscoveryScanner
+from scanner.core.sequence_runner import run_sequence_workflows
 from scanner.core.workflows import load_workflows
 from scanner.core.crawler import WebCrawler
 from scanner.modules.sqli_scanner import SQLiScanner
@@ -96,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--import-postman", action="append", default=[], help="Postman collection v2.1 JSON path; can be repeated")
     p.add_argument("--import-har", action="append", default=[], help="HAR file path; can be repeated")
     p.add_argument("--import-graphql", action="append", default=[], help="GraphQL introspection JSON or SDL path/URL; can be repeated")
+    p.add_argument("--sequence-workflow", action="append", default=[], help="YAML/JSON API sequence workflow path; can be repeated")
     p.add_argument("--depth", type=int, help="Crawl depth (overrides mode default)")
     p.add_argument("--timeout", type=int, help="Request timeout seconds (overrides mode default)")
     p.add_argument("--workflow", help="Path to a JSON workflow macro file")
@@ -533,6 +535,35 @@ def main() -> int:
             print(Fore.YELLOW + f"[!] API import failed: {exc}" + Style.RESET_ALL)
     _persist_discovered_requests(storage_repo, scan_id, crawled_urls, crawled_forms)
 
+    sequence_results = []
+    if args.sequence_workflow:
+        try:
+            sequence_results = run_sequence_workflows(
+                args.sequence_workflow,
+                base_url=args.url,
+                session=session,
+                storage_repo=storage_repo,
+                scan_id=scan_id,
+                auth_profile_id=auth_profile.profile_id,
+                auth_role=auth_profile.role,
+                safety_mode=scan_config.safety_mode,
+                timeout=config["timeout"],
+            )
+            if args.verbose:
+                executed = sum(
+                    1 for workflow in sequence_results for step in workflow.steps if step.status == "executed"
+                )
+                skipped = sum(workflow.skipped for workflow in sequence_results)
+                print(
+                    Fore.GREEN
+                    + f"Sequence workflows executed {executed} step(s), skipped {skipped}"
+                    + Style.RESET_ALL
+                )
+        except Exception as exc:
+            errors.append(f"Sequence workflow failed: {exc}")
+            if args.verbose:
+                print(Fore.YELLOW + f"[!] Sequence workflow failed: {exc}" + Style.RESET_ALL)
+
     print(Fore.MAGENTA + "SCANNING" + Style.RESET_ALL)
     all_findings: List[Dict[str, Any]] = list(live_scanner.findings)
 
@@ -723,6 +754,7 @@ def main() -> int:
                         "websockets": websockets,
                         "auth_health": auth_health,
                         "api_imports": import_summary,
+                        "sequence_workflows": [workflow.to_dict() for workflow in sequence_results],
                     },
                 )
                 content = json.dumps(payload, indent=2)

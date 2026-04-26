@@ -10,6 +10,12 @@ from scanner.core.models import (
     ResponseRecord,
     ScanConfig,
 )
+from scanner.core.sequence_runner import (
+    SequenceRunner,
+    SequenceWorkflowResult,
+    load_sequence_workflows,
+    run_sequence_workflows,
+)
 
 __all__ = [
     "AuthProfile",
@@ -20,4 +26,8 @@ __all__ = [
     "RequestRecord",
     "ResponseRecord",
     "ScanConfig",
+    "SequenceRunner",
+    "SequenceWorkflowResult",
+    "load_sequence_workflows",
+    "run_sequence_workflows",
 ]

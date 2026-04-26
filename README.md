@@ -161,6 +161,52 @@ The Flask API accepts the same inputs under `imports`:
 
 Imported candidates appear in JSON report metadata under `api_imports`. Sensitive headers from HAR traffic are redacted before corpus storage.
 
+### API Sequence Workflows
+
+Phase 4 adds a YAML/JSON sequence runner for API workflows that need state from earlier responses. It executes bounded HTTP steps with the active auth session, extracts variables, reuses them in later requests, runs assertions, and stores every request/response in the SQLite corpus as replay traffic.
+
+```bash
+python main.py --url https://app.example.test --sequence-workflow workflows/order-flow.yaml --output reports/sequence.json
+```
+
+Example YAML:
+
+```yaml
+name: order flow
+steps:
+  - name: create order
+    method: POST
+    url: /api/orders
+    json:
+      sku: demo
+    extract:
+      order_id:
+        jsonpath: $.id
+    assertions:
+      - status_code: 201
+
+  - name: read order
+    method: GET
+    url: /api/orders/{{order_id}}
+    assertions:
+      - status_code: 200
+      - jsonpath: $.id
+        equals: "{{order_id}}"
+```
+
+Safe mode skips `DELETE`, `PATCH`, and `PUT` steps unless the step is explicitly marked with `safe: true`, `allow_in_safe_mode: true`, `disposable: true`, or `uses_disposable_resource: true`.
+
+API scans can pass workflows inline or by file path:
+
+```json
+{
+  "url": "https://app.example.test",
+  "sequence_workflows": ["workflows/order-flow.yaml"]
+}
+```
+
+Sequence results appear in JSON report metadata under `sequence_workflows`.
+
 ### Auth Profiles
 
 Wraith supports reusable auth profiles for authenticated scans:
