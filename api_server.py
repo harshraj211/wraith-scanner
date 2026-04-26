@@ -29,6 +29,9 @@ from scanner.utils.deduplication import deduplicate_and_group
 from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
+from scanner.reporting.json_export import write_scan_json
+from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.storage.repository import StorageRepository
 from scanner.modules.crypto_scanner import CryptoScanner
 from scanner.modules.ssrf_scanner import SSRFScanner
 from scanner.modules.xxe_scanner import XXEScanner
@@ -69,6 +72,111 @@ REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
+DAST_MODULES = [
+    "wordpress",
+    "sqli",
+    "xss",
+    "idor",
+    "open-redirect",
+    "cmdi",
+    "path-traversal",
+    "csrf",
+    "crypto",
+    "ssrf",
+    "xxe",
+    "ssti",
+    "headers",
+    "components",
+    "graphql",
+    "race",
+    "websocket",
+]
+
+
+def _storage_repo():
+    try:
+        return StorageRepository()
+    except Exception as exc:
+        print(f"[storage] disabled: {exc}")
+        return None
+
+
+def _scan_config(scan_id, target_url, depth, auth_config, enabled_modules):
+    auth_profiles = []
+    if auth_config:
+        auth_profiles.append({
+            "profile_id": auth_config.get("profile_id", ""),
+            "name": auth_config.get("name", "api-auth"),
+            "role": auth_config.get("role", "authenticated"),
+            "auth_type": auth_config.get("type", "custom"),
+            "headers": auth_config.get("headers", {}),
+            "cookies": auth_config.get("cookies", {}),
+        })
+    return ScanConfig(
+        scan_id=scan_id,
+        target_base_url=target_url,
+        safety_mode=(auth_config or {}).get("safety_mode", "safe"),
+        max_depth=depth or 0,
+        auth_profiles=auth_profiles,
+        enabled_modules=enabled_modules,
+        output_dir=REPORTS_DIR,
+    )
+
+
+def _auth_role(auth_config):
+    if not auth_config:
+        return "anonymous"
+    return auth_config.get("role") or ("authenticated" if auth_config else "anonymous")
+
+
+def _persist_discovered_requests(repo, scan_id, urls, forms, auth_role):
+    if repo is None:
+        return
+    for url in urls:
+        try:
+            repo.save_request(
+                RequestRecord.create(
+                    scan_id=scan_id,
+                    source="crawler",
+                    method="GET",
+                    url=url,
+                    auth_role=auth_role,
+                )
+            )
+        except Exception:
+            pass
+    for form in forms:
+        try:
+            body = {
+                item.get("name", ""): item.get("value", "")
+                for item in form.get("inputs", [])
+                if item.get("name")
+            }
+            repo.save_request(
+                RequestRecord.create(
+                    scan_id=scan_id,
+                    source="crawler",
+                    method=form.get("method", "GET"),
+                    url=form.get("action", ""),
+                    headers=form.get("extra_headers", {}),
+                    body=body,
+                    auth_role=auth_role,
+                )
+            )
+        except Exception:
+            pass
+
+
+def _persist_findings(repo, canonical_findings):
+    if repo is None:
+        return
+    for finding in canonical_findings:
+        try:
+            repo.save_finding(finding)
+        except Exception:
+            pass
+
+
 def emit_progress(scan_id, message, type="info"):
     """Send real-time progress updates."""
     socketio.emit('scan_progress', {
@@ -95,6 +203,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
     """Main scanning function with WordPress, auth, and mode support."""
     try:
         emit_progress(scan_id, f"Starting scan of {target_url}", "info")
+        auth_role = _auth_role(auth_config)
 
         mode_mgr = get_mode_manager()
         mode_mgr.set_mode(scan_mode)
@@ -106,6 +215,10 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             timeout = mode_config['timeout']
 
         emit_progress(scan_id, f"Mode: {scan_mode.upper()} | Depth: {depth} | Timeout: {timeout}s", "info")
+        storage_repo = _storage_repo()
+        scan_config = _scan_config(scan_id, target_url, depth, auth_config, DAST_MODULES)
+        if storage_repo is not None:
+            storage_repo.create_scan(scan_config)
 
         auth_manager = get_auth_manager()
         auth_manager.logout()
@@ -256,6 +369,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                 f"Deep-state mutator flipped {deep_state_mutations} client-side flags, stepped through {deep_state_wizard_steps} wizard actions, and exposed {deep_state_revealed} privileged UI hints",
                 "info",
             )
+        _persist_discovered_requests(storage_repo, scan_id, urls, forms, auth_role)
 
         # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
@@ -277,6 +391,10 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             max_concurrent=20 if mode_config['aggressive'] else 10,
             timeout=timeout,
             auth_session=authenticated_session,
+            storage_repo=storage_repo,
+            scan_id=scan_id,
+            traffic_source="fuzzer",
+            auth_role=auth_role,
         )
         url_param_pairs = build_url_param_pairs(urls)
         dast_scanners = [sqli, xss, idor, cmdi, path, ssrf, ssti, xxe, redir]
@@ -327,9 +445,36 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         report_filename = f"scan_{scan_id}.pdf"
         report_path = os.path.join(REPORTS_DIR, report_filename)
         unique_findings = deduplicate_and_group(all_findings)
+        canonical_findings = findings_from_legacy(
+            unique_findings,
+            target_url=target_url,
+            scan_id=scan_id,
+            auth_role=auth_role,
+            discovery_method="dast",
+        )
+        _persist_findings(storage_repo, canonical_findings)
 
         generate_pdf_report(target_url, urls, forms, unique_findings, report_path,
                             scan_duration=scan_duration)
+        json_report_filename = f"scan_{scan_id}.json"
+        json_report_path = os.path.join(REPORTS_DIR, json_report_filename)
+        write_scan_json(
+            json_report_path,
+            scan_config=scan_config,
+            urls=urls,
+            forms=forms,
+            findings=canonical_findings,
+            legacy_findings=unique_findings,
+            metadata={
+                "scan_duration_seconds": scan_duration,
+                "deep_state_summary": {
+                    "mutations": deep_state_mutations,
+                    "wizard_steps": deep_state_wizard_steps,
+                    "revealed_hints": deep_state_revealed,
+                },
+                "oob_mapping_summary": dict(ssrf.mapping_stats),
+            },
+        )
 
         active_scans[scan_id] = {
             'status': 'completed',
@@ -340,6 +485,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             'websockets': websockets,
             'findings': unique_findings,
             'report_path': report_path,
+            'json_report_path': json_report_path,
             'total_vulnerabilities': len(unique_findings),
             'deep_state': deep_state,
             'deep_state_summary': {
@@ -351,6 +497,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             'oob_mapping': ssrf_network_map,
             'oob_mapping_summary': dict(ssrf.mapping_stats),
             'scan_type': 'DAST',
+            'canonical_findings': [finding.to_dict() for finding in canonical_findings],
         }
 
         emit_progress(scan_id, f"Scan complete! Found {len(unique_findings)} vulnerabilities", "success")
@@ -410,6 +557,18 @@ def scan_repo():
         """
         try:
             emit_progress(scan_id, f"Starting SAST scan: {repo_url}", "phase")
+            storage_repo = _storage_repo()
+            scan_config = ScanConfig(
+                scan_id=scan_id,
+                target_base_url=repo_url,
+                safety_mode="safe",
+                max_depth=0,
+                auth_profiles=[],
+                enabled_modules=["semgrep", "taint-analyzer", "secrets", "dependencies"],
+                output_dir=REPORTS_DIR,
+            )
+            if storage_repo is not None:
+                storage_repo.create_scan(scan_config)
 
             github_mgr = get_github_manager()
             if token:
@@ -672,6 +831,24 @@ def scan_repo():
             report_filename = f"sast_{scan_id}.pdf"
             report_path     = os.path.join(REPORTS_DIR, report_filename)
             _generate_sast_pdf(repo_url, findings, stack, report_path)
+            canonical_findings = findings_from_legacy(
+                findings,
+                target_url=repo_url,
+                scan_id=scan_id,
+                auth_role="source",
+                discovery_method="sast",
+            )
+            _persist_findings(storage_repo, canonical_findings)
+            json_report_path = os.path.join(REPORTS_DIR, f"sast_{scan_id}.json")
+            write_scan_json(
+                json_report_path,
+                scan_config=scan_config,
+                urls=[],
+                forms=[],
+                findings=canonical_findings,
+                legacy_findings=findings,
+                metadata={"tech_stack": stack, "summary": cats},
+            )
 
             github_mgr.cleanup()
 
@@ -682,9 +859,11 @@ def scan_repo():
                 "scan_type":             "SAST (Semgrep AST + Cross-File Taint + Secrets/Deps)",
                 "findings":              findings,
                 "report_path":           report_path,
+                "json_report_path":      json_report_path,
                 "total_vulnerabilities": len(findings),
                 "tech_stack":            stack,
                 "summary":               cats,
+                "canonical_findings":    [finding.to_dict() for finding in canonical_findings],
             }
 
             emit_progress(scan_id,
@@ -763,7 +942,9 @@ def get_scan_status(scan_id):
         'oob_mapping_summary':  scan.get('oob_mapping_summary', {}),
         'tech_stack':           scan.get('tech_stack', {}),
         'findings':             scan.get('findings', []),
+        'canonical_findings':   scan.get('canonical_findings', []),
         'report_path':          scan.get('report_path'),
+        'json_report_path':     scan.get('json_report_path'),
         'error':                scan.get('error'),
     })
 
@@ -780,6 +961,24 @@ def download_report(scan_id):
         return jsonify({'error': 'Report file not found'}), 404
     return send_file(report_path, as_attachment=True,
                      download_name=f'vulnerability_report_{scan_id}.pdf')
+
+
+@app.route('/api/download-json/<scan_id>', methods=['GET'])
+def download_json_report(scan_id):
+    if scan_id not in active_scans:
+        return jsonify({'error': 'Scan not found'}), 404
+    scan = active_scans[scan_id]
+    if scan.get('status') != 'completed':
+        return jsonify({'error': 'Scan not completed yet'}), 400
+    report_path = scan.get('json_report_path')
+    if not report_path or not os.path.exists(report_path):
+        return jsonify({'error': 'JSON report file not found'}), 404
+    return send_file(
+        report_path,
+        as_attachment=True,
+        download_name=f'wraith_scan_{scan_id}.json',
+        mimetype='application/json',
+    )
 
 
 @app.route('/api/mode', methods=['GET'])

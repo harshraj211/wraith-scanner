@@ -26,7 +26,8 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from scanner.core.models import RequestRecord, ResponseRecord
 
 try:
     import aiohttp
@@ -64,6 +65,11 @@ class AsyncHTTPSession:
         retries:        int = 3,
         headers:        Optional[Dict] = None,
         cookies:        Optional[Dict] = None,
+        storage_repo:   Any = None,
+        scan_id:        str = "",
+        traffic_source: str = "fuzzer",
+        auth_profile_id: str = "",
+        auth_role:      str = "anonymous",
     ):
         self._max_concurrent = max_concurrent
         self._timeout_val    = timeout
@@ -73,6 +79,11 @@ class AsyncHTTPSession:
         self._cookies        = cookies or {}
         self._session:   Optional[aiohttp.ClientSession] = None
         self._semaphore: Optional[asyncio.Semaphore]     = None
+        self._storage_repo   = storage_repo
+        self._scan_id        = scan_id
+        self._traffic_source = traffic_source
+        self._auth_profile_id = auth_profile_id
+        self._auth_role      = auth_role
 
     async def __aenter__(self):
         if not AIOHTTP_AVAILABLE:
@@ -112,10 +123,12 @@ class AsyncHTTPSession:
 
         max_attempts = retries if retries is not None else self._retries
         t = aiohttp.ClientTimeout(total=timeout) if timeout else None
+        request_record = self._build_request_record(method, url, kwargs)
 
         async with self._semaphore:
             for attempt in range(max_attempts):
                 try:
+                    start = time.perf_counter()
                     resp = await self._session.request(
                         method, url, timeout=t, **kwargs
                     )
@@ -125,6 +138,8 @@ class AsyncHTTPSession:
                         await asyncio.sleep(backoff)
                         continue
                     text = await resp.text(errors="replace")
+                    elapsed_ms = int((time.perf_counter() - start) * 1000)
+                    self._record_exchange(request_record, resp.status, dict(resp.headers), text, elapsed_ms)
                     # Politeness delay - prevents burst flooding
                     await asyncio.sleep(self.POLITENESS_DELAY)
                     return AsyncResponse(resp.status, text, dict(resp.headers))
@@ -136,6 +151,53 @@ class AsyncHTTPSession:
                     return None
             # All retries exhausted
             return None
+
+    def _build_request_record(self, method: str, url: str, kwargs: Dict[str, Any]) -> Optional[RequestRecord]:
+        if not self._storage_repo or not self._scan_id:
+            return None
+        try:
+            headers = dict(self._headers or {})
+            headers.update(dict(kwargs.get("headers") or {}))
+            body = kwargs.get("json")
+            if body is None:
+                body = kwargs.get("data") or ""
+            record_url = _url_with_params(url, kwargs.get("params"))
+            return RequestRecord.create(
+                scan_id=self._scan_id,
+                source=self._traffic_source,
+                method=method,
+                url=record_url,
+                headers=headers,
+                body=body,
+                auth_profile_id=self._auth_profile_id,
+                auth_role=self._auth_role,
+            )
+        except Exception:
+            return None
+
+    def _record_exchange(
+        self,
+        request_record: Optional[RequestRecord],
+        status_code: int,
+        headers: Dict[str, Any],
+        body: str,
+        elapsed_ms: int,
+    ) -> None:
+        if not self._storage_repo or request_record is None:
+            return
+        try:
+            self._storage_repo.save_request(request_record)
+            self._storage_repo.save_response(
+                ResponseRecord.create(
+                    request_id=request_record.request_id,
+                    status_code=status_code,
+                    headers=headers,
+                    body=body,
+                    response_time_ms=elapsed_ms,
+                )
+            )
+        except Exception:
+            pass
 
     # -- public convenience methods --
     async def get(self, url: str, params: Optional[Dict] = None,
@@ -187,10 +249,24 @@ class AsyncScanEngine:
     BATCH_SIZE    = 8    # scanner tasks per batch (prevents traffic bursts)
     BATCH_DELAY  = 0.3  # seconds between batches (target recovery time)
 
-    def __init__(self, max_concurrent: int = 20, timeout: int = 10,
-                 auth_session=None):
+    def __init__(
+        self,
+        max_concurrent: int = 20,
+        timeout: int = 10,
+        auth_session=None,
+        storage_repo: Any = None,
+        scan_id: str = "",
+        traffic_source: str = "fuzzer",
+        auth_profile_id: str = "",
+        auth_role: str = "anonymous",
+    ):
         self.max_concurrent = max_concurrent
         self.timeout        = timeout
+        self._storage_repo = storage_repo
+        self._scan_id = scan_id
+        self._traffic_source = traffic_source
+        self._auth_profile_id = auth_profile_id
+        self._auth_role = auth_role
         # Extract auth state from a requests.Session so async requests
         # carry the same cookies / headers as the authenticated sync session.
         self._auth_headers: Dict[str, str] = {}
@@ -295,6 +371,11 @@ class AsyncScanEngine:
             timeout=self.timeout,
             headers=merged_headers,
             cookies=self._auth_cookies,
+            storage_repo=self._storage_repo,
+            scan_id=self._scan_id,
+            traffic_source=self._traffic_source,
+            auth_profile_id=self._auth_profile_id,
+            auth_role=self._auth_role,
         ) as http:
             # Build task coroutines (not started yet)
             tasks     = []
@@ -379,6 +460,11 @@ class AsyncScanEngine:
             timeout=self.timeout,
             headers=merged_headers,
             cookies=self._auth_cookies,
+            storage_repo=self._storage_repo,
+            scan_id=self._scan_id,
+            traffic_source=self._traffic_source,
+            auth_profile_id=self._auth_profile_id,
+            auth_role=self._auth_role,
         ) as http:
             tasks     = []
             url_count = len(url_param_pairs)
@@ -466,6 +552,11 @@ class AsyncScanEngine:
             timeout=self.timeout,
             headers=merged_headers,
             cookies=self._auth_cookies,
+            storage_repo=self._storage_repo,
+            scan_id=self._scan_id,
+            traffic_source=self._traffic_source,
+            auth_profile_id=self._auth_profile_id,
+            auth_role=self._auth_role,
         ) as http:
             tasks      = []
             form_count = len(forms)
@@ -572,3 +663,19 @@ def _looks_like_path_object(url: str) -> bool:
         "customer", "member", "record", "doc", "document", "item",
     )
     return any(keyword in container for keyword in keywords)
+
+
+def _url_with_params(url: str, params: Any) -> str:
+    if not params:
+        return url
+    try:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        for key, value in dict(params).items():
+            if isinstance(value, (list, tuple)):
+                query[str(key)] = [str(item) for item in value]
+            else:
+                query[str(key)] = [str(value)]
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+    except Exception:
+        return url

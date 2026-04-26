@@ -2,12 +2,13 @@
 
 Async DAST and SAST scanner for modern web applications, SPAs, and GitHub repositories.
 
-Wraith now ships with four major engine upgrades:
+Wraith now ships with four major engine upgrades plus the first VA+Proof platform groundwork:
 
 - Intelligent payload mutation for noisy DAST responses like WAF block pages, `403`s, and `5xx` responses.
 - Cross-file taint analysis for SAST, layered on top of Semgrep and the existing secrets and dependency scanner.
 - Deep-state SPA exploration that mutates browser storage and walks multi-step flows before fuzzing.
 - Richer OOB profiling for blind SSRF-style callbacks with per-parameter correlation and egress hints.
+- Canonical scan schemas, stable finding IDs, redaction, JSON exports, and a durable SQLite request/response corpus.
 
 ## What It Scans
 
@@ -91,6 +92,7 @@ cd ..
 
 - `semgrep`: recommended for the full SAST experience. Without it, Wraith still runs taint, secret, and dependency analysis.
 - `OPENAI_API_KEY`: enables optional LLM-assisted payload mutation in the response-intelligence layer. Without it, Wraith uses the built-in heuristic mutator.
+- `WRAITH_DB_PATH`: optional path for the local SQLite corpus database. Defaults to `reports/wraith.sqlite3`.
 
 ## Run
 
@@ -117,6 +119,14 @@ The terminal UI opens on `http://127.0.0.1:3000`.
 python main.py --url http://127.0.0.1:5000 --output reports/local.pdf
 ```
 
+Canonical JSON output is also supported:
+
+```bash
+python main.py --url http://127.0.0.1:5000 --output reports/local.json
+```
+
+The JSON export uses schema `wraith.scan.v1` and includes the scan config, coverage, canonical findings, stable finding IDs, CVSS/CWE/OWASP fields, proof status, and redacted evidence.
+
 ## Terminal Commands
 
 - `scan <url>`
@@ -129,6 +139,36 @@ python main.py --url http://127.0.0.1:5000 --output reports/local.pdf
 - `download <scan-id>`
 - `help`
 - `clear`
+
+Backend API scans write `reports/scan_<scan-id>.json` beside the PDF. Download it with:
+
+```text
+GET http://127.0.0.1:5001/api/download-json/<scan-id>
+```
+
+## Canonical Models and Corpus
+
+Phase 0/1 introduces stable models under `scanner.core.models`:
+
+- `Finding`
+- `RequestRecord`
+- `ResponseRecord`
+- `EvidenceArtifact`
+- `ScanConfig`
+- `AuthProfile`
+- `ProofTask`
+
+Legacy scanner dictionaries are converted into canonical `Finding` objects with deterministic IDs based on target, normalized endpoint, method, parameter, vuln type, auth role, and evidence type. This lets repeated scans deduplicate findings across changing object IDs such as `/users/123` and `/users/456`.
+
+The local corpus is stored with SQLite through `scanner.storage.repository` and defaults to:
+
+```text
+reports/wraith.sqlite3
+```
+
+The corpus currently persists scan configs, crawler-discovered requests/forms, async DAST request/response exchanges, canonical findings, evidence artifacts, auth profiles, OOB events, and proof task records.
+
+Secrets are redacted before storage by default, including Authorization headers, cookies, bearer tokens, JWTs, API keys, session IDs, password-like fields, and token-like URL/body values.
 
 ## New Engine Details
 
@@ -207,13 +247,16 @@ scan http://127.0.0.1:5000
 ## Tests
 
 ```bash
-python -m unittest
+python -m unittest discover -s tests
 ```
 
 Focused upgrade regression tests live in:
 
 - `tests/test_advanced_engine_upgrades.py`
+- `tests/test_canonical_storage.py`
 - `tests/test_startup_smoke.py`
+
+If Semgrep is installed but its `pysemgrep` entrypoint is broken, the Semgrep fixture tests may fail before Wraith code runs. Reinstalling Semgrep normally fixes that environment issue.
 
 ## Notes
 

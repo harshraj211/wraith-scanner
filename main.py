@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import sys
+import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 import requests # Added for cookie handling
@@ -50,6 +52,9 @@ from scanner.modules.graphql_scanner import GraphQLScanner
 from scanner.modules.race_scanner import RaceConditionScanner
 from scanner.modules.websocket_scanner import WebSocketScanner
 from scanner.reporting.pdf_generator import generate_pdf_report
+from scanner.reporting.json_export import build_scan_json
+from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.storage.repository import StorageRepository
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
 from scanner.utils.auth_manager import get_auth_manager # <--- Added Import
@@ -173,15 +178,21 @@ def generate_console_report(target: str, urls: List[str], forms: List[Dict[str, 
 
 
 def generate_json_report(target: str, urls: List[str], forms: List[Dict[str, Any]], findings: List[Dict[str, Any]], flags: Optional[List[Dict[str, str]]] = None) -> str:
-    out = {
-        "target": target,
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-        "urls": urls,
-        "forms": forms,
-        "vulnerabilities": [f for f in findings if f.get('type') != 'flag'],
-    }
+    scan_config = ScanConfig(scan_id="cli", target_base_url=target, output_dir="reports")
+    canonical = findings_from_legacy(
+        [f for f in findings if f.get('type') != 'flag'],
+        target_url=target,
+        scan_id=scan_config.scan_id,
+    )
+    out = build_scan_json(
+        scan_config=scan_config,
+        urls=urls,
+        forms=forms,
+        findings=canonical,
+        legacy_findings=[f for f in findings if f.get('type') != 'flag'],
+    )
     if flags:
-        out["flags"] = flags
+        out["metadata"]["flags"] = flags
     return json.dumps(out, indent=2)
 
 
@@ -229,8 +240,53 @@ def save_output(path: str, content: str) -> None:
         fh.write(content)
 
 
+def _safe_storage_repo():
+    try:
+        return StorageRepository()
+    except Exception as exc:
+        print(Fore.YELLOW + f"[!] Corpus storage disabled: {exc}" + Style.RESET_ALL)
+        return None
+
+
+def _persist_discovered_requests(repo, scan_id: str, urls: List[str], forms: List[Dict[str, Any]]) -> None:
+    if repo is None:
+        return
+    for url in urls:
+        try:
+            repo.save_request(
+                RequestRecord.create(
+                    scan_id=scan_id,
+                    source="crawler",
+                    method="GET",
+                    url=url,
+                )
+            )
+        except Exception:
+            pass
+    for form in forms:
+        try:
+            body = {
+                inp.get("name", ""): inp.get("value", "")
+                for inp in form.get("inputs", [])
+                if inp.get("name")
+            }
+            repo.save_request(
+                RequestRecord.create(
+                    scan_id=scan_id,
+                    source="crawler",
+                    method=form.get("method", "GET"),
+                    url=form.get("action", ""),
+                    headers=form.get("extra_headers", {}),
+                    body=body,
+                )
+            )
+        except Exception:
+            pass
+
+
 def main() -> int:
     args = parse_args()
+    scan_id = str(uuid.uuid4())[:8]
 
     # Initialize managers
     mode_mgr = get_mode_manager()
@@ -267,6 +323,25 @@ def main() -> int:
 
     if args.verbose:
         print(Fore.GREEN + "Starting scan..." + Style.RESET_ALL)
+
+    output_dir = os.path.dirname(args.output) if args.output else "reports"
+    if not output_dir:
+        output_dir = "reports"
+    scan_config = ScanConfig(
+        scan_id=scan_id,
+        target_base_url=args.url,
+        safety_mode="safe",
+        max_depth=config['max_depth'],
+        enabled_modules=[
+            "sqli", "xss", "idor", "open-redirect", "cmdi", "path-traversal",
+            "csrf", "crypto", "ssrf", "xxe", "ssti", "headers", "components",
+            "graphql", "race", "websocket",
+        ],
+        output_dir=output_dir,
+    )
+    storage_repo = _safe_storage_repo()
+    if storage_repo is not None:
+        storage_repo.create_scan(scan_config)
 
     banner()
     
@@ -316,6 +391,7 @@ def main() -> int:
     urls = results.get("urls", [])
     forms = results.get("forms", [])
     websockets = results.get("websockets", [])
+    _persist_discovered_requests(storage_repo, scan_id, urls, forms)
 
     print(Fore.MAGENTA + "SCANNING" + Style.RESET_ALL)
     all_findings: List[Dict[str, Any]] = list(live_scanner.findings)
@@ -463,6 +539,17 @@ def main() -> int:
     # Deduplicate and sort
     unique = dedupe_findings(all_findings)
     unique.sort(key=severity_sort_key)
+    canonical_findings = findings_from_legacy(
+        [finding for finding in unique if finding.get("type") != "flag"],
+        target_url=args.url,
+        scan_id=scan_id,
+    )
+    if storage_repo is not None:
+        for finding in canonical_findings:
+            try:
+                storage_repo.save_finding(finding)
+            except Exception:
+                pass
 
     # Extract flags
     flags_found = None
@@ -486,7 +573,15 @@ def main() -> int:
                 generate_pdf_report(args.url, urls, forms, vuln_only, out)
                 print(Fore.GREEN + f"Saved PDF report to {out}" + Style.RESET_ALL)
             elif out.endswith(".json"):
-                content = generate_json_report(args.url, urls, forms, unique, flags_found)
+                payload = build_scan_json(
+                    scan_config=scan_config,
+                    urls=urls,
+                    forms=forms,
+                    findings=canonical_findings,
+                    legacy_findings=[f for f in unique if f.get('type') != 'flag'],
+                    metadata={"flags": flags_found or [], "websockets": websockets},
+                )
+                content = json.dumps(payload, indent=2)
                 save_output(out, content)
                 print(Fore.GREEN + f"Saved report to {out}" + Style.RESET_ALL)
             elif out.endswith(".html"):
