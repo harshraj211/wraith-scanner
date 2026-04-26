@@ -466,6 +466,71 @@ class EvidenceArtifact:
 
 
 @dataclass
+class RequestCandidate:
+    method: str
+    url: str
+    headers: Dict[str, Any] = field(default_factory=dict)
+    body: Any = ""
+    parameter_metadata: List[Dict[str, Any]] = field(default_factory=list)
+    source: str = "import"
+    auth_requirements: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    content_type: str = ""
+    body_format: str = ""
+    name: str = ""
+    response_metadata: Dict[str, Any] = field(default_factory=dict)
+    candidate_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.method = str(self.method or "GET").upper()
+        self.url = str(self.url or "")
+        self.headers = dict(self.headers or {})
+        self.parameter_metadata = list(self.parameter_metadata or [])
+        self.source = str(self.source or "import")
+        self.auth_requirements = [str(item) for item in (self.auth_requirements or []) if item]
+        self.tags = [str(item) for item in (self.tags or []) if item]
+        self.content_type = self.content_type or _header_value(self.headers, "content-type")
+        if not self.body_format:
+            self.body_format = infer_body_format(self.body, self.content_type)
+        self.candidate_id = self.candidate_id or "cand_" + stable_hash(
+            self.method,
+            canonical_url(self.url),
+            self.headers,
+            self.body,
+            self.parameter_metadata,
+            self.source,
+            self.tags,
+            length=24,
+        )
+
+    def to_request_record(
+        self,
+        *,
+        scan_id: str,
+        auth_profile_id: str = "",
+        auth_role: str = "anonymous",
+    ) -> "RequestRecord":
+        return RequestRecord.create(
+            scan_id=scan_id,
+            source="import",
+            method=self.method,
+            url=self.url,
+            headers=self.headers,
+            body=self.body,
+            auth_profile_id=auth_profile_id,
+            auth_role=auth_role,
+        )
+
+    def to_dict(self, *, redact_output: bool = True) -> Dict[str, Any]:
+        data = asdict(self)
+        if redact_output:
+            data["url"] = redact_text(data.get("url") or "")
+            data["headers"] = redact_headers(data.get("headers") or {})
+            data["body"] = redact(data.get("body"))
+        return data
+
+
+@dataclass
 class AuthProfile:
     profile_id: str
     name: str
@@ -668,3 +733,32 @@ def dom_hash(body: str) -> str:
     if not tags:
         return ""
     return stable_hash([tag.lower() for tag in tags[:500]], length=16)
+
+
+def infer_body_format(body: Any, content_type: str = "") -> str:
+    content_type = (content_type or "").lower()
+    if "graphql" in content_type:
+        return "graphql"
+    if "json" in content_type:
+        return "json"
+    if "xml" in content_type:
+        return "xml"
+    if "x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        return "form"
+    if isinstance(body, (dict, list)):
+        return "json"
+    if isinstance(body, str):
+        stripped = body.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return "json"
+        if stripped.startswith("<"):
+            return "xml"
+    return "raw" if body not in ("", None) else ""
+
+
+def _header_value(headers: Dict[str, Any], name: str) -> str:
+    wanted = name.lower()
+    for key, value in (headers or {}).items():
+        if str(key).lower() == wanted:
+            return str(value or "")
+    return ""

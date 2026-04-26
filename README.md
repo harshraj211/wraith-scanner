@@ -48,6 +48,7 @@ Flask API Server  --->  PDF Reporting
         |      |
         |      +--> Deep-state storage mutation
         |      +--> SPA/API/WebSocket discovery
+        |      +--> OpenAPI/Postman/HAR/GraphQL imports
         |
         +--> AsyncScanEngine
         |      |
@@ -126,6 +127,39 @@ python main.py --url http://127.0.0.1:5000 --output reports/local.json
 ```
 
 The JSON export uses schema `wraith.scan.v1` and includes the scan config, coverage, canonical findings, stable finding IDs, CVSS/CWE/OWASP fields, proof status, and redacted evidence.
+
+### API Imports
+
+Wraith can seed scans from API descriptions and captured traffic. Imported requests are normalized into `RequestCandidate` objects, saved to the SQLite corpus with source `import`, and merged into the existing URL/form scan pipeline.
+
+```bash
+python main.py --url https://app.example.test --import-openapi openapi.json --output reports/api.json
+python main.py --url https://app.example.test --import-postman collection.json --import-har traffic.har
+python main.py --url https://app.example.test --import-graphql schema.json
+```
+
+Supported importer inputs:
+
+- OpenAPI 3.x / Swagger 2 JSON. YAML works when PyYAML is installed.
+- Postman collection v2.1 JSON.
+- HAR files exported from browser/devtools traffic.
+- GraphQL introspection JSON or SDL files.
+
+The Flask API accepts the same inputs under `imports`:
+
+```json
+{
+  "url": "https://app.example.test",
+  "imports": {
+    "openapi": ["openapi.json"],
+    "postman": ["collection.json"],
+    "har": ["traffic.har"],
+    "graphql": [{"path": "schema.json", "endpoint_url": "https://app.example.test/graphql"}]
+  }
+}
+```
+
+Imported candidates appear in JSON report metadata under `api_imports`. Sensitive headers from HAR traffic are redacted before corpus storage.
 
 ### Auth Profiles
 

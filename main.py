@@ -54,6 +54,12 @@ from scanner.modules.websocket_scanner import WebSocketScanner
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import build_scan_json
 from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.importers.common import (
+    candidates_to_scan_targets,
+    load_candidates_from_imports,
+    merge_scan_targets,
+    save_candidates_to_corpus,
+)
 from scanner.storage.repository import StorageRepository
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
@@ -86,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--auth-health-text", help="Text expected in the auth health-check response")
     p.add_argument("--record-login", help="Open a browser at this login URL and save Playwright storage state")
     p.add_argument("--record-login-output", help="Output path for --record-login storage state JSON")
+    p.add_argument("--import-openapi", action="append", default=[], help="OpenAPI/Swagger JSON or YAML path/URL; can be repeated")
+    p.add_argument("--import-postman", action="append", default=[], help="Postman collection v2.1 JSON path; can be repeated")
+    p.add_argument("--import-har", action="append", default=[], help="HAR file path; can be repeated")
+    p.add_argument("--import-graphql", action="append", default=[], help="GraphQL introspection JSON or SDL path/URL; can be repeated")
     p.add_argument("--depth", type=int, help="Crawl depth (overrides mode default)")
     p.add_argument("--timeout", type=int, help="Request timeout seconds (overrides mode default)")
     p.add_argument("--workflow", help="Path to a JSON workflow macro file")
@@ -487,11 +497,44 @@ def main() -> int:
     urls = results.get("urls", [])
     forms = results.get("forms", [])
     websockets = results.get("websockets", [])
-    _persist_discovered_requests(storage_repo, scan_id, urls, forms)
+    crawled_urls = list(urls)
+    crawled_forms = list(forms)
+    errors: List[str] = []
+    import_summary: Dict[str, int] = {}
+    import_config = {
+        "openapi": args.import_openapi,
+        "postman": args.import_postman,
+        "har": args.import_har,
+        "graphql": args.import_graphql,
+    }
+    try:
+        imported_candidates, import_summary = load_candidates_from_imports(import_config, base_url=args.url)
+        if imported_candidates:
+            imported_urls, imported_forms = candidates_to_scan_targets(imported_candidates)
+            save_candidates_to_corpus(
+                storage_repo,
+                scan_id,
+                imported_candidates,
+                auth_profile_id=auth_profile.profile_id,
+                auth_role=auth_profile.role,
+            )
+            for form in imported_forms:
+                live_scanner.handle_discovery("form", form)
+            urls, forms = merge_scan_targets(urls, forms, imported_urls, imported_forms)
+            if args.verbose:
+                print(
+                    Fore.GREEN
+                    + f"Imported {len(imported_candidates)} API request candidates: {import_summary}"
+                    + Style.RESET_ALL
+                )
+    except Exception as exc:
+        errors.append(f"API import failed: {exc}")
+        if args.verbose:
+            print(Fore.YELLOW + f"[!] API import failed: {exc}" + Style.RESET_ALL)
+    _persist_discovered_requests(storage_repo, scan_id, crawled_urls, crawled_forms)
 
     print(Fore.MAGENTA + "SCANNING" + Style.RESET_ALL)
     all_findings: List[Dict[str, Any]] = list(live_scanner.findings)
-    errors: List[str] = []
 
     # One-time base URL checks
     for finding in header_scan.scan_url(args.url):
@@ -675,7 +718,12 @@ def main() -> int:
                     forms=forms,
                     findings=canonical_findings,
                     legacy_findings=[f for f in unique if f.get('type') != 'flag'],
-                    metadata={"flags": flags_found or [], "websockets": websockets, "auth_health": auth_health},
+                    metadata={
+                        "flags": flags_found or [],
+                        "websockets": websockets,
+                        "auth_health": auth_health,
+                        "api_imports": import_summary,
+                    },
                 )
                 content = json.dumps(payload, indent=2)
                 save_output(out, content)

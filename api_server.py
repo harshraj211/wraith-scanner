@@ -31,6 +31,12 @@ from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
 from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.importers.common import (
+    candidates_to_scan_targets,
+    load_candidates_from_imports,
+    merge_scan_targets,
+    save_candidates_to_corpus,
+)
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
 from scanner.modules.crypto_scanner import CryptoScanner
@@ -200,7 +206,7 @@ def deduplicate_findings(findings):
     return unique
 
 
-def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='scan'):
+def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='scan', import_config=None):
     """Main scanning function with WordPress, auth, and mode support."""
     try:
         emit_progress(scan_id, f"Starting scan of {target_url}", "info")
@@ -212,6 +218,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         )
         auth_role = auth_profile.role or auth_role
         auth_health = {"status": "skipped", "reason": "no health check configured"}
+        import_summary = {}
 
         mode_mgr = get_mode_manager()
         mode_mgr.set_mode(scan_mode)
@@ -388,6 +395,33 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
         forms = results.get("forms", [])
         websockets = results.get("websockets", [])
         deep_state = results.get("deep_state", [])
+        crawled_urls = list(urls)
+        crawled_forms = list(forms)
+
+        try:
+            imported_candidates, import_summary = load_candidates_from_imports(
+                import_config or {},
+                base_url=target_url,
+            )
+            if imported_candidates:
+                imported_urls, imported_forms = candidates_to_scan_targets(imported_candidates)
+                save_candidates_to_corpus(
+                    storage_repo,
+                    scan_id,
+                    imported_candidates,
+                    auth_profile_id=auth_profile.profile_id,
+                    auth_role=auth_role,
+                )
+                for form in imported_forms:
+                    live_scanner.handle_discovery("form", form)
+                urls, forms = merge_scan_targets(urls, forms, imported_urls, imported_forms)
+                emit_progress(
+                    scan_id,
+                    f"Imported {len(imported_candidates)} API request candidates: {import_summary}",
+                    "success",
+                )
+        except Exception as exc:
+            emit_progress(scan_id, f"API import failed: {exc}", "warning")
 
         deep_state_mutations = sum(len(item.get("mutations", [])) for item in deep_state)
         deep_state_revealed = sum((item.get("revealed", {}) or {}).get("count", 0) for item in deep_state)
@@ -405,7 +439,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                 f"Deep-state mutator flipped {deep_state_mutations} client-side flags, stepped through {deep_state_wizard_steps} wizard actions, and exposed {deep_state_revealed} privileged UI hints",
                 "info",
             )
-        _persist_discovered_requests(storage_repo, scan_id, urls, forms, auth_role)
+        _persist_discovered_requests(storage_repo, scan_id, crawled_urls, crawled_forms, auth_role)
 
         # Run passive checks in parallel (headers, components, crypto)
         all_findings = wp_findings.copy()
@@ -511,6 +545,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                 },
                 "oob_mapping_summary": dict(ssrf.mapping_stats),
                 "auth_health": auth_health,
+                "api_imports": import_summary,
             },
         )
 
@@ -533,6 +568,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             },
             'intelligent_mutation': xss_intel,
             'oob_mapping': ssrf_network_map,
+            'api_imports': import_summary,
             'oob_mapping_summary': dict(ssrf.mapping_stats),
             'auth_health': auth_health,
             'scan_type': 'DAST',
@@ -555,6 +591,7 @@ def start_scan():
     depth = data.get('depth')
     timeout = data.get('timeout')
     auth_config = data.get('auth')
+    import_config = data.get('imports') or data.get('api_imports') or {}
     scan_mode = 'scan'
 
     if not target_url:
@@ -563,7 +600,10 @@ def start_scan():
     scan_id = str(uuid.uuid4())[:8]
     active_scans[scan_id] = {'status': 'running', 'target': target_url, 'mode': 'dast', 'scan_type': 'DAST'}
 
-    thread = threading.Thread(target=run_scan, args=(scan_id, target_url, depth, timeout, auth_config, scan_mode))
+    thread = threading.Thread(
+        target=run_scan,
+        args=(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config),
+    )
     thread.daemon = True
     thread.start()
 
