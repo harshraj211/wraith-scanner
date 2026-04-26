@@ -21,9 +21,11 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qs
 
 import requests
+from scanner.core.models import AuthProfile
 from scanner.core.deep_state import DeepStateMutator
 from scanner.core.workflows import execute_workflow, load_workflows, workflow_matches
 from scanner.utils.auth_manager import apply_browser_storage_auth
+from scanner.utils.auth_profiles import apply_auth_profile_to_session, playwright_context_kwargs
 from scanner.utils.request_metadata import flatten_json_fields
 
 requests.packages.urllib3.disable_warnings()
@@ -61,13 +63,25 @@ class WebCrawler:
     def __init__(self, base_url: str, max_depth: int = 3, timeout: int = 10,
                  session: Optional[requests.Session] = None,
                  workflows: Optional[Any] = None,
-                 discovery_callback: Optional[Callable[[str, Any], None]] = None):
+                 discovery_callback: Optional[Callable[[str, Any], None]] = None,
+                 auth_profile: Optional[AuthProfile] = None,
+                 storage_state_path: Optional[str] = None):
         self.base_url  = base_url.rstrip("/")
         self.max_depth = max_depth
         self.timeout   = timeout
         self.domain    = urlparse(base_url).netloc
         self.workflows = load_workflows(workflows)
         self.discovery_callback = discovery_callback
+        self.auth_profile = auth_profile
+        if storage_state_path and self.auth_profile is None:
+            self.auth_profile = AuthProfile(
+                profile_id="",
+                name="storage-state",
+                base_url=base_url,
+                role="authenticated",
+                auth_type="playwright_storage",
+                storage_state_path=storage_state_path,
+            )
         self._workflow_traces: List[Dict[str, Any]] = []
         self._deep_state_mutator = DeepStateMutator()
 
@@ -75,6 +89,8 @@ class WebCrawler:
         self.session.verify = False
         if "User-Agent" not in self.session.headers:
             self.session.headers.update({"User-Agent": "Mozilla/5.0 (VulnScanner)"})
+        if self.auth_profile is not None:
+            apply_auth_profile_to_session(self.auth_profile, self.session)
 
     def crawl(self, discovery_callback: Optional[Callable[[str, Any], None]] = None) -> Dict[str, Any]:
         """
@@ -125,9 +141,13 @@ class WebCrawler:
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
+            context_options = {
+                "ignore_https_errors": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            context_options.update(playwright_context_kwargs(self.auth_profile))
             context = await browser.new_context(
-                ignore_https_errors=True,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                **context_options,
             )
 
             await self._sync_cookies_async(context)

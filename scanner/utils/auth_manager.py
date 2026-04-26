@@ -288,6 +288,24 @@ class AuthManager:
         """Get the authenticated session."""
         return self.session
 
+    def apply_auth_profile(self, profile) -> Any:
+        """Apply a canonical AuthProfile to the shared requests session."""
+        from scanner.utils.auth_profiles import apply_auth_profile_to_session
+
+        result = apply_auth_profile_to_session(profile, self.session)
+        if result.applied:
+            self.is_authenticated = True
+            self.auth_type = profile.auth_type
+            self.credentials = {"profile_id": profile.profile_id, "role": profile.role}
+            print(f"[+] Auth profile applied: {profile.name} ({profile.role})")
+        return result
+
+    def check_session_health(self, profile, timeout: int = 10) -> Any:
+        """Run the configured session health check for an AuthProfile."""
+        from scanner.utils.auth_profiles import check_session
+
+        return check_session(profile, session=self.session, timeout=timeout)
+
     def ingest_browser_storage(self, storage: Dict[str, Dict[str, str]]) -> bool:
         """Promote auth artifacts from browser storage into the shared HTTP session."""
         if not apply_browser_storage_auth(self.session, storage):

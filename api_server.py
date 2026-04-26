@@ -32,6 +32,7 @@ from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
 from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
 from scanner.storage.repository import StorageRepository
+from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
 from scanner.modules.crypto_scanner import CryptoScanner
 from scanner.modules.ssrf_scanner import SSRFScanner
 from scanner.modules.xxe_scanner import XXEScanner
@@ -101,9 +102,9 @@ def _storage_repo():
         return None
 
 
-def _scan_config(scan_id, target_url, depth, auth_config, enabled_modules):
-    auth_profiles = []
-    if auth_config:
+def _scan_config(scan_id, target_url, depth, auth_config, enabled_modules, auth_profile=None):
+    auth_profiles = [auth_profile.to_dict() if hasattr(auth_profile, "to_dict") else auth_profile] if auth_profile else []
+    if not auth_profiles and auth_config:
         auth_profiles.append({
             "profile_id": auth_config.get("profile_id", ""),
             "name": auth_config.get("name", "api-auth"),
@@ -204,6 +205,13 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
     try:
         emit_progress(scan_id, f"Starting scan of {target_url}", "info")
         auth_role = _auth_role(auth_config)
+        auth_profile = build_auth_profile_from_config(
+            auth_config,
+            base_url=target_url,
+            default_name="api-auth",
+        )
+        auth_role = auth_profile.role or auth_role
+        auth_health = {"status": "skipped", "reason": "no health check configured"}
 
         mode_mgr = get_mode_manager()
         mode_mgr.set_mode(scan_mode)
@@ -216,13 +224,24 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
 
         emit_progress(scan_id, f"Mode: {scan_mode.upper()} | Depth: {depth} | Timeout: {timeout}s", "info")
         storage_repo = _storage_repo()
-        scan_config = _scan_config(scan_id, target_url, depth, auth_config, DAST_MODULES)
+        scan_config = _scan_config(scan_id, target_url, depth, auth_config, DAST_MODULES, auth_profile)
         if storage_repo is not None:
             storage_repo.create_scan(scan_config)
+            storage_repo.save_auth_profile(auth_profile)
 
         auth_manager = get_auth_manager()
         auth_manager.logout()
         authenticated_session = None
+        profile_result = auth_manager.apply_auth_profile(auth_profile)
+        if profile_result.applied:
+            authenticated_session = auth_manager.get_session()
+            emit_progress(
+                scan_id,
+                f"Auth profile applied: {auth_profile.name} ({auth_profile.role})",
+                "success",
+            )
+        for profile_error in profile_result.errors:
+            emit_progress(scan_id, f"Auth profile warning: {profile_error}", "warning")
 
         if auth_config or mode_config['auth']:
             if auth_config:
@@ -305,6 +324,22 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                     authenticated_session = auth_manager.get_session()
                     emit_progress(scan_id, "Custom auth cookies configured", "success")
 
+        if auth_profile.session_health_check:
+            auth_health_result = check_session(
+                auth_profile,
+                session=auth_manager.get_session(),
+                timeout=timeout,
+            )
+            auth_health = auth_health_result.to_dict()
+            if auth_health_result.healthy:
+                emit_progress(scan_id, f"Auth health check passed for role {auth_profile.role}", "success")
+            else:
+                emit_progress(
+                    scan_id,
+                    f"Auth health check {auth_health_result.status}: {auth_health_result.reason}",
+                    "warning",
+                )
+
         emit_progress(scan_id, "Checking for WordPress/CMS...", "phase")
         wp_scanner = WordPressScanner(timeout=timeout)
         wp_findings = wp_scanner.scan_url(target_url)
@@ -346,6 +381,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             session=authenticated_session,
             workflows=workflows,
             discovery_callback=live_scanner.handle_discovery,
+            auth_profile=auth_profile,
         )
         results = crawler.crawl()
         urls = results.get("urls", [])
@@ -394,6 +430,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             storage_repo=storage_repo,
             scan_id=scan_id,
             traffic_source="fuzzer",
+            auth_profile_id=auth_profile.profile_id,
             auth_role=auth_role,
         )
         url_param_pairs = build_url_param_pairs(urls)
@@ -473,6 +510,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
                     "revealed_hints": deep_state_revealed,
                 },
                 "oob_mapping_summary": dict(ssrf.mapping_stats),
+                "auth_health": auth_health,
             },
         )
 
@@ -496,6 +534,7 @@ def run_scan(scan_id, target_url, depth, timeout, auth_config=None, scan_mode='s
             'intelligent_mutation': xss_intel,
             'oob_mapping': ssrf_network_map,
             'oob_mapping_summary': dict(ssrf.mapping_stats),
+            'auth_health': auth_health,
             'scan_type': 'DAST',
             'canonical_findings': [finding.to_dict() for finding in canonical_findings],
         }
@@ -940,6 +979,7 @@ def get_scan_status(scan_id):
         'deep_state_summary':   scan.get('deep_state_summary', {}),
         'intelligent_mutation': scan.get('intelligent_mutation', {}),
         'oob_mapping_summary':  scan.get('oob_mapping_summary', {}),
+        'auth_health':          scan.get('auth_health', {}),
         'tech_stack':           scan.get('tech_stack', {}),
         'findings':             scan.get('findings', []),
         'canonical_findings':   scan.get('canonical_findings', []),

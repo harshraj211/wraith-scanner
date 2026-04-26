@@ -58,6 +58,11 @@ from scanner.storage.repository import StorageRepository
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.modules.flag_hunter import FlagHunter
 from scanner.utils.auth_manager import get_auth_manager # <--- Added Import
+from scanner.utils.auth_profiles import (
+    build_auth_profile_from_config,
+    check_session,
+    record_playwright_login_state,
+)
 
 
 SEVERITY_ORDER = {"sqli": 0, "xss": 1, "idor": 2, "open-redirect": 3}
@@ -72,6 +77,15 @@ def parse_args() -> argparse.Namespace:
                    default='scan', help='Scanning mode (default: scan)')
     p.add_argument("--username", help="Username for authenticated modes")
     p.add_argument("--password", help="Password for authenticated modes")
+    p.add_argument("--bearer-token", help="Bearer token for API scans")
+    p.add_argument("--auth-header", action="append", default=[], help="Static auth header as Name=Value; can be repeated")
+    p.add_argument("--auth-cookie", action="append", default=[], help="Static auth cookie as Name=Value; can be repeated")
+    p.add_argument("--storage-state", help="Playwright storage_state JSON to reuse for auth")
+    p.add_argument("--auth-role", default="anonymous", help="Auth role label for corpus/reporting")
+    p.add_argument("--auth-health-url", help="URL used to check whether the auth profile is healthy")
+    p.add_argument("--auth-health-text", help="Text expected in the auth health-check response")
+    p.add_argument("--record-login", help="Open a browser at this login URL and save Playwright storage state")
+    p.add_argument("--record-login-output", help="Output path for --record-login storage state JSON")
     p.add_argument("--depth", type=int, help="Crawl depth (overrides mode default)")
     p.add_argument("--timeout", type=int, help="Request timeout seconds (overrides mode default)")
     p.add_argument("--workflow", help="Path to a JSON workflow macro file")
@@ -240,6 +254,54 @@ def save_output(path: str, content: str) -> None:
         fh.write(content)
 
 
+def _parse_pairs(items: List[str]) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if key:
+            parsed[key] = value
+    return parsed
+
+
+def _auth_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+    headers = _parse_pairs(args.auth_header)
+    cookies = _parse_pairs(args.auth_cookie)
+    health_check = {}
+    if args.auth_health_url:
+        health_check["health_check_url"] = args.auth_health_url
+    if args.auth_health_text:
+        health_check["expected_text"] = args.auth_health_text
+
+    if args.storage_state:
+        auth_type = "playwright_storage"
+    elif args.bearer_token:
+        auth_type = "bearer"
+    elif headers:
+        auth_type = "header"
+    elif cookies:
+        auth_type = "cookie"
+    elif args.username and args.password:
+        auth_type = "basic"
+    else:
+        auth_type = "anonymous"
+    role = args.auth_role or "anonymous"
+    if role == "anonymous" and auth_type != "anonymous":
+        role = "authenticated"
+
+    return {
+        "type": auth_type,
+        "role": role,
+        "token": args.bearer_token,
+        "headers": headers,
+        "cookies": cookies,
+        "storage_state_path": args.storage_state,
+        "session_health_check": health_check,
+    }
+
+
 def _safe_storage_repo():
     try:
         return StorageRepository()
@@ -288,6 +350,20 @@ def main() -> int:
     args = parse_args()
     scan_id = str(uuid.uuid4())[:8]
 
+    if args.record_login:
+        output_path = args.record_login_output or os.path.join(
+            "reports",
+            f"auth_{args.auth_role or 'authenticated'}_storage_state.json",
+        )
+        profile = record_playwright_login_state(
+            login_url=args.record_login,
+            output_path=output_path,
+            base_url=args.url,
+            role=args.auth_role or "authenticated",
+        )
+        args.storage_state = profile.storage_state_path
+        print(Fore.GREEN + f"Saved Playwright storage state to {profile.storage_state_path}" + Style.RESET_ALL)
+
     # Initialize managers
     mode_mgr = get_mode_manager()
     auth_mgr = get_auth_manager() # <--- Initialize AuthManager
@@ -302,6 +378,15 @@ def main() -> int:
     # Get the single shared session
     session = auth_mgr.get_session()
     session.headers.update({"User-Agent": "vuln-scanner/1.0"})
+    auth_config = _auth_config_from_args(args)
+    auth_profile = build_auth_profile_from_config(
+        auth_config,
+        base_url=args.url,
+        default_name="cli-auth",
+    )
+    profile_result = auth_mgr.apply_auth_profile(auth_profile)
+    if args.verbose and profile_result.applied:
+        print(Fore.GREEN + f"Auth profile applied: {auth_profile.name} ({auth_profile.role})" + Style.RESET_ALL)
 
     # Set credentials if provided
     if args.username and args.password:
@@ -332,6 +417,7 @@ def main() -> int:
         target_base_url=args.url,
         safety_mode="safe",
         max_depth=config['max_depth'],
+        auth_profiles=[auth_profile.to_dict()],
         enabled_modules=[
             "sqli", "xss", "idor", "open-redirect", "cmdi", "path-traversal",
             "csrf", "crypto", "ssrf", "xxe", "ssti", "headers", "components",
@@ -342,6 +428,14 @@ def main() -> int:
     storage_repo = _safe_storage_repo()
     if storage_repo is not None:
         storage_repo.create_scan(scan_config)
+        storage_repo.save_auth_profile(auth_profile)
+    auth_health = {"status": "skipped", "reason": "no health check configured"}
+    if auth_profile.session_health_check:
+        auth_health_result = check_session(auth_profile, session=auth_mgr.get_session(), timeout=config["timeout"])
+        auth_health = auth_health_result.to_dict()
+        if args.verbose:
+            color = Fore.GREEN if auth_health_result.healthy else Fore.YELLOW
+            print(color + f"Auth health: {auth_health_result.status} ({auth_health_result.reason})" + Style.RESET_ALL)
 
     banner()
     
@@ -349,6 +443,7 @@ def main() -> int:
     print(f"    Target: {args.url}")
     print(f"    Exploit: {'YES' if config['exploit'] else 'NO'}")
     print(f"    Auth: {'YES' if config['auth'] else 'NO'}")
+    print(f"    Auth Role: {auth_profile.role}")
     print(f"    Flags: {'YES' if config.get('flags', False) else 'NO'}")
     print(f"    Depth: {config['max_depth']}")
     print(f"    Timeout: {config['timeout']}s\n")
@@ -385,7 +480,8 @@ def main() -> int:
     crawler = WebCrawler(args.url, max_depth=config['max_depth'], 
                          timeout=config['timeout'], session=session,
                          workflows=workflows,
-                         discovery_callback=live_scanner.handle_discovery)
+                         discovery_callback=live_scanner.handle_discovery,
+                         auth_profile=auth_profile)
     results = crawler.crawl()
 
     urls = results.get("urls", [])
@@ -579,7 +675,7 @@ def main() -> int:
                     forms=forms,
                     findings=canonical_findings,
                     legacy_findings=[f for f in unique if f.get('type') != 'flag'],
-                    metadata={"flags": flags_found or [], "websockets": websockets},
+                    metadata={"flags": flags_found or [], "websockets": websockets, "auth_health": auth_health},
                 )
                 content = json.dumps(payload, indent=2)
                 save_output(out, content)

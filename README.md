@@ -127,6 +127,56 @@ python main.py --url http://127.0.0.1:5000 --output reports/local.json
 
 The JSON export uses schema `wraith.scan.v1` and includes the scan config, coverage, canonical findings, stable finding IDs, CVSS/CWE/OWASP fields, proof status, and redacted evidence.
 
+### Auth Profiles
+
+Wraith supports reusable auth profiles for authenticated scans:
+
+- anonymous
+- static headers
+- bearer tokens
+- cookies
+- Playwright `storage_state` files
+
+CLI examples:
+
+```bash
+python main.py --url http://127.0.0.1:5000 --bearer-token "$TOKEN" --auth-role user_a
+python main.py --url http://127.0.0.1:5000 --auth-header "X-API-Key=secret" --auth-cookie "sessionid=value"
+python main.py --url http://127.0.0.1:5000 --storage-state reports/auth_user_a_storage_state.json --auth-role user_a
+```
+
+Record a browser login without storing a password:
+
+```bash
+python main.py --url http://127.0.0.1:5000 --record-login http://127.0.0.1:5000/login --record-login-output reports/auth_user_a_storage_state.json --auth-role user_a
+```
+
+Add a session health check:
+
+```bash
+python main.py --url http://127.0.0.1:5000 --storage-state reports/auth_user_a_storage_state.json --auth-health-url http://127.0.0.1:5000/dashboard --auth-health-text Dashboard
+```
+
+API scans can pass the same fields under `auth`:
+
+```json
+{
+  "url": "http://127.0.0.1:5000",
+  "auth": {
+    "type": "playwright_storage",
+    "role": "user_a",
+    "storage_state_path": "reports/auth_user_a_storage_state.json",
+    "session_health_check": {
+      "health_check_url": "http://127.0.0.1:5000/dashboard",
+      "expected_status": 200,
+      "expected_text": "Dashboard"
+    }
+  }
+}
+```
+
+Auth profiles are saved to the local corpus with secrets redacted. Playwright storage state files are referenced by path; Wraith does not store passwords.
+
 ## Terminal Commands
 
 - `scan <url>`
@@ -253,6 +303,7 @@ python -m unittest discover -s tests
 Focused upgrade regression tests live in:
 
 - `tests/test_advanced_engine_upgrades.py`
+- `tests/test_auth_profiles.py`
 - `tests/test_canonical_storage.py`
 - `tests/test_startup_smoke.py`
 
