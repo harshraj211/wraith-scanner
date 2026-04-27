@@ -12,6 +12,8 @@ import subprocess
 import json as _json
 import time
 from datetime import datetime
+from urllib.parse import urlparse
+import requests
 
 from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
 from scanner.core.crawler import WebCrawler
@@ -32,6 +34,7 @@ from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
 from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.core.models import ResponseRecord
 from scanner.importers.common import (
     candidates_to_scan_targets,
     load_candidates_from_imports,
@@ -1168,6 +1171,87 @@ def list_corpus_findings(scan_id):
         'scan_id': scan_id,
         'count': len(findings),
         'findings': findings,
+    })
+
+
+@app.route('/api/manual/replay', methods=['POST'])
+def manual_replay_request():
+    payload = request.get_json(silent=True) or {}
+    method = str(payload.get('method') or 'GET').upper()
+    url = str(payload.get('url') or '').strip()
+    headers = payload.get('headers') or {}
+    body = payload.get('body') or ''
+    scan_id = str(payload.get('scan_id') or '').strip()
+    auth_role = str(payload.get('auth_role') or 'manual')
+    safety_mode = str(payload.get('safety_mode') or 'safe').lower()
+    allow_state_change = bool(payload.get('allow_state_change'))
+
+    if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
+        return jsonify({'error': 'Unsupported HTTP method'}), 400
+    parsed = urlparse(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        return jsonify({'error': 'Manual replay requires an absolute http(s) URL'}), 400
+    if safety_mode == 'safe' and method in {'PUT', 'PATCH', 'DELETE'} and not allow_state_change:
+        return jsonify({'error': 'Safe mode blocks PUT, PATCH, and DELETE unless allow_state_change is true'}), 400
+    if not isinstance(headers, dict):
+        return jsonify({'error': 'headers must be an object'}), 400
+
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+
+    if not scan_id:
+        scan_id = f"manual_{uuid.uuid4().hex[:10]}"
+        repo.create_scan(ScanConfig(
+            scan_id=scan_id,
+            target_base_url=f"{parsed.scheme}://{parsed.netloc}",
+            scope=[f"{parsed.scheme}://{parsed.netloc}"],
+            safety_mode=safety_mode if safety_mode in {'safe', 'intrusive', 'lab'} else 'safe',
+            output_dir=REPORTS_DIR,
+        ))
+
+    request_record = RequestRecord.create(
+        scan_id=scan_id,
+        source='manual',
+        method=method,
+        url=url,
+        headers=headers,
+        body=body,
+        auth_role=auth_role,
+    )
+    repo.save_request(request_record)
+
+    start = time.time()
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            data=body if method not in {'GET', 'HEAD'} else None,
+            timeout=max(1, min(int(payload.get('timeout') or 10), 30)),
+            allow_redirects=False,
+            verify=False,
+        )
+    except requests.RequestException as exc:
+        return jsonify({
+            'scan_id': scan_id,
+            'request': request_record.to_dict(),
+            'error': str(exc),
+        }), 502
+
+    response_record = ResponseRecord.create(
+        request_id=request_record.request_id,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        body=response.text,
+        response_time_ms=int((time.time() - start) * 1000),
+    )
+    repo.save_response(response_record)
+
+    return jsonify({
+        'scan_id': scan_id,
+        'request': request_record.to_dict(),
+        'response': response_record.to_dict(),
     })
 
 

@@ -69,6 +69,50 @@ class CorpusApiTests(unittest.TestCase):
                 self.assertEqual(findings_response.get_json()["count"], 1)
             repo.close()
 
+    def test_manual_replay_saves_sanitized_exchange(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+
+            class FakeResponse:
+                status_code = 202
+                headers = {"Content-Type": "text/plain", "Set-Cookie": "sessionid=secret"}
+                text = "accepted"
+
+            with patch("api_server._storage_repo", return_value=repo), patch(
+                "api_server.requests.request", return_value=FakeResponse()
+            ) as replay:
+                client = app.test_client()
+                response = client.post(
+                    "/api/manual/replay",
+                    json={
+                        "method": "POST",
+                        "url": "https://app.example.test/api/replay",
+                        "headers": {"Authorization": "Bearer secret-token-value"},
+                        "body": "marker=1",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertTrue(payload["scan_id"].startswith("manual_"))
+                self.assertEqual(payload["response"]["status_code"], 202)
+                self.assertEqual(payload["request"]["headers"]["Authorization"], "[REDACTED]")
+                replay.assert_called_once()
+
+                saved = repo.list_requests(payload["scan_id"], {"source": "manual"})
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]["headers"]["Authorization"], "[REDACTED]")
+            repo.close()
+
+    def test_manual_replay_blocks_destructive_methods_in_safe_mode(self):
+        with patch("api_server._storage_repo", return_value=None):
+            client = app.test_client()
+            response = client.post(
+                "/api/manual/replay",
+                json={"method": "DELETE", "url": "https://app.example.test/api/item/1"},
+            )
+            self.assertEqual(response.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,7 +112,7 @@ cd scanner-terminal
 npm start
 ```
 
-The terminal UI opens on `http://127.0.0.1:3000`.
+The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode contains setup, visual risk dashboards, progress, corpus, and terminal panels. Manual mode provides a request history, replay editor, response inspector, and terminal panel.
 
 ### CLI
 
@@ -282,9 +282,11 @@ Inspect persisted corpus traffic from the frontend Corpus panel or through the A
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
 GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
+POST http://127.0.0.1:5001/api/manual/replay
 ```
 
 Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
+Manual replay sends a bounded operator-specified request, blocks destructive verbs in safe mode unless explicitly allowed, and stores the sanitized exchange as source `manual`.
 
 ## Canonical Models and Corpus
 

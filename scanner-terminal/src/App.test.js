@@ -25,11 +25,15 @@ jest.mock('socket.io-client', () => jest.fn(() => ({
   disconnect: jest.fn(),
 })));
 
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
 
-test('renders the Wraith scan setup workbench', () => {
+test('renders the Wraith website and opens automated mode', () => {
   render(<App />);
+  expect(screen.getByRole('heading', { name: /wraith v4/i })).toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole('button', { name: /start scan/i })[0]);
+  expect(screen.getByRole('heading', { name: /start wraith/i })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /open automated/i }));
   expect(screen.getByRole('heading', { name: /scan setup/i })).toBeInTheDocument();
   expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
   expect(screen.getByText(/api imports/i)).toBeInTheDocument();

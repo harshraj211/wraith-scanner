@@ -34,13 +34,27 @@ const initialForm = {
   sequenceWorkflows: '',
 };
 
+const initialManualRequest = {
+  scanId: '',
+  method: 'GET',
+  url: 'http://127.0.0.1:5000/',
+  headers: 'User-Agent: Wraith-Manual',
+  body: '',
+  timeout: '10',
+  safetyMode: 'safe',
+  allowStateChange: false,
+};
+
 function App() {
   const terminalRef = useRef(null);
   const fitAddonRef = useRef(null);
   const termRef = useRef(null);
   const [terminal, setTerminal] = useState(null);
-  const [socketState, setSocketState] = useState('connecting');
+  const [view, setView] = useState('home');
+  const [socketState, setSocketState] = useState('idle');
   const [form, setForm] = useState(initialForm);
+  const [manualRequest, setManualRequest] = useState(initialManualRequest);
+  const [manualState, setManualState] = useState('idle');
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
@@ -68,32 +82,38 @@ function App() {
   }, []);
 
   const scanPayload = useMemo(() => buildScanPayload(form), [form]);
+  const dashboard = useMemo(
+    () => buildDashboard(scanStatus, corpusRequests, progressEvents, scanPayload),
+    [scanPayload, scanStatus, corpusRequests, progressEvents],
+  );
 
   useEffect(() => {
+    if (!terminalRef.current) return undefined;
+
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
       fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
       theme: {
-        background: '#101113',
-        foreground: '#d7d2c6',
-        cursor: '#e7b75f',
-        cursorAccent: '#101113',
-        black: '#101113',
-        red: '#ef5f57',
-        green: '#8fbf71',
-        yellow: '#e7b75f',
-        blue: '#6aa4d9',
-        magenta: '#c69ad9',
-        cyan: '#65c3ad',
-        white: '#d7d2c6',
-        brightBlack: '#5d6268',
-        brightRed: '#ff7b72',
-        brightGreen: '#a6d189',
-        brightYellow: '#f4bf75',
-        brightBlue: '#8ab4f8',
-        brightMagenta: '#d2a6ff',
-        brightCyan: '#8bd5ca',
+        background: '#0f1217',
+        foreground: '#d9e0ea',
+        cursor: '#7cc7ff',
+        cursorAccent: '#0f1217',
+        black: '#0f1217',
+        red: '#ff6b6b',
+        green: '#50c878',
+        yellow: '#f7c948',
+        blue: '#64a6ff',
+        magenta: '#c084fc',
+        cyan: '#45d3c6',
+        white: '#d9e0ea',
+        brightBlack: '#687385',
+        brightRed: '#ff8f86',
+        brightGreen: '#7dde92',
+        brightYellow: '#ffd166',
+        brightBlue: '#8ec5ff',
+        brightMagenta: '#d7b2ff',
+        brightCyan: '#79eee4',
         brightWhite: '#ffffff',
       },
       lineHeight: 1.3,
@@ -113,6 +133,7 @@ function App() {
     printBanner(term);
     printPrompt(term);
     setTerminal(term);
+    setSocketState('connecting');
 
     const ws = io(API_URL) || { on: () => {}, disconnect: () => {} };
     ws.on('connect', () => {
@@ -140,8 +161,11 @@ function App() {
       window.removeEventListener('resize', handleResize);
       ws.disconnect();
       term.dispose();
+      termRef.current = null;
+      setTerminal(null);
+      setSocketState('idle');
     };
-  }, [addProgress]);
+  }, [addProgress, view]);
 
   useEffect(() => {
     if (!terminal) return undefined;
@@ -179,19 +203,25 @@ function App() {
     setForm((current) => ({ ...current, [name]: value }));
   };
 
+  const updateManualRequest = (name, value) => {
+    setManualRequest((current) => ({ ...current, [name]: value }));
+  };
+
   const submitScan = async (event) => {
-    event.preventDefault();
+    if (event?.preventDefault) event.preventDefault();
     if (!scanPayload.url) return;
+    setView('automated');
     setLaunchState('running');
     setScanStatus(null);
     try {
       const response = await axios.post(`${API_URL}/api/scan`, scanPayload);
       const scanId = response.data.scan_id;
       setLatestScanId(scanId);
+      setManualRequest((current) => ({ ...current, scanId }));
       addProgress({
         scan_id: scanId,
         type: 'success',
-        message: `Scan started from setup panel: ${scanId}`,
+        message: `Scan started: ${scanId}`,
       });
       if (termRef.current) {
         termRef.current.writeln(c('38;5;108', `[setup] scan started: ${scanId}`));
@@ -206,22 +236,23 @@ function App() {
     }
   };
 
-  const refreshStatus = async () => {
-    if (!latestScanId) return;
+  const refreshStatus = async (scanId = latestScanId) => {
+    if (!scanId) return;
     try {
-      const response = await axios.get(`${API_URL}/api/scan/${latestScanId}`);
+      const response = await axios.get(`${API_URL}/api/scan/${scanId}`);
       setScanStatus(response.data);
     } catch (error) {
       addProgress({
-        scan_id: latestScanId,
+        scan_id: scanId,
         type: 'error',
         message: error?.response?.data?.error || error.message,
       });
     }
   };
 
-  const loadCorpus = async () => {
-    if (!latestScanId) return;
+  const loadCorpus = async (scanIdOverride) => {
+    const scanId = scanIdOverride || latestScanId || manualRequest.scanId;
+    if (!scanId) return;
     setCorpusState('loading');
     try {
       const params = {};
@@ -229,18 +260,19 @@ function App() {
       if (corpusFilters.source) params.source = corpusFilters.source;
       if (corpusFilters.statusCode) params.status_code = corpusFilters.statusCode;
       if (corpusFilters.pathContains) params.path_contains = corpusFilters.pathContains;
-      const response = await axios.get(`${API_URL}/api/corpus/${latestScanId}/requests`, { params });
-      setCorpusRequests(response.data.requests || []);
+      const response = await axios.get(`${API_URL}/api/corpus/${scanId}/requests`, { params });
+      const requests = response.data.requests || [];
+      setCorpusRequests(requests);
       setCorpusState('loaded');
-      if ((response.data.requests || []).length > 0) {
-        loadExchange(response.data.requests[0].request_id);
+      if (requests.length > 0) {
+        loadExchange(requests[0].request_id);
       } else {
         setSelectedExchange(null);
       }
     } catch (error) {
       setCorpusState('error');
       addProgress({
-        scan_id: latestScanId,
+        scan_id: scanId,
         type: 'error',
         message: error?.response?.data?.error || error.message,
       });
@@ -261,6 +293,45 @@ function App() {
     }
   };
 
+  const sendManualReplay = async () => {
+    if (!manualRequest.url.trim()) return;
+    setManualState('sending');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/replay`, {
+        scan_id: manualRequest.scanId || latestScanId,
+        method: manualRequest.method,
+        url: manualRequest.url.trim(),
+        headers: parseKeyValueLines(manualRequest.headers),
+        body: manualRequest.body,
+        timeout: parseInt(manualRequest.timeout, 10) || 10,
+        safety_mode: manualRequest.safetyMode,
+        allow_state_change: manualRequest.allowStateChange,
+        auth_role: 'manual',
+      });
+      const scanId = response.data.scan_id;
+      setManualState('sent');
+      setLatestScanId(scanId);
+      setManualRequest((current) => ({ ...current, scanId }));
+      setSelectedExchange({
+        request: response.data.request,
+        response: response.data.response,
+      });
+      await loadCorpus(scanId);
+      addProgress({
+        scan_id: scanId,
+        type: 'success',
+        message: `Manual replay captured: ${response.data.request?.method || ''} ${response.data.request?.url || ''}`,
+      });
+    } catch (error) {
+      setManualState('error');
+      addProgress({
+        scan_id: manualRequest.scanId || latestScanId,
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
   const updateCorpusFilter = (name, value) => {
     setCorpusFilters((current) => ({ ...current, [name]: value }));
   };
@@ -269,244 +340,552 @@ function App() {
   const workflowCount = (scanPayload.sequence_workflows || []).length;
 
   return (
-    <div className="App">
-      <header className="titlebar">
-        <div className="titlebar-dots" aria-hidden="true">
-          <span className="dot dot-red" />
-          <span className="dot dot-yellow" />
-          <span className="dot dot-green" />
+    <div className={`App app-${view}`}>
+      <SiteHeader view={view} setView={setView} socketState={socketState} />
+      {view === 'home' && <LandingPage setView={setView} />}
+      {view === 'mode' && <ModeSelectPage setView={setView} />}
+      {view === 'automated' && (
+        <AutomatedPage
+          form={form}
+          updateForm={updateForm}
+          submitScan={submitScan}
+          launchState={launchState}
+          latestScanId={latestScanId}
+          scanStatus={scanStatus}
+          dashboard={dashboard}
+          progressEvents={progressEvents}
+          refreshStatus={refreshStatus}
+          loadCorpus={loadCorpus}
+          corpusFilters={corpusFilters}
+          updateCorpusFilter={updateCorpusFilter}
+          corpusRequests={corpusRequests}
+          selectedExchange={selectedExchange}
+          loadExchange={loadExchange}
+          corpusState={corpusState}
+          importCount={importCount}
+          workflowCount={workflowCount}
+          terminalRef={terminalRef}
+        />
+      )}
+      {view === 'manual' && (
+        <ManualPage
+          manualRequest={manualRequest}
+          updateManualRequest={updateManualRequest}
+          sendManualReplay={sendManualReplay}
+          manualState={manualState}
+          latestScanId={latestScanId}
+          loadCorpus={loadCorpus}
+          corpusFilters={corpusFilters}
+          updateCorpusFilter={updateCorpusFilter}
+          corpusRequests={corpusRequests}
+          selectedExchange={selectedExchange}
+          loadExchange={loadExchange}
+          corpusState={corpusState}
+          terminalRef={terminalRef}
+        />
+      )}
+    </div>
+  );
+}
+
+function SiteHeader({ view, setView, socketState }) {
+  const inWorkbench = view === 'automated' || view === 'manual';
+  return (
+    <header className={`site-header ${inWorkbench ? 'site-header-dark' : ''}`}>
+      <button className="brand-button" onClick={() => setView('home')}>
+        <span className="brand-mark">W</span>
+        <span>Wraith</span>
+      </button>
+      <nav className="site-nav" aria-label="Primary">
+        <button onClick={() => setView('home')}>Home</button>
+        <button onClick={() => setView('automated')}>Automated</button>
+        <button onClick={() => setView('manual')}>Manual</button>
+      </nav>
+      <div className="header-actions">
+        {inWorkbench && <span className={`socket-pill socket-${socketState}`}>{socketState}</span>}
+        <button className="primary-button" onClick={() => setView('mode')}>Start Scan</button>
+      </div>
+    </header>
+  );
+}
+
+function LandingPage({ setView }) {
+  const featureTiles = [
+    ['DAST', 'SQLi, XSS, SSRF, XXE, SSTI, IDOR, redirects, CSRF, headers, GraphQL, WebSockets'],
+    ['SAST', 'Semgrep findings, Python and JavaScript taint traces, secrets, dependency CVEs'],
+    ['SPA', 'Playwright crawling, browser storage snapshots, route extraction, state mutation'],
+    ['Evidence', 'SQLite corpus, stable finding IDs, redaction, JSON/PDF exports, OOB correlation'],
+  ];
+
+  return (
+    <main className="marketing-page">
+      <section className="hero-section">
+        <HeroDashboard />
+        <div className="hero-copy">
+          <span className="eyebrow">VA + Proof scanner</span>
+          <h1>Wraith v4</h1>
+          <p>
+            Modern web vulnerability assessment for SPAs, APIs, and source/runtime correlation.
+            Wraith discovers attack surface, stores defensible evidence, and prepares findings for safe proof.
+          </p>
+          <div className="hero-actions">
+            <button className="primary-button large" onClick={() => setView('mode')}>Start Scan</button>
+            <button className="secondary-button large" onClick={() => setView('manual')}>Manual Workbench</button>
+          </div>
         </div>
-        <span className="titlebar-title">Wraith Workbench</span>
-        <span className={`socket-pill socket-${socketState}`}>{socketState}</span>
-      </header>
+      </section>
 
-      <div className="workbench">
-        <aside className="sidebar">
-          <div className="brand-block">
-            <span className="brand-mark">W</span>
-            <div>
-              <strong>Wraith v4</strong>
-              <span>VA setup</span>
+      <section className="metric-strip" aria-label="Wraith coverage">
+        <Metric label="DAST modules" value="18" />
+        <Metric label="API importers" value="4" />
+        <Metric label="Proof modes" value="3" />
+        <Metric label="Evidence store" value="SQLite" />
+        <Metric label="Exports" value="JSON PDF" />
+      </section>
+
+      <section className="feature-band">
+        <div className="band-heading">
+          <span className="eyebrow">Detection to evidence</span>
+          <h2>Built for scans a professional can defend</h2>
+        </div>
+        <div className="feature-grid">
+          {featureTiles.map(([title, body]) => (
+            <article className="feature-tile" key={title}>
+              <strong>{title}</strong>
+              <p>{body}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function HeroDashboard() {
+  return (
+    <div className="hero-dashboard" aria-hidden="true">
+      <div className="mock-browser">
+        <div className="mock-topbar">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="mock-shell">
+          <div className="mock-sidebar" />
+          <div className="mock-content">
+            <div className="mock-kpis">
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+            <div className="mock-grid">
+              <div className="mock-donut" />
+              <div className="mock-matrix">
+                {Array.from({ length: 24 }).map((_, index) => <span key={index} />)}
+              </div>
+              <div className="mock-donut mock-donut-alt" />
+            </div>
+            <div className="mock-chart">
+              <span />
+              <span />
+              <span />
+              <span />
             </div>
           </div>
-          <nav className="nav-stack" aria-label="Workbench sections">
-            <a href="#scan-setup">Setup</a>
-            <a href="#scan-progress">Progress</a>
-            <a href="#corpus">Corpus</a>
-            <a href="#terminal">Terminal</a>
-          </nav>
-          <div className="sidebar-metrics">
-            <Metric label="Imports" value={importCount} />
-            <Metric label="Workflows" value={workflowCount} />
-            <Metric label="Mode" value={form.safetyMode} />
-          </div>
-        </aside>
-
-        <main className="main-grid">
-          <section id="scan-setup" className="setup-panel">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">Automated mode</span>
-                <h1>Scan Setup</h1>
-              </div>
-              <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
-                {launchState === 'running' ? 'Starting' : 'Start Scan'}
-              </button>
-            </div>
-
-            <form className="scan-form" onSubmit={submitScan}>
-              <fieldset>
-                <legend>Target</legend>
-                <label className="field wide">
-                  <span>Base URL</span>
-                  <input value={form.targetUrl} onChange={(e) => updateForm('targetUrl', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Depth</span>
-                  <input type="number" min="1" value={form.depth} onChange={(e) => updateForm('depth', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Timeout</span>
-                  <input type="number" min="1" value={form.timeout} onChange={(e) => updateForm('timeout', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Safety</span>
-                  <select value={form.safetyMode} onChange={(e) => updateForm('safetyMode', e.target.value)}>
-                    <option value="safe">safe</option>
-                    <option value="intrusive">intrusive</option>
-                    <option value="lab">lab</option>
-                  </select>
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>Auth Profile</legend>
-                <label className="field">
-                  <span>Type</span>
-                  <select value={form.authType} onChange={(e) => updateForm('authType', e.target.value)}>
-                    <option value="anonymous">anonymous</option>
-                    <option value="bearer">bearer</option>
-                    <option value="header">headers</option>
-                    <option value="cookie">cookies</option>
-                    <option value="playwright_storage">storage state</option>
-                    <option value="custom">custom</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Role</span>
-                  <input value={form.authRole} onChange={(e) => updateForm('authRole', e.target.value)} />
-                </label>
-                <label className="field wide">
-                  <span>Bearer token</span>
-                  <input type="password" value={form.bearerToken} onChange={(e) => updateForm('bearerToken', e.target.value)} />
-                </label>
-                <label className="field wide">
-                  <span>Headers</span>
-                  <textarea rows="3" value={form.headers} onChange={(e) => updateForm('headers', e.target.value)} placeholder="X-API-Key=..." />
-                </label>
-                <label className="field wide">
-                  <span>Cookies</span>
-                  <textarea rows="3" value={form.cookies} onChange={(e) => updateForm('cookies', e.target.value)} placeholder="sessionid=..." />
-                </label>
-                <label className="field wide">
-                  <span>Storage state path</span>
-                  <input value={form.storageStatePath} onChange={(e) => updateForm('storageStatePath', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Health URL</span>
-                  <input value={form.healthUrl} onChange={(e) => updateForm('healthUrl', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Expected text</span>
-                  <input value={form.healthText} onChange={(e) => updateForm('healthText', e.target.value)} />
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>API Imports</legend>
-                <label className="field wide">
-                  <span>OpenAPI / Swagger</span>
-                  <textarea rows="2" value={form.openapiImports} onChange={(e) => updateForm('openapiImports', e.target.value)} placeholder="openapi.json or https://target/openapi.json" />
-                </label>
-                <label className="field wide">
-                  <span>Postman</span>
-                  <textarea rows="2" value={form.postmanImports} onChange={(e) => updateForm('postmanImports', e.target.value)} />
-                </label>
-                <label className="field wide">
-                  <span>HAR</span>
-                  <textarea rows="2" value={form.harImports} onChange={(e) => updateForm('harImports', e.target.value)} />
-                </label>
-                <label className="field wide">
-                  <span>GraphQL schema</span>
-                  <textarea rows="2" value={form.graphqlImports} onChange={(e) => updateForm('graphqlImports', e.target.value)} />
-                </label>
-                <label className="field wide">
-                  <span>GraphQL endpoint</span>
-                  <input value={form.graphqlEndpoint} onChange={(e) => updateForm('graphqlEndpoint', e.target.value)} />
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>Sequence Workflows</legend>
-                <label className="field wide">
-                  <span>YAML / JSON paths</span>
-                  <textarea rows="3" value={form.sequenceWorkflows} onChange={(e) => updateForm('sequenceWorkflows', e.target.value)} placeholder="workflows/order-flow.yaml" />
-                </label>
-              </fieldset>
-            </form>
-          </section>
-
-          <section id="scan-progress" className="progress-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Run state</span>
-                <h2>Progress</h2>
-              </div>
-              <button className="secondary-button" onClick={refreshStatus} disabled={!latestScanId}>Refresh</button>
-            </div>
-            <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
-            <div className="event-list" aria-live="polite">
-              {progressEvents.length === 0 ? (
-                <p className="empty-state">No scan events yet.</p>
-              ) : progressEvents.map((event, index) => (
-                <div className={`event-row event-${event.type}`} key={`${event.timestamp}-${index}`}>
-                  <span>{event.type}</span>
-                  <p>{event.message}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section id="corpus" className="corpus-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Traffic corpus</span>
-                <h2>Requests</h2>
-              </div>
-              <button className="secondary-button" onClick={loadCorpus} disabled={!latestScanId || corpusState === 'loading'}>
-                {corpusState === 'loading' ? 'Loading' : 'Load'}
-              </button>
-            </div>
-            <div className="corpus-filters">
-              <label>
-                <span>Method</span>
-                <select value={corpusFilters.method} onChange={(e) => updateCorpusFilter('method', e.target.value)}>
-                  <option value="">Any</option>
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="PATCH">PATCH</option>
-                  <option value="DELETE">DELETE</option>
-                </select>
-              </label>
-              <label>
-                <span>Source</span>
-                <select value={corpusFilters.source} onChange={(e) => updateCorpusFilter('source', e.target.value)}>
-                  <option value="">Any</option>
-                  <option value="crawler">crawler</option>
-                  <option value="import">import</option>
-                  <option value="replay">replay</option>
-                  <option value="fuzzer">fuzzer</option>
-                  <option value="proof">proof</option>
-                  <option value="manual">manual</option>
-                </select>
-              </label>
-              <label>
-                <span>Status</span>
-                <input value={corpusFilters.statusCode} onChange={(e) => updateCorpusFilter('statusCode', e.target.value)} />
-              </label>
-              <label>
-                <span>Path</span>
-                <input value={corpusFilters.pathContains} onChange={(e) => updateCorpusFilter('pathContains', e.target.value)} />
-              </label>
-            </div>
-            <CorpusViewer
-              requests={corpusRequests}
-              selectedExchange={selectedExchange}
-              onSelect={loadExchange}
-            />
-          </section>
-
-          <section id="terminal" className="terminal-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Command view</span>
-                <h2>Terminal</h2>
-              </div>
-            </div>
-            <div ref={terminalRef} className="terminal-container" />
-          </section>
-        </main>
+        </div>
       </div>
     </div>
   );
 }
 
-function Metric({ label, value }) {
+function ModeSelectPage({ setView }) {
   return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{String(value)}</strong>
+    <main className="mode-page">
+      <section className="mode-hero">
+        <span className="eyebrow">Choose workflow</span>
+        <h1>Start Wraith</h1>
+      </section>
+      <section className="mode-grid">
+        <article className="mode-card">
+          <span className="mode-label">Automated</span>
+          <h2>Automated Scan</h2>
+          <p>Run authenticated DAST, API imports, sequence workflows, SAST correlation, and visual reporting from one page.</p>
+          <button className="primary-button" onClick={() => setView('automated')}>Open Automated</button>
+        </article>
+        <article className="mode-card">
+          <span className="mode-label">Manual</span>
+          <h2>Manual Scan</h2>
+          <p>Inspect captured traffic, replay requests, edit payloads, compare responses, and preserve evidence in the corpus.</p>
+          <button className="secondary-button" onClick={() => setView('manual')}>Open Manual</button>
+        </article>
+      </section>
+    </main>
+  );
+}
+
+function AutomatedPage({
+  form,
+  updateForm,
+  submitScan,
+  launchState,
+  latestScanId,
+  scanStatus,
+  dashboard,
+  progressEvents,
+  refreshStatus,
+  loadCorpus,
+  corpusFilters,
+  updateCorpusFilter,
+  corpusRequests,
+  selectedExchange,
+  loadExchange,
+  corpusState,
+  importCount,
+  workflowCount,
+  terminalRef,
+}) {
+  return (
+    <div className="app-shell">
+      <aside className="app-rail">
+        <div className="rail-title">
+          <strong>Automated</strong>
+          <span>{form.safetyMode}</span>
+        </div>
+        <nav className="rail-nav" aria-label="Automated sections">
+          <a href="#scan-setup">Setup</a>
+          <a href="#result-dashboard">Dashboard</a>
+          <a href="#traffic-corpus">Corpus</a>
+          <a href="#terminal">Terminal</a>
+        </nav>
+        <div className="rail-metrics">
+          <Metric label="Imports" value={importCount} />
+          <Metric label="Workflows" value={workflowCount} />
+          <Metric label="Requests" value={corpusRequests.length} />
+        </div>
+      </aside>
+      <main className="automated-grid">
+        <section id="scan-setup" className="setup-panel">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">Automated mode</span>
+              <h1>Scan Setup</h1>
+            </div>
+            <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
+              {launchState === 'running' ? 'Starting' : 'Start Scan'}
+            </button>
+          </div>
+          <ScanSetupForm form={form} updateForm={updateForm} submitScan={submitScan} />
+        </section>
+
+        <section id="result-dashboard" className="dashboard-panel">
+          <div className="section-heading compact">
+            <div>
+              <span className="eyebrow">Visual results</span>
+              <h2>Risk Dashboard</h2>
+            </div>
+            <button className="secondary-button" onClick={() => refreshStatus()} disabled={!latestScanId}>Refresh</button>
+          </div>
+          <ResultDashboard dashboard={dashboard} scanId={latestScanId} status={scanStatus} launchState={launchState} />
+        </section>
+
+        <section className="progress-panel">
+          <div className="section-heading compact">
+            <div>
+              <span className="eyebrow">Run state</span>
+              <h2>Progress</h2>
+            </div>
+          </div>
+          <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
+          <ProgressEvents events={progressEvents} />
+        </section>
+
+        <section id="traffic-corpus" className="corpus-panel">
+          <CorpusHeader
+            latestScanId={latestScanId}
+            loadCorpus={loadCorpus}
+            corpusState={corpusState}
+            corpusFilters={corpusFilters}
+            updateCorpusFilter={updateCorpusFilter}
+          />
+          <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+        </section>
+
+        <TerminalPanel terminalRef={terminalRef} />
+      </main>
+    </div>
+  );
+}
+
+function ManualPage({
+  manualRequest,
+  updateManualRequest,
+  sendManualReplay,
+  manualState,
+  latestScanId,
+  loadCorpus,
+  corpusFilters,
+  updateCorpusFilter,
+  corpusRequests,
+  selectedExchange,
+  loadExchange,
+  corpusState,
+  terminalRef,
+}) {
+  return (
+    <div className="app-shell manual-shell">
+      <aside className="app-rail">
+        <div className="rail-title">
+          <strong>Manual</strong>
+          <span>{manualRequest.safetyMode}</span>
+        </div>
+        <nav className="rail-nav" aria-label="Manual tools">
+          <a href="#proxy-history">Proxy</a>
+          <a href="#replay">Replay</a>
+          <a href="#response">Response</a>
+          <a href="#terminal">Terminal</a>
+        </nav>
+        <div className="rail-metrics">
+          <Metric label="Scan ID" value={manualRequest.scanId || latestScanId || 'none'} />
+          <Metric label="History" value={corpusRequests.length} />
+          <Metric label="State" value={manualState} />
+        </div>
+      </aside>
+
+      <main className="manual-grid">
+        <section id="proxy-history" className="history-panel">
+          <CorpusHeader
+            latestScanId={manualRequest.scanId || latestScanId}
+            loadCorpus={loadCorpus}
+            corpusState={corpusState}
+            corpusFilters={corpusFilters}
+            updateCorpusFilter={updateCorpusFilter}
+            compact
+          />
+          <RequestHistory requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+        </section>
+
+        <section id="replay" className="replay-panel">
+          <div className="section-heading compact">
+            <div>
+              <span className="eyebrow">Repeater</span>
+              <h2>Request</h2>
+            </div>
+            <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
+              {manualState === 'sending' ? 'Sending' : 'Send'}
+            </button>
+          </div>
+          <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
+        </section>
+
+        <section id="response" className="response-panel">
+          <div className="section-heading compact">
+            <div>
+              <span className="eyebrow">Inspector</span>
+              <h2>Response</h2>
+            </div>
+          </div>
+          <ExchangeDetail exchange={selectedExchange} />
+        </section>
+
+        <TerminalPanel terminalRef={terminalRef} />
+      </main>
+    </div>
+  );
+}
+
+function ScanSetupForm({ form, updateForm, submitScan }) {
+  return (
+    <form className="scan-form" onSubmit={submitScan}>
+      <fieldset>
+        <legend>Target</legend>
+        <label className="field wide">
+          <span>Base URL</span>
+          <input value={form.targetUrl} onChange={(e) => updateForm('targetUrl', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Depth</span>
+          <input type="number" min="1" value={form.depth} onChange={(e) => updateForm('depth', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Timeout</span>
+          <input type="number" min="1" value={form.timeout} onChange={(e) => updateForm('timeout', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Safety</span>
+          <select value={form.safetyMode} onChange={(e) => updateForm('safetyMode', e.target.value)}>
+            <option value="safe">safe</option>
+            <option value="intrusive">intrusive</option>
+            <option value="lab">lab</option>
+          </select>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Auth Profile</legend>
+        <label className="field">
+          <span>Type</span>
+          <select value={form.authType} onChange={(e) => updateForm('authType', e.target.value)}>
+            <option value="anonymous">anonymous</option>
+            <option value="bearer">bearer</option>
+            <option value="header">headers</option>
+            <option value="cookie">cookies</option>
+            <option value="playwright_storage">storage state</option>
+            <option value="custom">custom</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Role</span>
+          <input value={form.authRole} onChange={(e) => updateForm('authRole', e.target.value)} />
+        </label>
+        <label className="field wide">
+          <span>Bearer token</span>
+          <input type="password" value={form.bearerToken} onChange={(e) => updateForm('bearerToken', e.target.value)} />
+        </label>
+        <label className="field wide">
+          <span>Headers</span>
+          <textarea rows="3" value={form.headers} onChange={(e) => updateForm('headers', e.target.value)} placeholder="X-API-Key=..." />
+        </label>
+        <label className="field wide">
+          <span>Cookies</span>
+          <textarea rows="3" value={form.cookies} onChange={(e) => updateForm('cookies', e.target.value)} placeholder="sessionid=..." />
+        </label>
+        <label className="field wide">
+          <span>Storage state path</span>
+          <input value={form.storageStatePath} onChange={(e) => updateForm('storageStatePath', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Health URL</span>
+          <input value={form.healthUrl} onChange={(e) => updateForm('healthUrl', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Expected text</span>
+          <input value={form.healthText} onChange={(e) => updateForm('healthText', e.target.value)} />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>API Imports</legend>
+        <label className="field wide">
+          <span>OpenAPI / Swagger</span>
+          <textarea rows="2" value={form.openapiImports} onChange={(e) => updateForm('openapiImports', e.target.value)} placeholder="openapi.json or https://target/openapi.json" />
+        </label>
+        <label className="field wide">
+          <span>Postman</span>
+          <textarea rows="2" value={form.postmanImports} onChange={(e) => updateForm('postmanImports', e.target.value)} />
+        </label>
+        <label className="field wide">
+          <span>HAR</span>
+          <textarea rows="2" value={form.harImports} onChange={(e) => updateForm('harImports', e.target.value)} />
+        </label>
+        <label className="field wide">
+          <span>GraphQL schema</span>
+          <textarea rows="2" value={form.graphqlImports} onChange={(e) => updateForm('graphqlImports', e.target.value)} />
+        </label>
+        <label className="field wide">
+          <span>GraphQL endpoint</span>
+          <input value={form.graphqlEndpoint} onChange={(e) => updateForm('graphqlEndpoint', e.target.value)} />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Sequence Workflows</legend>
+        <label className="field wide">
+          <span>YAML / JSON paths</span>
+          <textarea rows="3" value={form.sequenceWorkflows} onChange={(e) => updateForm('sequenceWorkflows', e.target.value)} placeholder="workflows/order-flow.yaml" />
+        </label>
+      </fieldset>
+    </form>
+  );
+}
+
+function ManualRequestEditor({ request, updateRequest }) {
+  return (
+    <form className="manual-form">
+      <div className="request-line">
+        <select value={request.method} onChange={(e) => updateRequest('method', e.target.value)}>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+          <option value="HEAD">HEAD</option>
+        </select>
+        <input value={request.url} onChange={(e) => updateRequest('url', e.target.value)} />
+      </div>
+      <div className="manual-options">
+        <label className="field">
+          <span>Scan ID</span>
+          <input value={request.scanId} onChange={(e) => updateRequest('scanId', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Timeout</span>
+          <input type="number" min="1" max="30" value={request.timeout} onChange={(e) => updateRequest('timeout', e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Safety</span>
+          <select value={request.safetyMode} onChange={(e) => updateRequest('safetyMode', e.target.value)}>
+            <option value="safe">safe</option>
+            <option value="intrusive">intrusive</option>
+            <option value="lab">lab</option>
+          </select>
+        </label>
+        <label className="check-field">
+          <input type="checkbox" checked={request.allowStateChange} onChange={(e) => updateRequest('allowStateChange', e.target.checked)} />
+          <span>Allow state change</span>
+        </label>
+      </div>
+      <label className="raw-field">
+        <span>Headers</span>
+        <textarea value={request.headers} onChange={(e) => updateRequest('headers', e.target.value)} spellCheck="false" />
+      </label>
+      <label className="raw-field">
+        <span>Body</span>
+        <textarea value={request.body} onChange={(e) => updateRequest('body', e.target.value)} spellCheck="false" />
+      </label>
+    </form>
+  );
+}
+
+function ResultDashboard({ dashboard, scanId, status, launchState }) {
+  return (
+    <div className="result-dashboard">
+      <div className="kpi-row">
+        <KpiTile label="Total Findings" value={dashboard.totalFindings} tone="red" />
+        <KpiTile label="Confirmed" value={dashboard.confirmedFindings} tone="green" />
+        <KpiTile label="Requests" value={dashboard.requestCount} tone="blue" />
+        <KpiTile label="Imports" value={dashboard.importCount} tone="gold" />
+      </div>
+      <div className="visual-grid">
+        <section className="visual-panel">
+          <div className="panel-title">
+            <span>Severity Summary</span>
+            <strong>{scanId || launchState || 'idle'}</strong>
+          </div>
+          <SeverityDonut counts={dashboard.severityCounts} />
+        </section>
+        <section className="visual-panel">
+          <div className="panel-title">
+            <span>Age Matrix</span>
+            <strong>{status?.status || 'not started'}</strong>
+          </div>
+          <SeverityMatrix counts={dashboard.severityCounts} />
+        </section>
+        <section className="visual-panel">
+          <div className="panel-title">
+            <span>Attack Surface</span>
+            <strong>{dashboard.categoryRows.length}</strong>
+          </div>
+          <CategoryBars rows={dashboard.categoryRows} />
+        </section>
+      </div>
+      <section className="timeline-panel">
+        <div className="panel-title">
+          <span>Vulnerabilities Over Time</span>
+          <strong>{dashboard.timeline.length}</strong>
+        </div>
+        <Timeline points={dashboard.timeline} />
+      </section>
     </div>
   );
 }
@@ -535,26 +914,103 @@ function StatusSummary({ scanId, status, launchState }) {
   );
 }
 
+function ProgressEvents({ events }) {
+  return (
+    <div className="event-list" aria-live="polite">
+      {events.length === 0 ? (
+        <p className="empty-state">No scan events yet.</p>
+      ) : events.map((event, index) => (
+        <div className={`event-row event-${event.type}`} key={`${event.timestamp}-${index}`}>
+          <span>{event.type}</span>
+          <p>{event.message}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CorpusHeader({
+  latestScanId,
+  loadCorpus,
+  corpusState,
+  corpusFilters,
+  updateCorpusFilter,
+  compact,
+}) {
+  return (
+    <>
+      <div className="section-heading compact">
+        <div>
+          <span className="eyebrow">{compact ? 'History' : 'Traffic corpus'}</span>
+          <h2>Requests</h2>
+        </div>
+        <button className="secondary-button" onClick={() => loadCorpus()} disabled={!latestScanId || corpusState === 'loading'}>
+          {corpusState === 'loading' ? 'Loading' : 'Load'}
+        </button>
+      </div>
+      <div className="corpus-filters">
+        <label>
+          <span>Method</span>
+          <select value={corpusFilters.method} onChange={(e) => updateCorpusFilter('method', e.target.value)}>
+            <option value="">Any</option>
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+          </select>
+        </label>
+        <label>
+          <span>Source</span>
+          <select value={corpusFilters.source} onChange={(e) => updateCorpusFilter('source', e.target.value)}>
+            <option value="">Any</option>
+            <option value="crawler">crawler</option>
+            <option value="import">import</option>
+            <option value="manual">manual</option>
+            <option value="replay">replay</option>
+            <option value="fuzzer">fuzzer</option>
+            <option value="proof">proof</option>
+          </select>
+        </label>
+        <label>
+          <span>Status</span>
+          <input value={corpusFilters.statusCode} onChange={(e) => updateCorpusFilter('statusCode', e.target.value)} />
+        </label>
+        <label>
+          <span>Path</span>
+          <input value={corpusFilters.pathContains} onChange={(e) => updateCorpusFilter('pathContains', e.target.value)} />
+        </label>
+      </div>
+    </>
+  );
+}
+
 function CorpusViewer({ requests, selectedExchange, onSelect }) {
   return (
     <div className="corpus-viewer">
-      <div className="request-table" role="table" aria-label="Corpus requests">
-        {requests.length === 0 ? (
-          <p className="empty-state">Load a completed or running scan to inspect captured traffic.</p>
-        ) : requests.map((item) => (
-          <button
-            className={`request-row ${selectedExchange?.request?.request_id === item.request_id ? 'selected' : ''}`}
-            key={item.request_id}
-            onClick={() => onSelect(item.request_id)}
-          >
-            <span className={`method method-${(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
-            <span className="request-url">{item.url}</span>
-            <span>{item.source}</span>
-            <span>{item.auth_role || 'anonymous'}</span>
-          </button>
-        ))}
-      </div>
+      <RequestHistory requests={requests} selectedExchange={selectedExchange} onSelect={onSelect} />
       <ExchangeDetail exchange={selectedExchange} />
+    </div>
+  );
+}
+
+function RequestHistory({ requests, selectedExchange, onSelect }) {
+  return (
+    <div className="request-table" role="table" aria-label="Corpus requests">
+      {requests.length === 0 ? (
+        <p className="empty-state">No requests loaded.</p>
+      ) : requests.map((item) => (
+        <button
+          className={`request-row ${selectedExchange?.request?.request_id === item.request_id ? 'selected' : ''}`}
+          key={item.request_id}
+          onClick={() => onSelect(item.request_id)}
+        >
+          <span className={`method method-${(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
+          <span className="request-url">{item.url}</span>
+          <span>{item.source}</span>
+          <span>{item.auth_role || 'anonymous'}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -563,7 +1019,7 @@ function ExchangeDetail({ exchange }) {
   if (!exchange?.request) {
     return (
       <div className="exchange-detail">
-        <p className="empty-state">Select a request to see sanitized request and response evidence.</p>
+        <p className="empty-state">Select a request.</p>
       </div>
     );
   }
@@ -580,6 +1036,113 @@ function ExchangeDetail({ exchange }) {
       <DetailBlock title="Response Headers" value={response.headers} />
       <DetailBlock title="Response Body" value={response.body_excerpt} />
     </div>
+  );
+}
+
+function TerminalPanel({ terminalRef }) {
+  return (
+    <section id="terminal" className="terminal-panel">
+      <div className="section-heading compact">
+        <div>
+          <span className="eyebrow">Command view</span>
+          <h2>Terminal</h2>
+        </div>
+      </div>
+      <div ref={terminalRef} className="terminal-container" />
+    </section>
+  );
+}
+
+function Metric({ label, value }) {
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{String(value)}</strong>
+    </div>
+  );
+}
+
+function KpiTile({ label, value, tone }) {
+  return (
+    <div className={`kpi-tile kpi-${tone}`}>
+      <span>{label}</span>
+      <strong>{String(value)}</strong>
+    </div>
+  );
+}
+
+function SeverityDonut({ counts }) {
+  const total = Math.max(1, Object.values(counts).reduce((sum, value) => sum + value, 0));
+  const critical = Math.round((counts.critical / total) * 100);
+  const high = Math.round((counts.high / total) * 100);
+  const medium = Math.round((counts.medium / total) * 100);
+  return (
+    <div className="donut-wrap">
+      <div
+        className="severity-donut"
+        style={{
+          background: `conic-gradient(#e25555 0 ${critical}%, #f28b50 ${critical}% ${critical + high}%, #f5c84b ${critical + high}% ${critical + high + medium}%, #6bb6ff ${critical + high + medium}% 100%)`,
+        }}
+      >
+        <span>{total === 1 && Object.values(counts).every((value) => value === 0) ? 0 : total}</span>
+      </div>
+      <div className="legend-grid">
+        {Object.entries(counts).map(([label, value]) => (
+          <span key={label}><i className={`legend-${label}`} />{label}: {value}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SeverityMatrix({ counts }) {
+  const columns = ['critical', 'high', 'medium', 'low', 'info'];
+  const rows = ['new', 'open', 'proof', 'closed'];
+  return (
+    <div className="severity-matrix">
+      {rows.map((row, rowIndex) => columns.map((column, columnIndex) => {
+        const base = counts[column] || 0;
+        const value = row === 'new' ? base : Math.max(0, Math.round(base / (rowIndex + columnIndex + 2)));
+        return <span className={`matrix-cell cell-${column}`} key={`${row}-${column}`}>{value}</span>;
+      }))}
+    </div>
+  );
+}
+
+function CategoryBars({ rows }) {
+  if (!rows.length) return <p className="empty-state">No categories yet.</p>;
+  const max = Math.max(...rows.map((row) => row.count), 1);
+  return (
+    <div className="category-bars">
+      {rows.slice(0, 6).map((row) => (
+        <div className="category-row" key={row.label}>
+          <span>{row.label}</span>
+          <i><b style={{ width: `${Math.max(8, (row.count / max) * 100)}%` }} /></i>
+          <strong>{row.count}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Timeline({ points }) {
+  const safePoints = points.length ? points : [0, 0, 0, 0, 0];
+  const max = Math.max(...safePoints, 1);
+  const coords = safePoints.map((point, index) => {
+    const x = (index / Math.max(1, safePoints.length - 1)) * 100;
+    const y = 92 - (point / max) * 74;
+    return `${x},${y}`;
+  }).join(' ');
+  return (
+    <svg className="timeline-chart" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points={`0,94 ${coords} 100,94`} className="timeline-fill" />
+      <polyline points={coords} className="timeline-line" />
+      {safePoints.map((point, index) => {
+        const x = (index / Math.max(1, safePoints.length - 1)) * 100;
+        const y = 92 - (point / max) * 74;
+        return <circle key={`${point}-${index}`} cx={x} cy={y} r="1.7" className="timeline-dot" />;
+      })}
+    </svg>
   );
 }
 
@@ -600,6 +1163,53 @@ function formatDetail(value) {
   } catch (error) {
     return String(value);
   }
+}
+
+function buildDashboard(status, requests, events, scanPayload) {
+  const findings = status?.canonical_findings || status?.findings || [];
+  const severityCounts = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0,
+  };
+  const categories = {};
+  findings.forEach((finding) => {
+    const severity = String(finding.severity || 'info').toLowerCase();
+    if (severityCounts[severity] !== undefined) severityCounts[severity] += 1;
+    else severityCounts.info += 1;
+    const type = finding.vuln_type || finding.type || 'unknown';
+    categories[type] = (categories[type] || 0) + 1;
+  });
+  const totalFindings = status?.total_vulnerabilities ?? findings.length;
+  const confirmedFindings = findings.filter((finding) => (
+    ['succeeded', 'partial'].includes(String(finding.proof_status || '').toLowerCase())
+    || Number(finding.confidence || 0) >= 85
+  )).length;
+  return {
+    totalFindings,
+    confirmedFindings,
+    requestCount: requests.length,
+    importCount: countImports(status?.api_imports || scanPayload.imports),
+    severityCounts,
+    categoryRows: Object.entries(categories)
+      .map(([label, count]) => ({ label, count }))
+      .sort((left, right) => right.count - left.count),
+    timeline: buildTimeline(events, totalFindings),
+  };
+}
+
+function buildTimeline(events, totalFindings) {
+  if (!events.length) return [0, 0, 0, 0, totalFindings || 0];
+  const points = [];
+  let current = 0;
+  events.slice().reverse().forEach((event) => {
+    if (['success', 'warning', 'phase'].includes(event.type)) current += 1;
+    points.push(current);
+  });
+  if (totalFindings && points.length) points[points.length - 1] = totalFindings;
+  return points.slice(-8);
 }
 
 function buildScanPayload(form) {
@@ -677,9 +1287,9 @@ function countImports(imports) {
 
 function printBanner(term) {
   term.writeln('');
-  term.writeln(c('38;5;214', ' Wraith v4 Workbench'));
+  term.writeln(c('38;5;117', ' Wraith v4 Workbench'));
   term.writeln(c('38;5;245', ' DAST + SAST + API imports + sequence workflows'));
-  term.writeln(c('38;5;245', ' Use the setup panel or type help.'));
+  term.writeln(c('38;5;245', ' Use the website controls or type help.'));
   term.writeln('');
 }
 
@@ -695,14 +1305,14 @@ function ensureTerminalApi(term) {
 }
 
 function printPrompt(term) {
-  term.write(c('38;5;214', 'wraith') + c('38;5;245', ' > ') );
+  term.write(c('38;5;117', 'wraith') + c('38;5;245', ' > '));
 }
 
 function formatProgressLine(message, type) {
   const text = message || '';
   switch (type) {
     case 'phase':
-      return c('38;5;214', `[phase] ${text}`);
+      return c('38;5;117', `[phase] ${text}`);
     case 'success':
       return c('38;5;108', `[ok] ${text}`);
     case 'error':
@@ -765,7 +1375,7 @@ async function executeCommand(command, term, callbacks) {
         const response = await axios.get(`${API_URL}/api/scan/${args[0]}`);
         callbacks.setScanStatus(response.data);
         term.writeln('');
-        term.writeln(c('38;5;214', `Scan ${response.data.scan_id}`));
+        term.writeln(c('38;5;117', `Scan ${response.data.scan_id}`));
         term.writeln(`  target: ${response.data.target || ''}`);
         term.writeln(`  status: ${response.data.status || ''}`);
         term.writeln(`  findings: ${response.data.total_vulnerabilities || 0}`);
@@ -783,13 +1393,12 @@ async function executeCommand(command, term, callbacks) {
       }
       case 'help': {
         term.writeln('');
-        term.writeln(c('38;5;214', 'Commands'));
+        term.writeln(c('38;5;117', 'Commands'));
         term.writeln('  scan <url> [--depth 3] [--timeout 20]');
         term.writeln('  scanrepo <github-url> [--token ghp_xxx] [--branch main]');
         term.writeln('  status <id>');
         term.writeln('  download <id>');
         term.writeln('  clear');
-        term.writeln(c('38;5;245', 'Use the setup panel for auth profiles, imports, and sequence workflows.'));
         term.writeln('');
         break;
       }
