@@ -932,7 +932,7 @@ textarea:focus {
 
 .scan-status-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
@@ -1531,6 +1531,12 @@ textarea:focus {
   gap: 14px;
 }
 
+.proof-data-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .proof-policy-card {
   padding: 18px;
   border: 1px solid rgba(52, 211, 153, 0.28);
@@ -1582,6 +1588,7 @@ textarea:focus {
   gap: 12px;
 }
 
+.report-export-grid > div,
 .report-export-grid button {
   min-height: 112px;
   display: flex;
@@ -1598,6 +1605,7 @@ textarea:focus {
   text-align: left;
 }
 
+.report-export-grid > div:hover,
 .report-export-grid button:hover {
   border-color: rgba(34, 211, 238, 0.45);
   background: rgba(34, 211, 238, 0.06);
@@ -1637,6 +1645,7 @@ textarea:focus {
   .repeater-layout,
   .intruder-layout,
   .proof-grid,
+  .proof-data-grid,
   .split-workspace {
     grid-template-columns: 1fr;
   }
@@ -1709,6 +1718,7 @@ textarea:focus {
   .tool-grid,
   .mode-grid,
   .settings-grid,
+  .proof-data-grid,
   .reports-grid,
   .report-export-grid,
   .form-grid,

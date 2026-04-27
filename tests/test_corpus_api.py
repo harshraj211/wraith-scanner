@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api_server import app
-from scanner.core.models import Finding, RequestRecord, ResponseRecord, ScanConfig
+from scanner.core.models import EvidenceArtifact, Finding, ProofTask, RequestRecord, ResponseRecord, ScanConfig
 from scanner.storage.repository import StorageRepository
 
 
@@ -103,6 +103,54 @@ class CorpusApiTests(unittest.TestCase):
                 saved = repo.list_requests(payload["scan_id"], {"source": "fuzzer"})
                 self.assertEqual(len(saved), 1)
                 self.assertEqual(saved[0]["headers"]["Authorization"], "[REDACTED]")
+            repo.close()
+
+    def test_proof_task_and_evidence_listing_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            scan = ScanConfig(scan_id="scan-proof", target_base_url="https://app.example.test")
+            repo.create_scan(scan)
+            finding = Finding.from_legacy(
+                {
+                    "type": "open-redirect",
+                    "url": "https://app.example.test/login?next=/dashboard",
+                    "param": "next",
+                    "evidence": "redirect candidate",
+                    "confidence": 95,
+                },
+                target_url=scan.target_base_url,
+                scan_id=scan.scan_id,
+            )
+            repo.save_finding(finding)
+            task = ProofTask(
+                task_id="",
+                finding_id=finding.finding_id,
+                safety_mode="safe",
+                allowed_techniques=["open_redirect_controlled_redirect"],
+                status="completed",
+                result="succeeded",
+            )
+            repo.save_proof_task(task)
+            artifact = EvidenceArtifact(
+                artifact_id="",
+                finding_id=finding.finding_id,
+                task_id=task.task_id,
+                artifact_type="diff",
+                inline_excerpt="redirect Location header changed",
+            )
+            repo.save_evidence_artifact(artifact)
+
+            with patch("api_server._storage_repo", return_value=repo):
+                client = app.test_client()
+                tasks = client.get(f"/api/proof/tasks?finding_id={finding.finding_id}")
+                self.assertEqual(tasks.status_code, 200)
+                self.assertEqual(tasks.get_json()["count"], 1)
+                self.assertEqual(tasks.get_json()["tasks"][0]["task_id"], task.task_id)
+
+                artifacts = client.get(f"/api/evidence/artifacts?task_id={task.task_id}")
+                self.assertEqual(artifacts.status_code, 200)
+                self.assertEqual(artifacts.get_json()["count"], 1)
+                self.assertEqual(artifacts.get_json()["artifacts"][0]["artifact_type"], "diff")
             repo.close()
 
     def test_manual_replay_blocks_destructive_methods_in_safe_mode(self):

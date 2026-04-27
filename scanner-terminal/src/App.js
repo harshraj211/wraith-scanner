@@ -142,6 +142,7 @@ function App() {
   const [selectedIntruderResultId, setSelectedIntruderResultId] = useState('');
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
+  const [pollingScanId, setPollingScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
   const [progressEvents, setProgressEvents] = useState([]);
   const [corpusFilters, setCorpusFilters] = useState({
@@ -151,14 +152,18 @@ function App() {
     pathContains: '',
   });
   const [corpusRequests, setCorpusRequests] = useState([]);
+  const [corpusFindings, setCorpusFindings] = useState([]);
   const [selectedExchange, setSelectedExchange] = useState(null);
   const [corpusState, setCorpusState] = useState('idle');
+  const [findingsState, setFindingsState] = useState('idle');
   const [proxyStatus, setProxyStatus] = useState({ running: false });
   const [proxyState, setProxyState] = useState('idle');
   const [pendingProxyRequests, setPendingProxyRequests] = useState([]);
   const [repoForm, setRepoForm] = useState({ url: '', token: '', branch: 'main' });
   const [repoState, setRepoState] = useState('idle');
   const [proofState, setProofState] = useState('safe mode');
+  const [proofTasks, setProofTasks] = useState([]);
+  const [evidenceArtifacts, setEvidenceArtifacts] = useState([]);
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -208,7 +213,9 @@ function App() {
   }, [addProgress]);
 
   const scanPayload = useMemo(() => buildScanPayload(form), [form]);
-  const findings = useMemo(() => normalizeFindings(scanStatus), [scanStatus]);
+  const statusFindings = useMemo(() => normalizeFindings(scanStatus), [scanStatus]);
+  const storedFindings = useMemo(() => normalizeFindings(corpusFindings, scanStatus?.target || scanPayload.url), [corpusFindings, scanPayload.url, scanStatus?.target]);
+  const findings = useMemo(() => mergeFindings(statusFindings, storedFindings), [statusFindings, storedFindings]);
   const dashboard = useMemo(
     () => buildDashboard(scanStatus, corpusRequests, progressEvents, scanPayload, findings),
     [scanStatus, corpusRequests, progressEvents, scanPayload, findings],
@@ -257,6 +264,7 @@ function App() {
       const response = await axios.post(`${API_URL}/api/scan`, scanPayload);
       const scanId = response.data.scan_id;
       setLatestScanId(scanId);
+      setPollingScanId(scanId);
       applyManualRequestUpdate((current) => ({ ...current, scanId }));
       addProgress({ scan_id: scanId, type: 'success', message: `Scan started: ${scanId}` });
       setLaunchState('started');
@@ -273,6 +281,12 @@ function App() {
       const response = await axios.get(`${API_URL}/api/scan/${scanId}`);
       setScanStatus(response.data);
       if (response.data?.scan_id) setLatestScanId(response.data.scan_id);
+      if (['completed', 'failed'].includes(String(response.data?.status || '').toLowerCase())) {
+        setPollingScanId('');
+        loadCorpus(scanId);
+        loadFindings(scanId);
+        loadProofData();
+      }
     } catch (error) {
       addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
     }
@@ -297,6 +311,37 @@ function App() {
     } catch (error) {
       setCorpusState('error');
       addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
+    }
+  };
+
+  const loadFindings = async (scanIdOverride) => {
+    const scanId = scanIdOverride || latestScanId || manualRequest.scanId;
+    if (!scanId) return;
+    setFindingsState('loading');
+    try {
+      const response = await axios.get(`${API_URL}/api/corpus/${scanId}/findings`);
+      setCorpusFindings(response.data.findings || []);
+      setFindingsState('loaded');
+    } catch (error) {
+      setFindingsState('error');
+      addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
+    }
+  };
+
+  const loadProofData = async (findingId = '') => {
+    setProofState((current) => (current === 'running' || current === 'creating' ? current : 'loading'));
+    try {
+      const params = findingId ? { finding_id: findingId } : {};
+      const [tasksResponse, artifactsResponse] = await Promise.all([
+        axios.get(`${API_URL}/api/proof/tasks`, { params }),
+        axios.get(`${API_URL}/api/evidence/artifacts`, { params }),
+      ]);
+      setProofTasks(tasksResponse.data.tasks || []);
+      setEvidenceArtifacts(artifactsResponse.data.artifacts || []);
+      setProofState('safe mode');
+    } catch (error) {
+      setProofState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
     }
   };
 
@@ -366,6 +411,7 @@ function App() {
       const response = await axios.post(`${API_URL}/api/scan/repo`, payload);
       const scanId = response.data.scan_id;
       setLatestScanId(scanId);
+      setPollingScanId(scanId);
       setRepoState('started');
       addProgress({ scan_id: scanId, type: 'success', message: `Repository scan started: ${scanId}` });
     } catch (error) {
@@ -604,6 +650,7 @@ function App() {
       });
       setProofState('created');
       addProgress({ type: 'success', message: `Proof task created for ${finding.title || finding.finding_id}` });
+      loadProofData();
       return response.data;
     } catch (error) {
       setProofState('error');
@@ -619,9 +666,11 @@ function App() {
     setProofState('running');
     try {
       const response = await axios.post(`${API_URL}/api/proof/${taskId}/run`);
-      setProofState(response.data?.status || 'complete');
+      setProofState(response.data?.result?.result || response.data?.status || 'complete');
       addProgress({ type: 'success', message: `Proof task completed: ${taskId}` });
       if (latestScanId) loadCorpus(latestScanId);
+      if (latestScanId) loadFindings(latestScanId);
+      loadProofData();
     } catch (error) {
       setProofState('error');
       addProgress({ type: 'error', message: apiError(error) });
@@ -635,6 +684,41 @@ function App() {
   const downloadJson = () => {
     if (latestScanId) window.open(`${API_URL}/api/download-json/${latestScanId}`, '_blank');
   };
+
+  useEffect(() => {
+    if (!pollingScanId) return undefined;
+    refreshStatus(pollingScanId);
+    const timer = window.setInterval(() => refreshStatus(pollingScanId), 3000);
+    return () => window.clearInterval(timer);
+    // refreshStatus is intentionally read from the current render; polling is keyed
+    // by the active backend scan id rather than every state transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollingScanId]);
+
+  useEffect(() => {
+    if (!latestScanId) return;
+    loadCorpus(latestScanId);
+    loadFindings(latestScanId);
+    loadProofData();
+    // Hydrate all live backend-backed panels whenever the active scan changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestScanId]);
+
+  useEffect(() => {
+    if (!latestScanId) return;
+    loadCorpus(latestScanId);
+    // Corpus filters should reload traffic without resetting the rest of the app.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [corpusFilters]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'test') return undefined;
+    if (!['manual', 'proxy'].includes(activePage)) return undefined;
+    refreshProxyStatus();
+    const timer = window.setInterval(refreshProxyStatus, 5000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage]);
 
   const renderPage = () => {
     switch (activePage) {
@@ -656,7 +740,7 @@ function App() {
           />
         );
       case 'findings':
-        return <Findings findings={findings} onNavigate={navigate} onRunProof={runProofTask} />;
+        return <Findings findings={findings} findingsState={findingsState} latestScanId={latestScanId} onNavigate={navigate} onRunProof={runProofTask} onRefresh={() => loadFindings(latestScanId)} />;
       case 'evidence':
         return (
           <EvidenceCorpus
@@ -731,7 +815,22 @@ function App() {
       case 'repository':
         return <RepositoryScan repoForm={repoForm} updateRepoForm={updateRepoForm} submitRepoScan={submitRepoScan} repoState={repoState} progressEvents={progressEvents} />;
       case 'proof':
-        return <ProofMode findings={findings} proofState={proofState} onCreateProof={createProofTask} onRunProof={runProofTask} corpusRequests={corpusRequests} loadExchange={loadExchange} />;
+        return (
+          <ProofMode
+            findings={findings}
+            proofState={proofState}
+            proofTasks={proofTasks}
+            evidenceArtifacts={evidenceArtifacts}
+            onCreateProof={createProofTask}
+            onRunProof={runProofTask}
+            onRefresh={loadProofData}
+            corpusRequests={corpusRequests}
+            selectedExchange={selectedExchange}
+            loadExchange={loadExchange}
+            sendRequestToRepeater={sendRequestToRepeater}
+            sendRequestToIntruder={sendRequestToIntruder}
+          />
+        );
       case 'reports':
         return <Reports latestScanId={latestScanId} progressEvents={progressEvents} onDownloadPdf={downloadPdf} onDownloadJson={downloadJson} />;
       case 'settings':
@@ -756,15 +855,18 @@ function App() {
   );
 }
 
-function normalizeFindings(status) {
-  const raw = status?.canonical_findings || status?.findings || status?.results?.findings || [];
+function normalizeFindings(source, fallbackTarget = '') {
+  const raw = Array.isArray(source)
+    ? source
+    : source?.canonical_findings || source?.findings || source?.results?.findings || [];
+  const target = Array.isArray(source) ? fallbackTarget : source?.target || fallbackTarget;
   if (!Array.isArray(raw)) return [];
   return raw.map((finding, index) => ({
     finding_id: finding.finding_id || finding.id || `finding-${index}`,
     title: finding.title || finding.name || finding.vulnerability || finding.vuln_type || 'Finding',
     severity: finding.severity || finding.risk || 'info',
     confidence: finding.confidence ?? finding.confidence_score ?? '',
-    target_url: finding.target_url || finding.url || status?.target || '',
+    target_url: finding.target_url || finding.url || target || '',
     normalized_endpoint: finding.normalized_endpoint || finding.endpoint || finding.path || '',
     method: finding.method || '',
     parameter_name: finding.parameter_name || finding.parameter || finding.param || '',
@@ -774,6 +876,16 @@ function normalizeFindings(status) {
     discovery_evidence: finding.discovery_evidence || finding.evidence || finding.description || '',
     ...finding,
   }));
+}
+
+function mergeFindings(...groups) {
+  const merged = new Map();
+  groups.flat().forEach((finding) => {
+    if (!finding) return;
+    const key = finding.finding_id || `${finding.title}:${finding.target_url}:${finding.parameter_name}`;
+    merged.set(key, { ...(merged.get(key) || {}), ...finding, finding_id: key });
+  });
+  return Array.from(merged.values());
 }
 
 function buildDashboard(status, requests, events, scanPayload, findings) {

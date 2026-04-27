@@ -1204,6 +1204,20 @@ def create_proof_task_endpoint(finding_id):
     return jsonify({'task': task.to_dict()})
 
 
+@app.route('/api/proof/tasks', methods=['GET'])
+def list_proof_tasks_endpoint():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    finding_id = str(request.args.get('finding_id') or '').strip()
+    tasks = repo.list_proof_tasks(finding_id=finding_id)
+    return jsonify({
+        'finding_id': finding_id,
+        'count': len(tasks),
+        'tasks': tasks,
+    })
+
+
 @app.route('/api/proof/<task_id>/run', methods=['POST'])
 def run_proof_task_endpoint(task_id):
     repo = _storage_repo()
@@ -1233,6 +1247,22 @@ def run_proof_task_endpoint(task_id):
     except Exception as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify({'result': result.to_dict()})
+
+
+@app.route('/api/evidence/artifacts', methods=['GET'])
+def list_evidence_artifacts_endpoint():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    finding_id = str(request.args.get('finding_id') or '').strip()
+    task_id = str(request.args.get('task_id') or '').strip()
+    artifacts = repo.list_evidence_artifacts(finding_id=finding_id, task_id=task_id)
+    return jsonify({
+        'finding_id': finding_id,
+        'task_id': task_id,
+        'count': len(artifacts),
+        'artifacts': artifacts,
+    })
 
 
 @app.route('/api/manual/replay', methods=['POST'])

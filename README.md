@@ -301,7 +301,9 @@ GET  http://127.0.0.1:5001/api/manual/proxy/pending
 POST http://127.0.0.1:5001/api/manual/proxy/pending/<request-id>
 POST http://127.0.0.1:5001/api/manual/proxy/stop
 POST http://127.0.0.1:5001/api/proof/<finding-id>/task
+GET  http://127.0.0.1:5001/api/proof/tasks
 POST http://127.0.0.1:5001/api/proof/<task-id>/run
+GET  http://127.0.0.1:5001/api/evidence/artifacts
 ```
 
 Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
@@ -310,6 +312,8 @@ Manual replay sends a bounded operator-specified request, blocks destructive ver
 Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
 
 Proof Mode is a deterministic post-scan verifier. The first executor safely proves open redirects by mutating the affected parameter to a controlled `.invalid` target, refusing out-of-scope findings, not following the redirect, storing the proof request/response as source `proof`, and linking sanitized evidence back to the finding.
+
+The frontend hydrates Findings, Evidence Corpus, Proof Mode, and Reports from these backend routes. It no longer uses frontend-only mock findings; empty states mean the backend has not produced or persisted that artifact yet.
 
 ## Canonical Models and Corpus
 
