@@ -1696,7 +1696,10 @@ function IntruderPanel({
 
 function RepeaterResponsePanel({ tab, selectedExchange, onSelectAttempt }) {
   const attempts = tab?.attempts || [];
-  const activeExchange = selectedRepeaterAttempt(tab)?.exchange || selectedExchange;
+  const activeAttempt = selectedRepeaterAttempt(tab);
+  const activeExchange = activeAttempt?.exchange || selectedExchange;
+  const activeIndex = attempts.findIndex((attempt) => attempt.attemptId === activeAttempt?.attemptId);
+  const previousAttempt = activeIndex >= 0 ? attempts[activeIndex + 1] : null;
   return (
     <div className="repeater-response-panel">
       <div className="repeater-attempts">
@@ -1721,7 +1724,56 @@ function RepeaterResponsePanel({ tab, selectedExchange, onSelectAttempt }) {
           );
         })}
       </div>
+      <ResponseDiffPanel currentAttempt={activeAttempt} previousAttempt={previousAttempt} />
       <ExchangeDetail exchange={activeExchange} />
+    </div>
+  );
+}
+
+function ResponseDiffPanel({ currentAttempt, previousAttempt }) {
+  const currentResponse = currentAttempt?.exchange?.response || null;
+  const previousResponse = previousAttempt?.exchange?.response || null;
+  if (!currentResponse) {
+    return null;
+  }
+  if (!previousResponse) {
+    return (
+      <div className="response-diff-panel">
+        <div className="diff-summary">
+          <strong>Diff</strong>
+          <span>Run this request again to compare response changes.</span>
+        </div>
+      </div>
+    );
+  }
+  const lines = buildSimpleDiff(previousResponse.body_excerpt, currentResponse.body_excerpt);
+  return (
+    <div className="response-diff-panel">
+      <div className="diff-summary">
+        <strong>Diff vs previous</strong>
+        <span>{attemptDelta(currentAttempt, previousAttempt)}</span>
+      </div>
+      <div className="diff-metrics">
+        <Metric label="Status" value={`${previousResponse.status_code || '?'} -> ${currentResponse.status_code || '?'}`} />
+        <Metric
+          label="Length"
+          value={`${previousResponse.content_length ?? 0} -> ${currentResponse.content_length ?? 0}`}
+        />
+        <Metric
+          label="Timing"
+          value={`${previousResponse.response_time_ms ?? 0} -> ${currentResponse.response_time_ms ?? 0} ms`}
+        />
+      </div>
+      <div className="diff-lines" aria-label="Response body diff">
+        {lines.length === 0 ? (
+          <p className="empty-state">Body excerpts are unchanged.</p>
+        ) : lines.map((line, index) => (
+          <div className={`diff-line diff-${line.kind}`} key={`${line.kind}-${index}-${line.text}`}>
+            <span>{line.kind === 'added' ? '+' : line.kind === 'removed' ? '-' : ' '}</span>
+            <code>{line.text || ' '}</code>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2526,6 +2578,38 @@ function attemptDelta(attempt, previous) {
   const timeDelta = Number(currentResponse.response_time_ms || 0) - Number(previousResponse.response_time_ms || 0);
   if (timeDelta) parts.push(`${timeDelta > 0 ? '+' : ''}${timeDelta} ms`);
   return parts.join(', ') || 'same';
+}
+
+function buildSimpleDiff(beforeValue, afterValue) {
+  const before = normalizeDiffText(beforeValue);
+  const after = normalizeDiffText(afterValue);
+  if (before === after) return [];
+  const beforeLines = before.split(/\r?\n/).slice(0, 80);
+  const afterLines = after.split(/\r?\n/).slice(0, 80);
+  const rows = [];
+  const max = Math.max(beforeLines.length, afterLines.length);
+  for (let index = 0; index < max; index += 1) {
+    const previous = beforeLines[index];
+    const current = afterLines[index];
+    if (previous === current) {
+      if (previous !== undefined && rows.length < 40) rows.push({ kind: 'same', text: previous });
+      continue;
+    }
+    if (previous !== undefined) rows.push({ kind: 'removed', text: previous });
+    if (current !== undefined) rows.push({ kind: 'added', text: current });
+    if (rows.length >= 80) break;
+  }
+  return rows.slice(0, 80);
+}
+
+function normalizeDiffText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (_error) {
+    return String(value);
+  }
 }
 
 function safePath(value) {
