@@ -45,6 +45,7 @@ export default function EvidenceCorpus({
               <option value="replay">replay</option>
               <option value="fuzzer">fuzzer</option>
               <option value="proof">proof</option>
+              <option value="authz">authz</option>
             </select>
             <input placeholder="status" value={corpusFilters.statusCode} onChange={(event) => updateCorpusFilter('statusCode', event.target.value)} />
           </div>

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 
 from scanner.core.async_engine import AsyncScanEngine, build_url_param_pairs
+from scanner.core.authorization_matrix import run_authorization_matrix
 from scanner.core.crawler import WebCrawler
 from scanner.core.live_scan import LiveDiscoveryScanner
 from scanner.core.sequence_runner import run_sequence_workflows
@@ -1179,6 +1180,54 @@ def list_corpus_findings(scan_id):
         'count': len(findings),
         'findings': findings,
     })
+
+
+@app.route('/api/authz/matrix/run', methods=['POST'])
+def run_authorization_matrix_endpoint():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    payload = request.get_json(silent=True) or {}
+    scan_id = str(payload.get('scan_id') or '').strip()
+    if not scan_id:
+        return jsonify({'error': 'scan_id is required'}), 400
+    scan_payload = repo.get_scan(scan_id)
+    if not scan_payload:
+        return jsonify({'error': 'Scan not found'}), 404
+
+    raw_profiles = payload.get('auth_profiles') or payload.get('profiles') or []
+    if not isinstance(raw_profiles, list) or len(raw_profiles) < 2:
+        return jsonify({'error': 'Provide at least two auth_profiles for matrix comparison'}), 400
+
+    target_base_url = str(scan_payload.get('target_base_url') or payload.get('target_base_url') or '')
+    auth_profiles = []
+    try:
+        for index, raw_profile in enumerate(raw_profiles):
+            if not isinstance(raw_profile, dict):
+                raise ValueError('Each auth profile must be an object')
+            profile = build_auth_profile_from_config(
+                raw_profile,
+                base_url=target_base_url,
+                default_name=f"matrix-role-{index + 1}",
+            )
+            auth_profiles.append(profile)
+            repo.save_auth_profile(profile)
+
+        result = run_authorization_matrix(
+            repository=repo,
+            scan_id=scan_id,
+            auth_profiles=auth_profiles,
+            request_ids=list(payload.get('request_ids') or []),
+            max_requests=int(payload.get('max_requests') or 20),
+            timeout=int(payload.get('timeout') or 10),
+            safety_mode=str(payload.get('safety_mode') or scan_payload.get('safety_mode') or 'safe'),
+            allow_state_changing=bool(payload.get('allow_state_changing') or False),
+        )
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    active_scans.setdefault(scan_id, {}).setdefault('authz_matrix_runs', []).append(result.to_dict())
+    return jsonify(result.to_dict())
 
 
 @app.route('/api/proof/<finding_id>/task', methods=['POST'])

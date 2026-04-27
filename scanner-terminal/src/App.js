@@ -164,6 +164,9 @@ function App() {
   const [proofState, setProofState] = useState('safe mode');
   const [proofTasks, setProofTasks] = useState([]);
   const [evidenceArtifacts, setEvidenceArtifacts] = useState([]);
+  const [authzProfilesText, setAuthzProfilesText] = useState('');
+  const [authzMatrixState, setAuthzMatrixState] = useState('idle');
+  const [authzMatrixResult, setAuthzMatrixResult] = useState(null);
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -252,6 +255,10 @@ function App() {
 
   const updateRepoForm = (name, value) => {
     setRepoForm((current) => ({ ...current, [name]: value }));
+  };
+
+  const updateAuthzProfilesText = (value) => {
+    setAuthzProfilesText(value);
   };
 
   const submitScan = async (event) => {
@@ -677,6 +684,48 @@ function App() {
     }
   };
 
+  const runAuthorizationMatrix = async () => {
+    if (!latestScanId) {
+      addProgress({ type: 'error', message: 'Run or select a scan before starting authorization matrix testing.' });
+      return;
+    }
+    let profiles;
+    try {
+      const parsed = JSON.parse(authzProfilesText || '[]');
+      profiles = Array.isArray(parsed) ? parsed : parsed.auth_profiles || parsed.profiles || [];
+    } catch (_error) {
+      setAuthzMatrixState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: 'Authorization matrix profiles must be valid JSON.' });
+      return;
+    }
+    if (!Array.isArray(profiles) || profiles.length < 2) {
+      setAuthzMatrixState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: 'Provide at least two auth profiles for authorization matrix testing.' });
+      return;
+    }
+    setAuthzMatrixState('running');
+    try {
+      const response = await axios.post(`${API_URL}/api/authz/matrix/run`, {
+        scan_id: latestScanId,
+        auth_profiles: profiles,
+        safety_mode: 'safe',
+        max_requests: 20,
+      });
+      setAuthzMatrixResult(response.data);
+      setAuthzMatrixState('complete');
+      addProgress({
+        scan_id: latestScanId,
+        type: response.data?.findings?.length ? 'warning' : 'success',
+        message: `Authorization matrix tested ${response.data?.compared_requests || 0} requests and produced ${response.data?.findings?.length || 0} findings.`,
+      });
+      await loadCorpus(latestScanId);
+      await loadFindings(latestScanId);
+    } catch (error) {
+      setAuthzMatrixState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
+    }
+  };
+
   const downloadPdf = () => {
     if (latestScanId) window.open(`${API_URL}/api/download/${latestScanId}`, '_blank');
   };
@@ -821,6 +870,12 @@ function App() {
             proofState={proofState}
             proofTasks={proofTasks}
             evidenceArtifacts={evidenceArtifacts}
+            latestScanId={latestScanId}
+            authzProfilesText={authzProfilesText}
+            authzMatrixState={authzMatrixState}
+            authzMatrixResult={authzMatrixResult}
+            updateAuthzProfilesText={updateAuthzProfilesText}
+            runAuthorizationMatrix={runAuthorizationMatrix}
             onCreateProof={createProofTask}
             onRunProof={runProofTask}
             onRefresh={loadProofData}

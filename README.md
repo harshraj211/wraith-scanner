@@ -9,6 +9,7 @@ Wraith now ships with four major engine upgrades plus the first VA+Proof platfor
 - Deep-state SPA exploration that mutates browser storage and walks multi-step flows before fuzzing.
 - Richer OOB profiling for blind SSRF-style callbacks with per-parameter correlation and egress hints.
 - Canonical scan schemas, stable finding IDs, redaction, JSON exports, and a durable SQLite request/response corpus.
+- Safe Authorization Matrix / BOLA role-diff testing from the persisted request corpus.
 
 ## What It Scans
 
@@ -22,6 +23,7 @@ Wraith now ships with four major engine upgrades plus the first VA+Proof platfor
 - Command injection
 - Path traversal
 - IDOR
+- BOLA / authorization matrix role-diff checks
 - Open redirect
 - CSRF
 - Headers and crypto misconfigurations
@@ -293,6 +295,7 @@ Inspect persisted corpus traffic from the frontend Corpus panel or through the A
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
 GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
+POST http://127.0.0.1:5001/api/authz/matrix/run
 POST http://127.0.0.1:5001/api/manual/replay
 POST http://127.0.0.1:5001/api/manual/proxy/start
 GET  http://127.0.0.1:5001/api/manual/proxy/status
@@ -310,6 +313,20 @@ Request filters include `method`, `host`, `path_contains`, `status_code`, `conte
 Manual replay sends a bounded operator-specified request, blocks destructive verbs in safe mode unless explicitly allowed, and stores the sanitized exchange as source `manual`.
 
 Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
+
+Authorization Matrix / BOLA testing replays object-specific corpus requests under two or more supplied auth profiles. Safe mode only sends read-only methods, refuses out-of-scope requests, does not follow redirects, stores replay traffic as source `authz`, and persists high-confidence role-diff findings plus sanitized diff evidence.
+
+```json
+{
+  "scan_id": "scan-id",
+  "safety_mode": "safe",
+  "max_requests": 20,
+  "auth_profiles": [
+    {"type": "cookie", "role": "user_a", "cookies": {"session": "value-a"}},
+    {"type": "cookie", "role": "user_b", "cookies": {"session": "value-b"}}
+  ]
+}
+```
 
 Proof Mode is a deterministic post-scan verifier. The first executor safely proves open redirects by mutating the affected parameter to a controlled `.invalid` target, refusing out-of-scope findings, not following the redirect, storing the proof request/response as source `proof`, and linking sanitized evidence back to the finding.
 
@@ -384,6 +401,18 @@ Blind SSRF callbacks are now labeled per vector and parameter, then correlated i
 - inference notes.
 
 These hints are heuristic and should be treated as supporting evidence, not ground truth infrastructure attribution.
+
+### Authorization Matrix / BOLA
+
+The matrix engine consumes the existing corpus and supplied role profiles:
+
+1. selects object-specific requests such as `/users/123`, `/invoices/{id}`, or `?account_id=...`,
+2. replays them under the baseline role and compared roles,
+3. compares status, denial signals, body hashes, JSON shape hashes, and response size,
+4. creates canonical `idor` findings when a non-privileged compared role receives the same protected object,
+5. links sanitized diff artifacts and `authz` request/response records back to the finding.
+
+In safe mode, state-changing methods are skipped unless a future intrusive workflow explicitly permits them.
 
 ## Safe Demo
 

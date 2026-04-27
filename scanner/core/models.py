@@ -56,6 +56,7 @@ REQUEST_SOURCES = {
     "fuzzer",
     "proof",
     "manual",
+    "authz",
 }
 ARTIFACT_TYPES = {
     "request",

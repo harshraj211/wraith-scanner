@@ -8,3 +8,4 @@ Current implementation status:
 
 - Manual Workbench now has proxy capture, Repeater, Intruder, Decoder, response diffs, and corpus-backed request history.
 - Proof Mode skeleton is underway with deterministic task creation, policy checks, evidence persistence, and a safe open-redirect proof executor.
+- Authorization Matrix / BOLA v1 is now underway with safe role-diff replay from the corpus, `authz` evidence storage, and frontend Proof Mode controls.

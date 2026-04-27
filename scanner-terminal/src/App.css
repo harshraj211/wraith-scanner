@@ -1537,6 +1537,71 @@ textarea:focus {
   gap: 14px;
 }
 
+.authz-matrix-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(0, 1.1fr);
+  gap: 14px;
+}
+
+.authz-matrix-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.authz-matrix-form p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.authz-matrix-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.authz-matrix-actions span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.authz-result-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.authz-result-strip div {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #080d16;
+}
+
+.authz-result-strip span {
+  display: block;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.authz-result-strip strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--primary);
+  font-family: var(--mono);
+  font-size: 20px;
+}
+
 .proof-policy-card {
   padding: 18px;
   border: 1px solid rgba(52, 211, 153, 0.28);
@@ -1646,6 +1711,7 @@ textarea:focus {
   .intruder-layout,
   .proof-grid,
   .proof-data-grid,
+  .authz-matrix-grid,
   .split-workspace {
     grid-template-columns: 1fr;
   }
@@ -1719,6 +1785,7 @@ textarea:focus {
   .mode-grid,
   .settings-grid,
   .proof-data-grid,
+  .authz-matrix-grid,
   .reports-grid,
   .report-export-grid,
   .form-grid,

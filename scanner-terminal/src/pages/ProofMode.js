@@ -2,6 +2,7 @@ import React from 'react';
 import PageHeader from '../components/layout/PageHeader';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
+import CodeEditorPanel from '../components/ui/CodeEditorPanel';
 import DataTable from '../components/ui/DataTable';
 import ProofTaskPanel from '../components/scanner/ProofTaskPanel';
 import EvidenceTable from '../components/scanner/EvidenceTable';
@@ -12,6 +13,12 @@ export default function ProofMode({
   proofState,
   proofTasks = [],
   evidenceArtifacts = [],
+  latestScanId,
+  authzProfilesText = '',
+  authzMatrixState = 'idle',
+  authzMatrixResult,
+  updateAuthzProfilesText,
+  runAuthorizationMatrix,
   onCreateProof,
   onRunProof,
   onRefresh,
@@ -22,6 +29,8 @@ export default function ProofMode({
   sendRequestToIntruder,
 }) {
   const proofRequests = corpusRequests.filter((item) => item.source === 'proof');
+  const authzRequests = corpusRequests.filter((item) => item.source === 'authz');
+  const authzFindings = authzMatrixResult?.findings || [];
   return (
     <div className="page-stack">
       <PageHeader
@@ -49,6 +58,49 @@ export default function ProofMode({
             <li>Sanitized evidence artifacts only.</li>
           </ul>
         </section>
+      </div>
+
+      <div className="authz-matrix-grid">
+        <Card title="Authorization Matrix / BOLA" eyebrow="Role Diff Engine">
+          <div className="authz-matrix-form">
+            <p>
+              Paste two or more auth profiles as JSON. The first profile is treated as the baseline owner role;
+              Wraith replays object-specific read requests under the remaining roles in safe mode.
+            </p>
+            <CodeEditorPanel
+              title="Auth profiles JSON"
+              value={authzProfilesText}
+              onChange={updateAuthzProfilesText}
+              minRows={8}
+              placeholder="Paste an auth profile JSON array for authorized test roles."
+            />
+            <div className="authz-matrix-actions">
+              <Button onClick={runAuthorizationMatrix} disabled={!latestScanId || authzMatrixState === 'running'}>
+                {authzMatrixState === 'running' ? 'Running matrix' : 'Run matrix'}
+              </Button>
+              <span>{latestScanId ? `scan ${latestScanId}` : 'No scan selected'}</span>
+            </div>
+          </div>
+        </Card>
+        <Card title="Matrix Results" eyebrow={authzMatrixState}>
+          <div className="authz-result-strip">
+            <div><span>Compared</span><strong>{authzMatrixResult?.compared_requests || 0}</strong></div>
+            <div><span>Findings</span><strong>{authzFindings.length}</strong></div>
+            <div><span>Skipped</span><strong>{authzMatrixResult?.skipped_requests?.length || 0}</strong></div>
+            <div><span>Roles</span><strong>{authzMatrixResult?.roles?.length || 0}</strong></div>
+          </div>
+          <DataTable
+            columns={[
+              { key: 'title', label: 'Finding', width: 'minmax(220px, 1fr)' },
+              { key: 'auth_role', label: 'Compared role', width: '150px' },
+              { key: 'confidence', label: 'Conf', width: '80px' },
+              { key: 'normalized_endpoint', label: 'Endpoint', width: 'minmax(220px, 1fr)' },
+            ]}
+            rows={authzFindings}
+            rowKey="finding_id"
+            emptyTitle="No matrix findings"
+          />
+        </Card>
       </div>
 
       <div className="proof-data-grid">
@@ -82,9 +134,9 @@ export default function ProofMode({
       </div>
 
       <div className="corpus-layout">
-        <Card title="Proof Requests" eyebrow={`${proofRequests.length} corpus exchanges`}>
+        <Card title="Proof & Authz Requests" eyebrow={`${proofRequests.length + authzRequests.length} corpus exchanges`}>
           <EvidenceTable
-            requests={proofRequests}
+            requests={[...proofRequests, ...authzRequests]}
             selectedExchange={selectedExchange}
             onSelect={loadExchange}
             onSendToRepeater={sendRequestToRepeater}

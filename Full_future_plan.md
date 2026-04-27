@@ -452,6 +452,10 @@ Outputs:
 
 High value:
 
+- Authorization Matrix / BOLA role-diff engine.
+  - v1 implemented direction: replay existing object-specific corpus requests under supplied `user_a`, `user_b`, `anonymous`, or `admin` profiles.
+  - Safe mode sends only read-only requests, refuses out-of-scope URLs, stores source `authz` traffic, and emits sanitized diff evidence.
+  - Next step: integrate disposable test-resource creation and sequence-workflow setup before enabling state-changing authorization checks.
 - JWT weakness checks.
 - CORS deeper checks.
 - Cache poisoning checks.
