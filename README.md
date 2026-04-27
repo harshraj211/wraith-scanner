@@ -112,7 +112,7 @@ cd scanner-terminal
 npm start
 ```
 
-The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode contains setup, visual risk dashboards, progress, corpus, and terminal panels. Manual mode provides a request history, replay editor, response inspector, and terminal panel.
+The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides request history, a Repeater-style editor, response inspector, reporting actions, and terminal panel.
 
 ### CLI
 

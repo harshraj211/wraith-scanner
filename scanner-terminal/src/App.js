@@ -45,12 +45,24 @@ const initialManualRequest = {
   allowStateChange: false,
 };
 
+function initialViewFromLocation() {
+  const hash = String(window.location.hash || '').toLowerCase();
+  if (['#scan-setup', '#result-dashboard', '#traffic-corpus', '#terminal', '#automated'].includes(hash)) {
+    return 'automated';
+  }
+  if (['#proxy-history', '#replay', '#response', '#manual'].includes(hash)) {
+    return 'manual';
+  }
+  if (hash === '#start' || hash === '#mode') return 'mode';
+  return 'home';
+}
+
 function App() {
   const terminalRef = useRef(null);
   const fitAddonRef = useRef(null);
   const termRef = useRef(null);
   const [terminal, setTerminal] = useState(null);
-  const [view, setView] = useState('home');
+  const [view, setViewState] = useState(initialViewFromLocation);
   const [socketState, setSocketState] = useState('idle');
   const [form, setForm] = useState(initialForm);
   const [manualRequest, setManualRequest] = useState(initialManualRequest);
@@ -86,6 +98,26 @@ function App() {
     () => buildDashboard(scanStatus, corpusRequests, progressEvents, scanPayload),
     [scanPayload, scanStatus, corpusRequests, progressEvents],
   );
+
+  const setView = useCallback((nextView) => {
+    setViewState(nextView);
+    const hashByView = {
+      home: '',
+      mode: '#start',
+      automated: '#scan-setup',
+      manual: '#replay',
+    };
+    const nextHash = hashByView[nextView] || '';
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${nextHash}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    const syncHash = () => setViewState(initialViewFromLocation());
+    window.addEventListener('hashchange', syncHash);
+    return () => window.removeEventListener('hashchange', syncHash);
+  }, []);
 
   useEffect(() => {
     if (!terminalRef.current) return undefined;
@@ -546,72 +578,90 @@ function AutomatedPage({
   terminalRef,
 }) {
   return (
-    <div className="app-shell">
-      <aside className="app-rail">
-        <div className="rail-title">
-          <strong>Automated</strong>
-          <span>{form.safetyMode}</span>
+    <div className="app-shell enterprise-shell">
+      <EnterpriseRail
+        mode="Automated"
+        activeTitle={scanPayloadTitle(form.targetUrl)}
+        scanId={latestScanId}
+        status={scanStatus?.status || launchState}
+        requests={corpusRequests.length}
+      />
+      <main className="enterprise-workspace">
+        <WorkspaceHeader
+          title={scanPayloadTitle(form.targetUrl)}
+          subtitle="Automated scan workspace"
+          scanId={latestScanId}
+          onRefresh={() => refreshStatus()}
+          onScan={submitScan}
+          scanDisabled={launchState === 'running'}
+          scanLabel={launchState === 'running' ? 'Starting' : 'Scan again'}
+        />
+        <ScanMetaBar
+          status={scanStatus?.status || (latestScanId ? launchState : 'Not started')}
+          startTime={scanStatus?.start_time || 'Pending'}
+          endTime={scanStatus?.end_time || 'Pending'}
+          duration={scanStatus?.duration || 'Pending'}
+        />
+        <WorkspaceTabs
+          tabs={[
+            ['Overview', '#result-dashboard'],
+            ['Issues', '#result-dashboard'],
+            ['Scanned URLs', '#traffic-corpus'],
+            ['Scan details', '#scan-setup'],
+            ['Reporting & logs', '#terminal'],
+          ]}
+        />
+        <ReportActions scanId={latestScanId} />
+
+        <div className="automated-grid">
+          <section id="scan-setup" className="setup-panel">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Automated mode</span>
+                <h1>Scan Setup</h1>
+              </div>
+              <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
+                {launchState === 'running' ? 'Starting' : 'Start Scan'}
+              </button>
+            </div>
+            <ScanSetupForm form={form} updateForm={updateForm} submitScan={submitScan} />
+          </section>
+
+          <section id="result-dashboard" className="dashboard-panel">
+            <div className="section-heading compact">
+              <div>
+                <span className="eyebrow">Visual results</span>
+                <h2>Risk Dashboard</h2>
+              </div>
+              <button className="secondary-button" onClick={() => refreshStatus()} disabled={!latestScanId}>Refresh</button>
+            </div>
+            <ResultDashboard dashboard={dashboard} scanId={latestScanId} status={scanStatus} launchState={launchState} />
+          </section>
+
+          <section className="progress-panel">
+            <div className="section-heading compact">
+              <div>
+                <span className="eyebrow">Run state</span>
+                <h2>Progress</h2>
+              </div>
+            </div>
+            <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
+            <ProgressEvents events={progressEvents} />
+          </section>
+
+          <section id="traffic-corpus" className="corpus-panel">
+            <CorpusHeader
+              latestScanId={latestScanId}
+              loadCorpus={loadCorpus}
+              corpusState={corpusState}
+              corpusFilters={corpusFilters}
+              updateCorpusFilter={updateCorpusFilter}
+            />
+            <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+          </section>
+
+          <TerminalPanel terminalRef={terminalRef} />
         </div>
-        <nav className="rail-nav" aria-label="Automated sections">
-          <a href="#scan-setup">Setup</a>
-          <a href="#result-dashboard">Dashboard</a>
-          <a href="#traffic-corpus">Corpus</a>
-          <a href="#terminal">Terminal</a>
-        </nav>
-        <div className="rail-metrics">
-          <Metric label="Imports" value={importCount} />
-          <Metric label="Workflows" value={workflowCount} />
-          <Metric label="Requests" value={corpusRequests.length} />
-        </div>
-      </aside>
-      <main className="automated-grid">
-        <section id="scan-setup" className="setup-panel">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">Automated mode</span>
-              <h1>Scan Setup</h1>
-            </div>
-            <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
-              {launchState === 'running' ? 'Starting' : 'Start Scan'}
-            </button>
-          </div>
-          <ScanSetupForm form={form} updateForm={updateForm} submitScan={submitScan} />
-        </section>
-
-        <section id="result-dashboard" className="dashboard-panel">
-          <div className="section-heading compact">
-            <div>
-              <span className="eyebrow">Visual results</span>
-              <h2>Risk Dashboard</h2>
-            </div>
-            <button className="secondary-button" onClick={() => refreshStatus()} disabled={!latestScanId}>Refresh</button>
-          </div>
-          <ResultDashboard dashboard={dashboard} scanId={latestScanId} status={scanStatus} launchState={launchState} />
-        </section>
-
-        <section className="progress-panel">
-          <div className="section-heading compact">
-            <div>
-              <span className="eyebrow">Run state</span>
-              <h2>Progress</h2>
-            </div>
-          </div>
-          <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
-          <ProgressEvents events={progressEvents} />
-        </section>
-
-        <section id="traffic-corpus" className="corpus-panel">
-          <CorpusHeader
-            latestScanId={latestScanId}
-            loadCorpus={loadCorpus}
-            corpusState={corpusState}
-            corpusFilters={corpusFilters}
-            updateCorpusFilter={updateCorpusFilter}
-          />
-          <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
-        </section>
-
-        <TerminalPanel terminalRef={terminalRef} />
       </main>
     </div>
   );
@@ -633,64 +683,180 @@ function ManualPage({
   terminalRef,
 }) {
   return (
-    <div className="app-shell manual-shell">
-      <aside className="app-rail">
-        <div className="rail-title">
-          <strong>Manual</strong>
-          <span>{manualRequest.safetyMode}</span>
-        </div>
-        <nav className="rail-nav" aria-label="Manual tools">
-          <a href="#proxy-history">Proxy</a>
-          <a href="#replay">Replay</a>
-          <a href="#response">Response</a>
-          <a href="#terminal">Terminal</a>
-        </nav>
-        <div className="rail-metrics">
-          <Metric label="Scan ID" value={manualRequest.scanId || latestScanId || 'none'} />
-          <Metric label="History" value={corpusRequests.length} />
-          <Metric label="State" value={manualState} />
-        </div>
-      </aside>
+    <div className="app-shell manual-shell enterprise-shell">
+      <EnterpriseRail
+        mode="Manual"
+        activeTitle="Manual testing"
+        scanId={manualRequest.scanId || latestScanId}
+        status={manualState}
+        requests={corpusRequests.length}
+      />
 
-      <main className="manual-grid">
-        <section id="proxy-history" className="history-panel">
-          <CorpusHeader
-            latestScanId={manualRequest.scanId || latestScanId}
-            loadCorpus={loadCorpus}
-            corpusState={corpusState}
-            corpusFilters={corpusFilters}
-            updateCorpusFilter={updateCorpusFilter}
-            compact
-          />
-          <RequestHistory requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
-        </section>
+      <main className="enterprise-workspace manual-workspace">
+        <WorkspaceHeader
+          title="Manual testing"
+          subtitle="Proxy-style request history, repeater, response inspector"
+          scanId={manualRequest.scanId || latestScanId}
+          onRefresh={() => loadCorpus(manualRequest.scanId || latestScanId)}
+          onScan={sendManualReplay}
+          scanDisabled={manualState === 'sending'}
+          scanLabel={manualState === 'sending' ? 'Sending' : 'Send request'}
+        />
+        <ScanMetaBar
+          status={manualState}
+          startTime="Manual"
+          endTime="Operator controlled"
+          duration={`${corpusRequests.length} captured`}
+        />
+        <WorkspaceTabs
+          tabs={[
+            ['Proxy history', '#proxy-history'],
+            ['Repeater', '#replay'],
+            ['Response inspector', '#response'],
+            ['Reporting & logs', '#terminal'],
+          ]}
+        />
+        <ReportActions scanId={manualRequest.scanId || latestScanId} />
 
-        <section id="replay" className="replay-panel">
-          <div className="section-heading compact">
-            <div>
-              <span className="eyebrow">Repeater</span>
-              <h2>Request</h2>
+        <div className="manual-grid">
+          <section id="proxy-history" className="history-panel">
+            <CorpusHeader
+              latestScanId={manualRequest.scanId || latestScanId}
+              loadCorpus={loadCorpus}
+              corpusState={corpusState}
+              corpusFilters={corpusFilters}
+              updateCorpusFilter={updateCorpusFilter}
+              compact
+            />
+            <RequestHistory requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+          </section>
+
+          <section id="replay" className="replay-panel">
+            <div className="section-heading compact">
+              <div>
+                <span className="eyebrow">Repeater</span>
+                <h2>Request</h2>
+              </div>
+              <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
+                {manualState === 'sending' ? 'Sending' : 'Send'}
+              </button>
             </div>
-            <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
-              {manualState === 'sending' ? 'Sending' : 'Send'}
-            </button>
-          </div>
-          <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
-        </section>
+            <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
+          </section>
 
-        <section id="response" className="response-panel">
-          <div className="section-heading compact">
-            <div>
-              <span className="eyebrow">Inspector</span>
-              <h2>Response</h2>
+          <section id="response" className="response-panel">
+            <div className="section-heading compact">
+              <div>
+                <span className="eyebrow">Inspector</span>
+                <h2>Response</h2>
+              </div>
             </div>
-          </div>
-          <ExchangeDetail exchange={selectedExchange} />
-        </section>
+            <ExchangeDetail exchange={selectedExchange} />
+          </section>
 
-        <TerminalPanel terminalRef={terminalRef} />
+          <TerminalPanel terminalRef={terminalRef} />
+        </div>
       </main>
     </div>
+  );
+}
+
+function EnterpriseRail({ mode, activeTitle, scanId, status, requests }) {
+  const sampleScans = [
+    ['Schuppe and Sons', scanId || 'latest', status || 'ready'],
+    ['API staging', 'api-imports', 'queued'],
+    ['SPA auth flow', 'spa-state', 'ready'],
+    ['Manual session', 'manual', 'capturing'],
+    ['Source review', 'sast', 'complete'],
+  ];
+
+  return (
+    <aside className="app-rail enterprise-rail">
+      <div className="rail-section rail-accent">
+        <strong>{mode}</strong>
+        <span>{activeTitle}</span>
+      </div>
+      <div className="rail-filter">
+        <button>Filter by</button>
+        <button>Most recent</button>
+      </div>
+      <div className="scan-list" aria-label={`${mode} scan list`}>
+        {sampleScans.map(([name, id, state]) => (
+          <a className={id === (scanId || 'latest') ? 'scan-list-row active' : 'scan-list-row'} href="#scan-setup" key={`${name}-${id}`}>
+            <span>{name}</span>
+            <strong>{state}</strong>
+          </a>
+        ))}
+      </div>
+      <div className="rail-metrics">
+        <Metric label="Scan ID" value={scanId || 'none'} />
+        <Metric label="Requests" value={requests} />
+        <Metric label="Mode" value={mode} />
+      </div>
+    </aside>
+  );
+}
+
+function WorkspaceHeader({ title, subtitle, scanId, onRefresh, onScan, scanDisabled, scanLabel }) {
+  return (
+    <section className="workspace-header">
+      <div>
+        <span className="workspace-back">Back</span>
+        <h1>{title}</h1>
+        <p>{subtitle}</p>
+      </div>
+      <div className="workspace-actions">
+        <button className="secondary-button" onClick={onRefresh} disabled={!scanId}>Refresh</button>
+        <button className="secondary-button" onClick={() => scanId && window.open(`${API_URL}/api/download-json/${scanId}`, '_blank')} disabled={!scanId}>JSON</button>
+        <button className="primary-button" onClick={onScan} disabled={scanDisabled}>{scanLabel}</button>
+      </div>
+    </section>
+  );
+}
+
+function ScanMetaBar({ status, startTime, endTime, duration }) {
+  return (
+    <section className="scan-meta-bar">
+      <div>
+        <span>Status</span>
+        <strong>{status || 'Pending'}</strong>
+      </div>
+      <div>
+        <span>Start time</span>
+        <strong>{startTime || 'Pending'}</strong>
+      </div>
+      <div>
+        <span>End time</span>
+        <strong>{endTime || 'Pending'}</strong>
+      </div>
+      <div>
+        <span>Duration</span>
+        <strong>{duration || 'Pending'}</strong>
+      </div>
+    </section>
+  );
+}
+
+function WorkspaceTabs({ tabs }) {
+  return (
+    <nav className="workspace-tabs" aria-label="Workspace sections">
+      {tabs.map(([label, href], index) => (
+        <a className={index === 0 ? 'active' : ''} href={href} key={label}>{label}</a>
+      ))}
+    </nav>
+  );
+}
+
+function ReportActions({ scanId }) {
+  return (
+    <section className="report-strip">
+      <span>Reporting & logs</span>
+      <p>PDF and JSON reports are generated by the backend after scans complete.</p>
+      <div>
+        <button className="secondary-button" onClick={() => scanId && window.open(`${API_URL}/api/download/${scanId}`, '_blank')} disabled={!scanId}>Download PDF</button>
+        <button className="secondary-button" onClick={() => scanId && window.open(`${API_URL}/api/download-json/${scanId}`, '_blank')} disabled={!scanId}>Download JSON</button>
+      </div>
+    </section>
   );
 }
 
@@ -1162,6 +1328,15 @@ function formatDetail(value) {
     return JSON.stringify(value, null, 2);
   } catch (error) {
     return String(value);
+  }
+}
+
+function scanPayloadTitle(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname || 'Wraith scan';
+  } catch (error) {
+    return url || 'Wraith scan';
   }
 }
 
