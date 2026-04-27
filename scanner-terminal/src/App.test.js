@@ -78,7 +78,7 @@ test('manual intruder exposes capped payload runner controls', () => {
   fireEvent.click(screen.getByRole('button', { name: /^intruder$/i }));
 
   expect(screen.getByRole('heading', { name: /payload runner/i })).toBeInTheDocument();
-  expect(screen.getByLabelText(/payload marker/i)).toHaveValue('§payload§');
+  expect(screen.getByLabelText(/payload marker/i)).toHaveValue('{{payload}}');
   expect(screen.getByLabelText(/max requests/i)).toHaveValue('25');
   expect(screen.getByRole('button', { name: /run attack/i })).toBeInTheDocument();
 });

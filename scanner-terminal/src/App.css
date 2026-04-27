@@ -2039,6 +2039,27 @@ textarea:focus {
   background: #f8fafc;
 }
 
+.intruder-toolbar {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef2f6;
+  background: #ffffff;
+}
+
+.intruder-toolbar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #536273;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .intruder-table {
   min-height: 0;
   flex: 1;
@@ -2060,6 +2081,8 @@ textarea:focus {
   border-radius: 4px;
   background: #ffffff;
   color: #253446;
+  cursor: pointer;
+  text-align: left;
 }
 
 .intruder-row-head {
@@ -2068,9 +2091,16 @@ textarea:focus {
   z-index: 1;
   background: #f8fafc;
   color: #536273;
+  cursor: default;
   font-size: 11px;
   font-weight: 850;
   text-transform: uppercase;
+}
+
+.intruder-row.active,
+.intruder-row:not(.intruder-row-head):hover {
+  border-color: #1f93ff;
+  background: #eef7ff;
 }
 
 .intruder-row span,
@@ -2091,6 +2121,11 @@ textarea:focus {
 .intruder-row em {
   color: #6c7888;
   font-style: normal;
+}
+
+.intruder-results .exchange-detail {
+  flex: 0 0 280px;
+  border-top: 1px solid #eef2f6;
 }
 
 .check-field {

@@ -46,7 +46,7 @@ const initialManualRequest = {
 };
 
 const initialIntruderConfig = {
-  marker: '§payload§',
+  marker: '{{payload}}',
   payloads: 'wraith-test\nwraith_probe\n%27',
   delayMs: '150',
   maxRequests: '25',
@@ -109,6 +109,7 @@ function App() {
   const [intruderConfig, setIntruderConfig] = useState(initialIntruderConfig);
   const [intruderState, setIntruderState] = useState('idle');
   const [intruderResults, setIntruderResults] = useState([]);
+  const [selectedIntruderResultId, setSelectedIntruderResultId] = useState('');
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
@@ -146,6 +147,10 @@ function App() {
   const activeRepeaterTab = useMemo(
     () => repeaterTabs.find((tab) => tab.tabId === activeRepeaterTabId) || repeaterTabs[0],
     [activeRepeaterTabId, repeaterTabs],
+  );
+  const selectedIntruderResult = useMemo(
+    () => intruderResults.find((result) => result.resultId === selectedIntruderResultId) || intruderResults[intruderResults.length - 1] || null,
+    [intruderResults, selectedIntruderResultId],
   );
 
   const setView = useCallback((nextView) => {
@@ -649,17 +654,29 @@ function App() {
     window.history.replaceState(null, '', `${window.location.pathname}#intruder`);
   };
 
+  const sendIntruderResultToRepeater = (result) => {
+    const requestRecord = result?.exchange?.request;
+    if (requestRecord) sendRequestToRepeater(requestRecord);
+  };
+
+  const selectIntruderResult = (resultId) => {
+    const result = intruderResults.find((item) => item.resultId === resultId);
+    setSelectedIntruderResultId(resultId);
+    if (result?.exchange) setSelectedExchange(result.exchange);
+  };
+
   const runIntruder = async () => {
     const payloads = parseList(intruderConfig.payloads);
     const maxRequests = Math.max(1, Math.min(parseInt(intruderConfig.maxRequests, 10) || 25, 100));
     const delayMs = Math.max(0, Math.min(parseInt(intruderConfig.delayMs, 10) || 0, 5000));
-    const marker = intruderConfig.marker || '§payload§';
+    const marker = intruderConfig.marker || '{{payload}}';
     const selectedPayloads = payloads.slice(0, maxRequests);
     if (!manualRequest.url.trim() || selectedPayloads.length === 0) return;
 
     intruderAbortRef.current = false;
     setIntruderState('running');
     setIntruderResults([]);
+    setSelectedIntruderResultId('');
 
     let scanId = manualRequest.scanId || latestScanId;
     let lastExchange = null;
@@ -683,10 +700,13 @@ function App() {
         const result = buildIntruderResult(payload, response.data.request, response.data.response);
         setLatestScanId(scanId);
         lastExchange = result.exchange;
+        setSelectedIntruderResultId(result.resultId);
         setSelectedExchange(result.exchange);
         setIntruderResults((current) => [...current, result]);
       } catch (error) {
-        setIntruderResults((current) => [...current, buildIntruderError(payload, error)]);
+        const result = buildIntruderError(payload, error);
+        setSelectedIntruderResultId(result.resultId);
+        setIntruderResults((current) => [...current, result]);
       }
       if (delayMs) await wait(delayMs);
     }
@@ -750,6 +770,10 @@ function App() {
           stopIntruder={stopIntruder}
           intruderState={intruderState}
           intruderResults={intruderResults}
+          selectedIntruderResult={selectedIntruderResult}
+          selectedIntruderResultId={selectedIntruderResultId}
+          selectIntruderResult={selectIntruderResult}
+          sendIntruderResultToRepeater={sendIntruderResultToRepeater}
           manualState={manualState}
           latestScanId={latestScanId}
           loadCorpus={loadCorpus}
@@ -1086,6 +1110,10 @@ function ManualPage({
   stopIntruder,
   intruderState,
   intruderResults,
+  selectedIntruderResult,
+  selectedIntruderResultId,
+  selectIntruderResult,
+  sendIntruderResultToRepeater,
   manualState,
   latestScanId,
   loadCorpus,
@@ -1238,6 +1266,10 @@ function ManualPage({
               onStop={stopIntruder}
               state={intruderState}
               results={intruderResults}
+              selectedResult={selectedIntruderResult}
+              selectedResultId={selectedIntruderResultId}
+              onSelectResult={selectIntruderResult}
+              onSendResultToRepeater={sendIntruderResultToRepeater}
             />
           )}
           {activeTab === 'decoder' && <DecoderPanel />}
@@ -1570,9 +1602,14 @@ function IntruderPanel({
   onStop,
   state,
   results,
+  selectedResult,
+  selectedResultId,
+  onSelectResult,
+  onSendResultToRepeater,
 }) {
   const summary = summarizeIntruderResults(results);
   const running = state === 'running' || state === 'stopping';
+  const selectedExchange = selectedResult?.exchange || null;
   return (
     <section id="intruder" className="intruder-panel">
       <div className="section-heading compact">
@@ -1616,6 +1653,16 @@ function IntruderPanel({
             <Metric label="Clusters" value={summary.clusters} />
             <Metric label="Errors" value={summary.errors} />
           </div>
+          <div className="intruder-toolbar">
+            <span>{selectedResult ? `Selected: ${selectedResult.payload}` : 'No result selected'}</span>
+            <button
+              className="secondary-button"
+              onClick={() => onSendResultToRepeater(selectedResult)}
+              disabled={!selectedExchange}
+            >
+              Send to Repeater
+            </button>
+          </div>
           <div className="intruder-table" role="table" aria-label="Intruder results">
             <div className="intruder-row intruder-row-head">
               <span>Payload</span>
@@ -1627,15 +1674,20 @@ function IntruderPanel({
             {results.length === 0 ? (
               <p className="empty-state">Insert the payload marker into the URL, headers, or body, then run a capped safe-mode attack.</p>
             ) : results.map((result) => (
-              <div className="intruder-row" key={result.resultId}>
+              <button
+                className={result.resultId === selectedResultId ? 'intruder-row active' : 'intruder-row'}
+                key={result.resultId}
+                onClick={() => onSelectResult(result.resultId)}
+              >
                 <span title={result.payload}>{result.payload}</span>
                 <strong>{result.status}</strong>
                 <span>{result.length} B</span>
                 <span>{result.timeMs} ms</span>
                 <em title={result.error || result.cluster}>{result.error || result.cluster}</em>
-              </div>
+              </button>
             ))}
           </div>
+          <ExchangeDetail exchange={selectedExchange} />
         </div>
       </div>
     </section>
@@ -2349,7 +2401,7 @@ function manualRequestFromRecord(requestRecord, fallbackRequest, latestScanId) {
 }
 
 function buildIntruderRequest(baseRequest, marker, payload) {
-  const token = marker || '§payload§';
+  const token = marker || '{{payload}}';
   const next = {
     ...baseRequest,
     url: replacePayloadMarker(baseRequest.url, token, payload),
