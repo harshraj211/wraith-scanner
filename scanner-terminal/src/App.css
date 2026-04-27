@@ -1182,6 +1182,93 @@ button {
   justify-content: center;
 }
 
+.repeater-tab-strip {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  border-bottom: 1px solid #eef2f6;
+  background: #f8fafc;
+}
+
+.repeater-tabs {
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.repeater-tab-item {
+  max-width: 210px;
+  display: flex;
+  align-items: center;
+  border: 1px solid #dfe6ef;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #536273;
+  overflow: hidden;
+}
+
+.repeater-tab-item.active {
+  border-color: #1f93ff;
+  background: #eef7ff;
+  color: #17202c;
+}
+
+.repeater-tab-button {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.repeater-tabs span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.repeater-tab-close {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  color: #7a8796;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  margin-right: 6px;
+  padding: 0;
+}
+
+.repeater-tab-close:hover {
+  background: #dfe9f5;
+  color: #17202c;
+}
+
+.repeater-new-button {
+  border: 1px solid #cfd8e3;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #1f75bd;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
 .section-heading {
   flex: 0 0 auto;
   display: flex;

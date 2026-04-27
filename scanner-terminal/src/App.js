@@ -45,6 +45,8 @@ const initialManualRequest = {
   allowStateChange: false,
 };
 
+const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
+
 function initialViewFromLocation() {
   const hash = String(window.location.hash || '').toLowerCase();
   if (['#scan-setup', '#result-dashboard', '#traffic-corpus', '#terminal', '#automated', '#issues', '#scan-details', '#reporting'].includes(hash)) {
@@ -86,6 +88,13 @@ function App() {
   const [socketState, setSocketState] = useState('idle');
   const [form, setForm] = useState(initialForm);
   const [manualRequest, setManualRequest] = useState(initialManualRequest);
+  const [repeaterTabs, setRepeaterTabs] = useState([{
+    tabId: DEFAULT_REPEATER_TAB_ID,
+    title: 'Manual request',
+    request: initialManualRequest,
+    sourceRequestId: '',
+  }]);
+  const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
   const [manualState, setManualState] = useState('idle');
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
@@ -268,8 +277,61 @@ function App() {
     setForm((current) => ({ ...current, [name]: value }));
   };
 
+  const applyManualRequestUpdate = (updater) => {
+    setManualRequest((current) => {
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      const normalized = { ...current, ...next };
+      setRepeaterTabs((tabs) => tabs.map((tab) => (
+        tab.tabId === activeRepeaterTabId
+          ? { ...tab, title: repeaterTitle(normalized), request: normalized }
+          : tab
+      )));
+      return normalized;
+    });
+  };
+
   const updateManualRequest = (name, value) => {
-    setManualRequest((current) => ({ ...current, [name]: value }));
+    applyManualRequestUpdate((current) => ({ ...current, [name]: value }));
+  };
+
+  const selectRepeaterTab = (tabId) => {
+    const tab = repeaterTabs.find((item) => item.tabId === tabId);
+    if (!tab) return;
+    setActiveRepeaterTabId(tabId);
+    setManualRequest(tab.request);
+    setManualTab('repeater');
+  };
+
+  const createRepeaterTab = () => {
+    const request = {
+      ...initialManualRequest,
+      scanId: manualRequest.scanId || latestScanId,
+    };
+    const tab = {
+      tabId: `rep_${Date.now().toString(36)}`,
+      title: 'New request',
+      request,
+      sourceRequestId: '',
+    };
+    setRepeaterTabs((current) => [...current, tab]);
+    setActiveRepeaterTabId(tab.tabId);
+    setManualRequest(request);
+    setManualTab('repeater');
+    window.history.replaceState(null, '', `${window.location.pathname}#replay`);
+  };
+
+  const closeRepeaterTab = (tabId) => {
+    setRepeaterTabs((current) => {
+      if (current.length <= 1) return current;
+      const index = current.findIndex((tab) => tab.tabId === tabId);
+      const next = current.filter((tab) => tab.tabId !== tabId);
+      if (tabId === activeRepeaterTabId) {
+        const replacement = next[Math.max(0, index - 1)] || next[0];
+        setActiveRepeaterTabId(replacement.tabId);
+        setManualRequest(replacement.request);
+      }
+      return next;
+    });
   };
 
   const submitScan = async (event) => {
@@ -282,7 +344,7 @@ function App() {
       const response = await axios.post(`${API_URL}/api/scan`, scanPayload);
       const scanId = response.data.scan_id;
       setLatestScanId(scanId);
-      setManualRequest((current) => ({ ...current, scanId }));
+      applyManualRequestUpdate((current) => ({ ...current, scanId }));
       addProgress({
         scan_id: scanId,
         type: 'success',
@@ -376,7 +438,7 @@ function App() {
       const scanId = response.data.scan_id;
       setManualState('sent');
       setLatestScanId(scanId);
-      setManualRequest((current) => ({ ...current, scanId }));
+      applyManualRequestUpdate((current) => ({ ...current, scanId }));
       setSelectedExchange({
         request: response.data.request,
         response: response.data.response,
@@ -425,7 +487,7 @@ function App() {
       setProxyState('running');
       if (status.scan_id) {
         setLatestScanId(status.scan_id);
-        setManualRequest((current) => ({ ...current, scanId: status.scan_id }));
+        applyManualRequestUpdate((current) => ({ ...current, scanId: status.scan_id }));
       }
       addProgress({
         scan_id: status.scan_id,
@@ -501,14 +563,34 @@ function App() {
 
   const sendRequestToRepeater = (requestRecord) => {
     if (!requestRecord) return;
-    setManualRequest((current) => ({
-      ...current,
-      scanId: requestRecord.scan_id || current.scanId || latestScanId,
+    const nextRequest = {
+      ...manualRequest,
+      scanId: requestRecord.scan_id || manualRequest.scanId || latestScanId,
       method: requestRecord.method || 'GET',
-      url: requestRecord.url || current.url,
+      url: requestRecord.url || manualRequest.url,
       headers: formatKeyValueLines(requestRecord.headers || {}),
       body: stringifyBody(requestRecord.body),
-    }));
+    };
+    const sourceRequestId = requestRecord.request_id || '';
+    const existingTab = repeaterTabs.find((tab) => tab.sourceRequestId && tab.sourceRequestId === sourceRequestId);
+    if (existingTab) {
+      setRepeaterTabs((current) => current.map((tab) => (
+        tab.tabId === existingTab.tabId
+          ? { ...tab, title: repeaterTitle(nextRequest), request: nextRequest }
+          : tab
+      )));
+      setActiveRepeaterTabId(existingTab.tabId);
+    } else {
+      const tab = {
+        tabId: `rep_${sourceRequestId || Date.now().toString(36)}`,
+        title: repeaterTitle(nextRequest),
+        request: nextRequest,
+        sourceRequestId,
+      };
+      setRepeaterTabs((current) => [...current, tab]);
+      setActiveRepeaterTabId(tab.tabId);
+    }
+    setManualRequest(nextRequest);
     setManualTab('repeater');
     setViewState('manual');
     window.history.replaceState(null, '', `${window.location.pathname}#replay`);
@@ -568,6 +650,11 @@ function App() {
           terminalRef={terminalRef}
           activeTab={manualTab}
           setActiveTab={setManualTab}
+          repeaterTabs={repeaterTabs}
+          activeRepeaterTabId={activeRepeaterTabId}
+          selectRepeaterTab={selectRepeaterTab}
+          createRepeaterTab={createRepeaterTab}
+          closeRepeaterTab={closeRepeaterTab}
           proxyStatus={proxyStatus}
           proxyState={proxyState}
           pendingProxyRequests={pendingProxyRequests}
@@ -890,6 +977,11 @@ function ManualPage({
   terminalRef,
   activeTab,
   setActiveTab,
+  repeaterTabs,
+  activeRepeaterTabId,
+  selectRepeaterTab,
+  createRepeaterTab,
+  closeRepeaterTab,
   proxyStatus,
   proxyState,
   pendingProxyRequests,
@@ -961,13 +1053,25 @@ function ManualPage({
                 updateCorpusFilter={updateCorpusFilter}
                 compact
               />
-              <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+              <CorpusViewer
+                requests={corpusRequests}
+                selectedExchange={selectedExchange}
+                onSelect={loadExchange}
+                onSendToRepeater={sendRequestToRepeater}
+              />
             </section>
           )}
 
           {activeTab === 'repeater' && (
             <div className="manual-grid repeater-grid">
               <section id="replay" className="replay-panel">
+                <RepeaterTabStrip
+                  tabs={repeaterTabs}
+                  activeTabId={activeRepeaterTabId}
+                  onSelect={selectRepeaterTab}
+                  onNew={createRepeaterTab}
+                  onClose={closeRepeaterTab}
+                />
                 <div className="section-heading compact">
                   <div>
                     <span className="eyebrow">Repeater</span>
@@ -1234,6 +1338,35 @@ function ScanSetupForm({ form, updateForm, submitScan }) {
         </label>
       </fieldset>
     </form>
+  );
+}
+
+function RepeaterTabStrip({ tabs, activeTabId, onSelect, onNew, onClose }) {
+  return (
+    <div className="repeater-tab-strip" aria-label="Repeater requests">
+      <div className="repeater-tabs">
+        {tabs.map((tab) => (
+          <div className={tab.tabId === activeTabId ? 'repeater-tab-item active' : 'repeater-tab-item'} key={tab.tabId}>
+            <button className="repeater-tab-button" onClick={() => onSelect(tab.tabId)}>
+              <span>{tab.title}</span>
+            </button>
+            {tabs.length > 1 && (
+              <button
+                className="repeater-tab-close"
+                aria-label={`Close ${tab.title}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onClose(tab.tabId);
+                }}
+              >
+                x
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      <button className="repeater-new-button" onClick={onNew}>New</button>
+    </div>
   );
 }
 
@@ -1969,6 +2102,15 @@ function formatKeyValueLines(value) {
   return Object.entries(value || {})
     .map(([key, val]) => `${key}: ${val}`)
     .join('\n');
+}
+
+function repeaterTitle(request) {
+  try {
+    const parsed = new URL(request.url || '');
+    return `${request.method || 'GET'} ${parsed.pathname || '/'}`;
+  } catch (_error) {
+    return `${request.method || 'GET'} request`;
+  }
 }
 
 function stringifyBody(value) {

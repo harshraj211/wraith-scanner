@@ -61,3 +61,13 @@ test('decoder chains repeated transforms from output', () => {
   fireEvent.click(screen.getByRole('button', { name: /url decode/i }));
   expect(screen.getByLabelText(/output/i)).toHaveValue('/admin');
 });
+
+test('manual repeater supports multiple request tabs', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: /manual workbench/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^repeater$/i }));
+
+  expect(screen.getByRole('button', { name: /manual request/i })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /^new$/i }));
+  expect(screen.getByRole('button', { name: /^new request$/i })).toBeInTheDocument();
+});
