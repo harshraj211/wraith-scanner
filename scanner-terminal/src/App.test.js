@@ -34,9 +34,12 @@ test('renders the Wraith website and opens automated mode', () => {
   fireEvent.click(screen.getAllByRole('button', { name: /start scan/i })[0]);
   expect(screen.getByRole('heading', { name: /start wraith/i })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: /open automated/i }));
+  expect(screen.getByRole('heading', { name: /risk dashboard/i })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /scan details/i }));
   expect(screen.getByRole('heading', { name: /scan setup/i })).toBeInTheDocument();
   expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
   expect(screen.getByText(/api imports/i)).toBeInTheDocument();
   expect(screen.getByText(/sequence workflows/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /scanned urls/i }));
   expect(screen.getByRole('heading', { name: /requests/i })).toBeInTheDocument();
 });

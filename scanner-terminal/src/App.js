@@ -47,14 +47,32 @@ const initialManualRequest = {
 
 function initialViewFromLocation() {
   const hash = String(window.location.hash || '').toLowerCase();
-  if (['#scan-setup', '#result-dashboard', '#traffic-corpus', '#terminal', '#automated'].includes(hash)) {
+  if (['#scan-setup', '#result-dashboard', '#traffic-corpus', '#terminal', '#automated', '#issues', '#scan-details', '#reporting'].includes(hash)) {
     return 'automated';
   }
-  if (['#proxy-history', '#replay', '#response', '#manual'].includes(hash)) {
+  if (['#proxy-history', '#replay', '#response', '#manual', '#intruder', '#decoder', '#manual-reporting'].includes(hash)) {
     return 'manual';
   }
   if (hash === '#start' || hash === '#mode') return 'mode';
   return 'home';
+}
+
+function initialAutomatedTabFromLocation() {
+  const hash = String(window.location.hash || '').toLowerCase();
+  if (hash === '#issues') return 'issues';
+  if (hash === '#traffic-corpus') return 'urls';
+  if (hash === '#scan-setup' || hash === '#scan-details') return 'details';
+  if (hash === '#terminal' || hash === '#reporting') return 'reporting';
+  return 'overview';
+}
+
+function initialManualTabFromLocation() {
+  const hash = String(window.location.hash || '').toLowerCase();
+  if (hash === '#replay' || hash === '#response') return 'repeater';
+  if (hash === '#intruder') return 'intruder';
+  if (hash === '#decoder') return 'decoder';
+  if (hash === '#manual-reporting' || hash === '#terminal') return 'reporting';
+  return 'proxy';
 }
 
 function App() {
@@ -63,6 +81,8 @@ function App() {
   const termRef = useRef(null);
   const [terminal, setTerminal] = useState(null);
   const [view, setViewState] = useState(initialViewFromLocation);
+  const [automatedTab, setAutomatedTab] = useState(initialAutomatedTabFromLocation);
+  const [manualTab, setManualTab] = useState(initialManualTabFromLocation);
   const [socketState, setSocketState] = useState('idle');
   const [form, setForm] = useState(initialForm);
   const [manualRequest, setManualRequest] = useState(initialManualRequest);
@@ -101,11 +121,13 @@ function App() {
 
   const setView = useCallback((nextView) => {
     setViewState(nextView);
+    if (nextView === 'automated') setAutomatedTab('overview');
+    if (nextView === 'manual') setManualTab('proxy');
     const hashByView = {
       home: '',
       mode: '#start',
-      automated: '#scan-setup',
-      manual: '#replay',
+      automated: '#result-dashboard',
+      manual: '#proxy-history',
     };
     const nextHash = hashByView[nextView] || '';
     if (window.location.hash !== nextHash) {
@@ -114,10 +136,39 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const syncHash = () => setViewState(initialViewFromLocation());
+    const syncHash = () => {
+      setViewState(initialViewFromLocation());
+      setAutomatedTab(initialAutomatedTabFromLocation());
+      setManualTab(initialManualTabFromLocation());
+    };
     window.addEventListener('hashchange', syncHash);
     return () => window.removeEventListener('hashchange', syncHash);
   }, []);
+
+  useEffect(() => {
+    setSocketState('connecting');
+    const ws = io(API_URL) || { on: () => {}, disconnect: () => {} };
+    ws.on('connect', () => {
+      setSocketState('connected');
+      if (termRef.current) termRef.current.writeln(c('38;5;108', '[ws] connected to api server'));
+    });
+    ws.on('scan_progress', (event) => {
+      addProgress(event);
+      if (termRef.current) termRef.current.writeln(formatProgressLine(event.message, event.type));
+    });
+    ws.on('disconnect', () => {
+      setSocketState('disconnected');
+      if (termRef.current) termRef.current.writeln(c('38;5;203', '[ws] connection lost'));
+    });
+    ws.on('connect_error', () => {
+      setSocketState('error');
+      if (termRef.current) termRef.current.writeln(c('38;5;203', `[ws] unable to reach api server at ${API_URL}`));
+    });
+    return () => {
+      ws.disconnect();
+      setSocketState('idle');
+    };
+  }, [addProgress]);
 
   useEffect(() => {
     if (!terminalRef.current) return undefined;
@@ -165,25 +216,6 @@ function App() {
     printBanner(term);
     printPrompt(term);
     setTerminal(term);
-    setSocketState('connecting');
-
-    const ws = io(API_URL) || { on: () => {}, disconnect: () => {} };
-    ws.on('connect', () => {
-      setSocketState('connected');
-      term.writeln(c('38;5;108', '[ws] connected to api server'));
-    });
-    ws.on('scan_progress', (event) => {
-      addProgress(event);
-      term.writeln(formatProgressLine(event.message, event.type));
-    });
-    ws.on('disconnect', () => {
-      setSocketState('disconnected');
-      term.writeln(c('38;5;203', '[ws] connection lost'));
-    });
-    ws.on('connect_error', () => {
-      setSocketState('error');
-      term.writeln(c('38;5;203', `[ws] unable to reach api server at ${API_URL}`));
-    });
 
     const handleResize = () => {
       if (typeof fitAddon.fit === 'function') fitAddon.fit();
@@ -191,13 +223,11 @@ function App() {
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
-      ws.disconnect();
       term.dispose();
       termRef.current = null;
       setTerminal(null);
-      setSocketState('idle');
     };
-  }, [addProgress, view]);
+  }, [view, automatedTab, manualTab]);
 
   useEffect(() => {
     if (!terminal) return undefined;
@@ -397,6 +427,8 @@ function App() {
           importCount={importCount}
           workflowCount={workflowCount}
           terminalRef={terminalRef}
+          activeTab={automatedTab}
+          setActiveTab={setAutomatedTab}
         />
       )}
       {view === 'manual' && (
@@ -414,6 +446,8 @@ function App() {
           loadExchange={loadExchange}
           corpusState={corpusState}
           terminalRef={terminalRef}
+          activeTab={manualTab}
+          setActiveTab={setManualTab}
         />
       )}
     </div>
@@ -576,7 +610,10 @@ function AutomatedPage({
   importCount,
   workflowCount,
   terminalRef,
+  activeTab,
+  setActiveTab,
 }) {
+  const findings = scanStatus?.canonical_findings || scanStatus?.findings || [];
   return (
     <div className="app-shell enterprise-shell">
       <EnterpriseRail
@@ -603,64 +640,100 @@ function AutomatedPage({
           duration={scanStatus?.duration || 'Pending'}
         />
         <WorkspaceTabs
+          activeTab={activeTab}
+          onChange={setActiveTab}
           tabs={[
-            ['Overview', '#result-dashboard'],
-            ['Issues', '#result-dashboard'],
-            ['Scanned URLs', '#traffic-corpus'],
-            ['Scan details', '#scan-setup'],
-            ['Reporting & logs', '#terminal'],
+            ['overview', 'Overview'],
+            ['issues', 'Issues'],
+            ['urls', 'Scanned URLs'],
+            ['details', 'Scan details'],
+            ['reporting', 'Reporting & logs'],
           ]}
         />
-        <ReportActions scanId={latestScanId} />
 
-        <div className="automated-grid">
-          <section id="scan-setup" className="setup-panel">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">Automated mode</span>
-                <h1>Scan Setup</h1>
+        <div className={`workspace-tab-panel automated-tab automated-tab-${activeTab}`}>
+          {activeTab === 'overview' && (
+            <>
+              <section id="result-dashboard" className="dashboard-panel">
+                <div className="section-heading compact">
+                  <div>
+                    <span className="eyebrow">Visual results</span>
+                    <h2>Risk Dashboard</h2>
+                  </div>
+                  <button className="secondary-button" onClick={() => refreshStatus()} disabled={!latestScanId}>Refresh</button>
+                </div>
+                <ResultDashboard dashboard={dashboard} scanId={latestScanId} status={scanStatus} launchState={launchState} />
+              </section>
+              <section className="progress-panel overview-progress">
+                <div className="section-heading compact">
+                  <div>
+                    <span className="eyebrow">Run state</span>
+                    <h2>Progress</h2>
+                  </div>
+                </div>
+                <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
+                <ProgressEvents events={progressEvents} />
+              </section>
+            </>
+          )}
+
+          {activeTab === 'issues' && (
+            <section id="issues" className="issues-panel">
+              <div className="section-heading compact">
+                <div>
+                  <span className="eyebrow">Findings</span>
+                  <h2>Issues</h2>
+                </div>
               </div>
-              <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
-                {launchState === 'running' ? 'Starting' : 'Start Scan'}
-              </button>
-            </div>
-            <ScanSetupForm form={form} updateForm={updateForm} submitScan={submitScan} />
-          </section>
+              <IssuesTable findings={findings} />
+            </section>
+          )}
 
-          <section id="result-dashboard" className="dashboard-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Visual results</span>
-                <h2>Risk Dashboard</h2>
+          {activeTab === 'urls' && (
+            <section id="traffic-corpus" className="corpus-panel">
+              <CorpusHeader
+                latestScanId={latestScanId}
+                loadCorpus={loadCorpus}
+                corpusState={corpusState}
+                corpusFilters={corpusFilters}
+                updateCorpusFilter={updateCorpusFilter}
+              />
+              <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+            </section>
+          )}
+
+          {activeTab === 'details' && (
+            <section id="scan-setup" className="setup-panel setup-tab-panel">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Automated mode</span>
+                  <h1>Scan Setup</h1>
+                </div>
+                <button className="primary-button" onClick={submitScan} disabled={launchState === 'running'}>
+                  {launchState === 'running' ? 'Starting' : 'Start Scan'}
+                </button>
               </div>
-              <button className="secondary-button" onClick={() => refreshStatus()} disabled={!latestScanId}>Refresh</button>
-            </div>
-            <ResultDashboard dashboard={dashboard} scanId={latestScanId} status={scanStatus} launchState={launchState} />
-          </section>
+              <ScanSetupForm form={form} updateForm={updateForm} submitScan={submitScan} />
+            </section>
+          )}
 
-          <section className="progress-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Run state</span>
-                <h2>Progress</h2>
+          {activeTab === 'reporting' && (
+            <section id="reporting" className="reporting-panel">
+              <ReportActions scanId={latestScanId} />
+              <div className="reporting-grid">
+                <section className="progress-panel">
+                  <div className="section-heading compact">
+                    <div>
+                      <span className="eyebrow">Logs</span>
+                      <h2>Scan Events</h2>
+                    </div>
+                  </div>
+                  <ProgressEvents events={progressEvents} />
+                </section>
+                <TerminalPanel terminalRef={terminalRef} />
               </div>
-            </div>
-            <StatusSummary scanId={latestScanId} status={scanStatus} launchState={launchState} />
-            <ProgressEvents events={progressEvents} />
-          </section>
-
-          <section id="traffic-corpus" className="corpus-panel">
-            <CorpusHeader
-              latestScanId={latestScanId}
-              loadCorpus={loadCorpus}
-              corpusState={corpusState}
-              corpusFilters={corpusFilters}
-              updateCorpusFilter={updateCorpusFilter}
-            />
-            <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
-          </section>
-
-          <TerminalPanel terminalRef={terminalRef} />
+            </section>
+          )}
         </div>
       </main>
     </div>
@@ -681,6 +754,8 @@ function ManualPage({
   loadExchange,
   corpusState,
   terminalRef,
+  activeTab,
+  setActiveTab,
 }) {
   return (
     <div className="app-shell manual-shell enterprise-shell">
@@ -709,52 +784,70 @@ function ManualPage({
           duration={`${corpusRequests.length} captured`}
         />
         <WorkspaceTabs
+          activeTab={activeTab}
+          onChange={setActiveTab}
           tabs={[
-            ['Proxy history', '#proxy-history'],
-            ['Repeater', '#replay'],
-            ['Response inspector', '#response'],
-            ['Reporting & logs', '#terminal'],
+            ['proxy', 'Proxy history'],
+            ['repeater', 'Repeater'],
+            ['intruder', 'Intruder'],
+            ['decoder', 'Decoder'],
+            ['reporting', 'Reporting & logs'],
           ]}
         />
-        <ReportActions scanId={manualRequest.scanId || latestScanId} />
 
-        <div className="manual-grid">
-          <section id="proxy-history" className="history-panel">
-            <CorpusHeader
-              latestScanId={manualRequest.scanId || latestScanId}
-              loadCorpus={loadCorpus}
-              corpusState={corpusState}
-              corpusFilters={corpusFilters}
-              updateCorpusFilter={updateCorpusFilter}
-              compact
-            />
-            <RequestHistory requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
-          </section>
+        <div className={`workspace-tab-panel manual-tab manual-tab-${activeTab}`}>
+          {activeTab === 'proxy' && (
+            <section id="proxy-history" className="history-panel manual-wide-panel">
+              <CorpusHeader
+                latestScanId={manualRequest.scanId || latestScanId}
+                loadCorpus={loadCorpus}
+                corpusState={corpusState}
+                corpusFilters={corpusFilters}
+                updateCorpusFilter={updateCorpusFilter}
+                compact
+              />
+              <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+            </section>
+          )}
 
-          <section id="replay" className="replay-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Repeater</span>
-                <h2>Request</h2>
-              </div>
-              <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
-                {manualState === 'sending' ? 'Sending' : 'Send'}
-              </button>
+          {activeTab === 'repeater' && (
+            <div className="manual-grid repeater-grid">
+              <section id="replay" className="replay-panel">
+                <div className="section-heading compact">
+                  <div>
+                    <span className="eyebrow">Repeater</span>
+                    <h2>Request</h2>
+                  </div>
+                  <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
+                    {manualState === 'sending' ? 'Sending' : 'Send'}
+                  </button>
+                </div>
+                <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
+              </section>
+
+              <section id="response" className="response-panel">
+                <div className="section-heading compact">
+                  <div>
+                    <span className="eyebrow">Inspector</span>
+                    <h2>Response</h2>
+                  </div>
+                </div>
+                <ExchangeDetail exchange={selectedExchange} />
+              </section>
             </div>
-            <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
-          </section>
+          )}
 
-          <section id="response" className="response-panel">
-            <div className="section-heading compact">
-              <div>
-                <span className="eyebrow">Inspector</span>
-                <h2>Response</h2>
+          {activeTab === 'intruder' && <ToolPlaceholder title="Intruder" body="Payload positions, sniper mode, rate limits, and response clustering are next in the build plan." />}
+          {activeTab === 'decoder' && <DecoderPanel />}
+
+          {activeTab === 'reporting' && (
+            <section id="manual-reporting" className="reporting-panel">
+              <ReportActions scanId={manualRequest.scanId || latestScanId} />
+              <div className="reporting-grid">
+                <TerminalPanel terminalRef={terminalRef} />
               </div>
-            </div>
-            <ExchangeDetail exchange={selectedExchange} />
-          </section>
-
-          <TerminalPanel terminalRef={terminalRef} />
+            </section>
+          )}
         </div>
       </main>
     </div>
@@ -837,14 +930,38 @@ function ScanMetaBar({ status, startTime, endTime, duration }) {
   );
 }
 
-function WorkspaceTabs({ tabs }) {
+function WorkspaceTabs({ tabs, activeTab, onChange }) {
   return (
     <nav className="workspace-tabs" aria-label="Workspace sections">
-      {tabs.map(([label, href], index) => (
-        <a className={index === 0 ? 'active' : ''} href={href} key={label}>{label}</a>
+      {tabs.map(([key, label]) => (
+        <button
+          className={key === activeTab ? 'active' : ''}
+          key={key}
+          onClick={() => {
+            onChange(key);
+            window.history.replaceState(null, '', `${window.location.pathname}#${tabHash(key)}`);
+          }}
+        >
+          {label}
+        </button>
       ))}
     </nav>
   );
+}
+
+function tabHash(tab) {
+  const mapping = {
+    overview: 'result-dashboard',
+    issues: 'issues',
+    urls: 'traffic-corpus',
+    details: 'scan-details',
+    reporting: 'reporting',
+    proxy: 'proxy-history',
+    repeater: 'replay',
+    intruder: 'intruder',
+    decoder: 'decoder',
+  };
+  return mapping[tab] || tab;
 }
 
 function ReportActions({ scanId }) {
@@ -1095,6 +1212,37 @@ function ProgressEvents({ events }) {
   );
 }
 
+function IssuesTable({ findings }) {
+  if (!findings.length) {
+    return (
+      <div className="empty-panel">
+        <h3>No issues yet</h3>
+        <p>Run or refresh a scan to populate confirmed findings, confidence, affected endpoint, and proof status.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="issues-table">
+      <div className="issues-head">
+        <span>Severity</span>
+        <span>Issue</span>
+        <span>Endpoint</span>
+        <span>Confidence</span>
+        <span>Proof</span>
+      </div>
+      {findings.map((finding, index) => (
+        <div className="issues-row" key={finding.finding_id || `${finding.type}-${index}`}>
+          <span className={`severity-pill severity-${String(finding.severity || 'info').toLowerCase()}`}>{finding.severity || 'info'}</span>
+          <strong>{finding.title || finding.type || finding.vuln_type || 'Finding'}</strong>
+          <span>{finding.normalized_endpoint || finding.url || finding.target_url || '/'}</span>
+          <span>{finding.confidence ?? 0}</span>
+          <span>{finding.proof_status || 'not_attempted'}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CorpusHeader({
   latestScanId,
   loadCorpus,
@@ -1202,6 +1350,68 @@ function ExchangeDetail({ exchange }) {
       <DetailBlock title="Response Headers" value={response.headers} />
       <DetailBlock title="Response Body" value={response.body_excerpt} />
     </div>
+  );
+}
+
+function ToolPlaceholder({ title, body }) {
+  return (
+    <section className="tool-placeholder">
+      <span className="eyebrow">Queued tool</span>
+      <h2>{title}</h2>
+      <p>{body}</p>
+    </section>
+  );
+}
+
+function DecoderPanel() {
+  const [input, setInput] = useState('');
+  const [output, setOutput] = useState('');
+
+  const runTransform = (type) => {
+    try {
+      if (type === 'url-decode') setOutput(decodeURIComponent(input));
+      if (type === 'url-encode') setOutput(encodeURIComponent(input));
+      if (type === 'base64-decode') setOutput(atob(input.trim()));
+      if (type === 'base64-encode') setOutput(btoa(input));
+      if (type === 'json-pretty') setOutput(JSON.stringify(JSON.parse(input), null, 2));
+      if (type === 'jwt-decode') {
+        const parts = input.trim().split('.');
+        if (parts.length < 2) throw new Error('JWT must have at least header and payload');
+        const decodePart = (part) => JSON.stringify(JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))), null, 2);
+        setOutput(`Header\n${decodePart(parts[0])}\n\nPayload\n${decodePart(parts[1])}`);
+      }
+    } catch (error) {
+      setOutput(`Decode error: ${error.message}`);
+    }
+  };
+
+  return (
+    <section id="decoder" className="decoder-panel">
+      <div className="section-heading compact">
+        <div>
+          <span className="eyebrow">Decoder</span>
+          <h2>Encode and Decode</h2>
+        </div>
+      </div>
+      <div className="decoder-grid">
+        <label className="raw-field">
+          <span>Input</span>
+          <textarea value={input} onChange={(event) => setInput(event.target.value)} spellCheck="false" />
+        </label>
+        <div className="decoder-actions">
+          <button className="secondary-button" onClick={() => runTransform('url-decode')}>URL decode</button>
+          <button className="secondary-button" onClick={() => runTransform('url-encode')}>URL encode</button>
+          <button className="secondary-button" onClick={() => runTransform('base64-decode')}>Base64 decode</button>
+          <button className="secondary-button" onClick={() => runTransform('base64-encode')}>Base64 encode</button>
+          <button className="secondary-button" onClick={() => runTransform('json-pretty')}>Pretty JSON</button>
+          <button className="secondary-button" onClick={() => runTransform('jwt-decode')}>Decode JWT</button>
+        </div>
+        <label className="raw-field">
+          <span>Output</span>
+          <textarea value={output} readOnly spellCheck="false" />
+        </label>
+      </div>
+    </section>
   );
 }
 

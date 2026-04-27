@@ -750,16 +750,19 @@ button {
   border-bottom: 1px solid #dfe6ef;
 }
 
-.workspace-tabs a {
+.workspace-tabs button {
+  border: 0;
+  background: transparent;
   color: #536273;
   text-decoration: none;
   padding: 0 0 11px;
   border-bottom: 3px solid transparent;
   font-size: 13px;
   font-weight: 750;
+  cursor: pointer;
 }
 
-.workspace-tabs a.active {
+.workspace-tabs button.active {
   color: #17202c;
   border-color: #1f93ff;
 }
@@ -775,6 +778,10 @@ button {
   border: 1px solid #e3e9f1;
   border-radius: 4px;
   background: #ffffff;
+}
+
+.reporting-panel .report-strip {
+  margin: 0;
 }
 
 .report-strip span {
@@ -794,26 +801,57 @@ button {
   gap: 8px;
 }
 
-.automated-grid {
+.workspace-tab-panel {
   min-height: 0;
   flex: 1;
-  display: grid;
-  grid-template-columns: minmax(360px, 0.76fr) minmax(520px, 1.14fr) minmax(320px, 0.7fr);
-  grid-template-rows: minmax(370px, 0.58fr) minmax(310px, 0.42fr);
-  gap: 14px;
   padding: 14px 28px 28px;
   background: #f5f7fb;
+}
+
+.automated-tab-overview {
+  display: grid;
+  grid-template-columns: minmax(620px, 1fr) minmax(340px, 0.36fr);
+  gap: 14px;
+}
+
+.automated-tab-issues,
+.automated-tab-urls,
+.automated-tab-details,
+.automated-tab-reporting,
+.manual-tab-proxy,
+.manual-tab-intruder,
+.manual-tab-decoder,
+.manual-tab-reporting {
+  display: flex;
+  flex-direction: column;
+}
+
+.automated-tab-details {
+  overflow: auto;
+}
+
+.automated-tab-details .setup-panel,
+.automated-tab-urls .corpus-panel,
+.automated-tab-issues .issues-panel,
+.manual-wide-panel,
+.decoder-panel,
+.tool-placeholder,
+.reporting-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.setup-tab-panel {
+  max-width: 980px;
 }
 
 .manual-grid {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(300px, 0.8fr) minmax(500px, 1.1fr) minmax(420px, 1fr);
-  grid-template-rows: minmax(0, 1fr) 270px;
+  grid-template-columns: minmax(360px, 0.92fr) minmax(520px, 1.08fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
-  padding: 14px 28px 28px;
-  background: #f5f7fb;
 }
 
 .setup-panel,
@@ -823,7 +861,11 @@ button {
 .terminal-panel,
 .history-panel,
 .replay-panel,
-.response-panel {
+.response-panel,
+.issues-panel,
+.decoder-panel,
+.tool-placeholder,
+.reporting-panel {
   min-width: 0;
   min-height: 0;
   border: 1px solid #e3e9f1;
@@ -833,7 +875,6 @@ button {
 }
 
 .setup-panel {
-  grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
   overflow: auto;
@@ -845,24 +886,174 @@ button {
 .terminal-panel,
 .history-panel,
 .replay-panel,
-.response-panel {
+.response-panel,
+.issues-panel,
+.decoder-panel,
+.tool-placeholder,
+.reporting-panel {
   display: flex;
   flex-direction: column;
 }
 
-.corpus-panel {
-  grid-column: 2;
-  grid-row: 2;
+.overview-progress {
+  min-height: 0;
 }
 
-.terminal-panel {
-  grid-column: 3;
-  grid-row: 2;
+.reporting-grid {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(360px, 0.8fr) minmax(520px, 1.2fr);
+  gap: 14px;
+  padding: 14px;
 }
 
-.manual-grid .terminal-panel {
-  grid-column: 1 / -1;
-  grid-row: 2;
+.manual-tab-reporting .reporting-grid {
+  grid-template-columns: 1fr;
+}
+
+.reporting-grid .terminal-panel,
+.reporting-grid .progress-panel {
+  min-height: 0;
+}
+
+.manual-wide-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-panel {
+  margin: 16px;
+  padding: 28px;
+  border: 1px dashed #ccd7e5;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.empty-panel h3 {
+  margin: 0 0 8px;
+  color: #17202c;
+  font-size: 17px;
+}
+
+.empty-panel p {
+  margin: 0;
+  max-width: 620px;
+  color: #6c7888;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.issues-table {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 14px;
+}
+
+.issues-head,
+.issues-row {
+  display: grid;
+  grid-template-columns: 110px minmax(180px, 1.2fr) minmax(260px, 1fr) 100px 130px;
+  gap: 12px;
+  align-items: center;
+}
+
+.issues-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  border: 1px solid #e3e9f1;
+  border-radius: 4px 4px 0 0;
+  background: #f8fafc;
+  color: #6c7888;
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.issues-row {
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid #e3e9f1;
+  border-top: 0;
+  background: #ffffff;
+  color: #253446;
+  font-size: 13px;
+}
+
+.issues-row strong,
+.issues-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.severity-pill {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #e8edf4;
+  color: #536273;
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.severity-critical { background: #ffe1df; color: #b62424; }
+.severity-high { background: #ffe9dc; color: #b84f18; }
+.severity-medium { background: #fff4c9; color: #805c00; }
+.severity-low { background: #e4f1ff; color: #1763ad; }
+.severity-info { background: #edf1f5; color: #536273; }
+
+.tool-placeholder {
+  padding: 28px;
+}
+
+.tool-placeholder h2 {
+  margin: 6px 0 10px;
+  color: #17202c;
+  font-size: 20px;
+}
+
+.tool-placeholder p {
+  margin: 0;
+  max-width: 720px;
+  color: #6c7888;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.decoder-grid {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 180px minmax(280px, 1fr);
+  gap: 14px;
+  padding: 14px;
+}
+
+.decoder-grid textarea {
+  min-height: 430px;
+  height: 100%;
+  resize: none;
+  font-family: "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.decoder-actions {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-top: 23px;
+}
+
+.decoder-actions button {
+  justify-content: center;
 }
 
 .section-heading {
@@ -1519,19 +1710,21 @@ textarea:focus {
     width: 100%;
   }
 
-  .automated-grid,
+  .automated-tab-overview,
   .manual-grid {
     overflow: auto;
     grid-template-columns: 1fr;
     grid-template-rows: auto;
   }
 
-  .setup-panel,
-  .corpus-panel,
-  .terminal-panel,
-  .manual-grid .terminal-panel {
-    grid-column: auto;
-    grid-row: auto;
+  .reporting-grid,
+  .decoder-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .decoder-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-top: 0;
   }
 
   .setup-panel,
@@ -1541,8 +1734,18 @@ textarea:focus {
   .terminal-panel,
   .history-panel,
   .replay-panel,
-  .response-panel {
+  .response-panel,
+  .issues-panel,
+  .decoder-panel,
+  .tool-placeholder,
+  .reporting-panel {
     min-height: 420px;
+  }
+
+  .issues-head,
+  .issues-row {
+    grid-template-columns: 96px minmax(180px, 1fr) minmax(220px, 1fr) 92px 120px;
+    min-width: 780px;
   }
 }
 
