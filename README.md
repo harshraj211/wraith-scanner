@@ -112,7 +112,7 @@ cd scanner-terminal
 npm start
 ```
 
-The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides request history, a Repeater-style editor, response inspector, reporting actions, and terminal panel.
+The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, response inspector, Decoder, reporting actions, and terminal panel.
 
 ### CLI
 
@@ -283,10 +283,18 @@ GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
 GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
 POST http://127.0.0.1:5001/api/manual/replay
+POST http://127.0.0.1:5001/api/manual/proxy/start
+GET  http://127.0.0.1:5001/api/manual/proxy/status
+POST http://127.0.0.1:5001/api/manual/proxy/intercept
+GET  http://127.0.0.1:5001/api/manual/proxy/pending
+POST http://127.0.0.1:5001/api/manual/proxy/pending/<request-id>
+POST http://127.0.0.1:5001/api/manual/proxy/stop
 ```
 
 Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
 Manual replay sends a bounded operator-specified request, blocks destructive verbs in safe mode unless explicitly allowed, and stores the sanitized exchange as source `manual`.
+
+Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward` or `drop`. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
 
 ## Canonical Models and Corpus
 

@@ -16,7 +16,7 @@ def init_db(path: Optional[str] = None) -> sqlite3.Connection:
     parent = Path(db_path).expanduser().resolve().parent
     parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -182,4 +182,3 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
-

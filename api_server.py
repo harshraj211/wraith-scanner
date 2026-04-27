@@ -41,6 +41,7 @@ from scanner.importers.common import (
     merge_scan_targets,
     save_candidates_to_corpus,
 )
+from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
 from scanner.modules.crypto_scanner import CryptoScanner
@@ -79,6 +80,7 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 active_scans = {}
+manual_proxy = WraithProxyController()
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
@@ -1253,6 +1255,71 @@ def manual_replay_request():
         'request': request_record.to_dict(),
         'response': response_record.to_dict(),
     })
+
+
+@app.route('/api/manual/proxy/start', methods=['POST'])
+def manual_proxy_start():
+    payload = request.get_json(silent=True) or {}
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    try:
+        config = ProxyConfig(
+            host=str(payload.get('host') or '127.0.0.1'),
+            port=int(payload.get('port') or 0),
+            scan_id=str(payload.get('scan_id') or '').strip(),
+            target_base_url=str(payload.get('target_base_url') or '').strip(),
+            scope=[str(item).strip() for item in (payload.get('scope') or []) if str(item).strip()],
+            excluded_hosts=[str(item).strip() for item in (payload.get('excluded_hosts') or []) if str(item).strip()],
+            auth_role=str(payload.get('auth_role') or 'manual'),
+            intercept_enabled=bool(payload.get('intercept_enabled') or payload.get('intercept')),
+            intercept_timeout_sec=float(payload.get('intercept_timeout_sec') or 30),
+            request_timeout_sec=float(payload.get('request_timeout_sec') or 20),
+        )
+        status = manual_proxy.start(repo, config)
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc), 'status': manual_proxy.status()}), 409
+    except (TypeError, ValueError) as exc:
+        return jsonify({'error': f'Invalid proxy configuration: {exc}'}), 400
+    return jsonify(status)
+
+
+@app.route('/api/manual/proxy/stop', methods=['POST'])
+def manual_proxy_stop():
+    return jsonify(manual_proxy.stop())
+
+
+@app.route('/api/manual/proxy/status', methods=['GET'])
+def manual_proxy_status():
+    return jsonify(manual_proxy.status())
+
+
+@app.route('/api/manual/proxy/intercept', methods=['POST'])
+def manual_proxy_intercept():
+    payload = request.get_json(silent=True) or {}
+    return jsonify(manual_proxy.set_intercept(bool(payload.get('enabled'))))
+
+
+@app.route('/api/manual/proxy/pending', methods=['GET'])
+def manual_proxy_pending():
+    pending = manual_proxy.list_pending()
+    return jsonify({
+        'count': len(pending),
+        'requests': pending,
+    })
+
+
+@app.route('/api/manual/proxy/pending/<request_id>', methods=['POST'])
+def manual_proxy_decide(request_id):
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get('action') or '').lower()
+    try:
+        found = manual_proxy.decide(request_id, action)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not found:
+        return jsonify({'error': 'Pending proxy request not found'}), 404
+    return jsonify({'request_id': request_id, 'action': action})
 
 
 @app.route('/api/mode', methods=['GET'])

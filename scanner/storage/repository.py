@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -40,100 +41,105 @@ class StorageRepository:
     def __init__(self, path: Optional[str] = None):
         self.path = path or DEFAULT_DB_PATH
         self.conn = open_db(self.path)
+        self._lock = threading.RLock()
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
 
     def create_scan(self, scan_config: ScanConfig) -> None:
         data = scan_config.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO scans (
-                scan_id, target_base_url, scope_json, excluded_hosts_json,
-                safety_mode, max_depth, max_requests, rate_limit,
-                auth_profiles_json, enabled_modules_json, output_dir,
-                created_at, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                scan_config.scan_id,
-                scan_config.target_base_url,
-                _json(scan_config.scope),
-                _json(scan_config.excluded_hosts),
-                scan_config.safety_mode,
-                scan_config.max_depth,
-                scan_config.max_requests,
-                scan_config.rate_limit,
-                _json(redact(scan_config.auth_profiles)),
-                _json(scan_config.enabled_modules),
-                scan_config.output_dir,
-                scan_config.created_at,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO scans (
+                    scan_id, target_base_url, scope_json, excluded_hosts_json,
+                    safety_mode, max_depth, max_requests, rate_limit,
+                    auth_profiles_json, enabled_modules_json, output_dir,
+                    created_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_config.scan_id,
+                    scan_config.target_base_url,
+                    _json(scan_config.scope),
+                    _json(scan_config.excluded_hosts),
+                    scan_config.safety_mode,
+                    scan_config.max_depth,
+                    scan_config.max_requests,
+                    scan_config.rate_limit,
+                    _json(redact(scan_config.auth_profiles)),
+                    _json(scan_config.enabled_modules),
+                    scan_config.output_dir,
+                    scan_config.created_at,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
 
     def save_request(self, request_record: RequestRecord) -> str:
         data = request_record.to_dict()
         parsed = urlparse(request_record.url)
         stored_url = data.get("url") or request_record.url
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO requests (
-                request_id, scan_id, source, method, url, host, path,
-                normalized_endpoint, headers_json, body, auth_profile_id,
-                auth_role, timestamp, hash, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                request_record.request_id,
-                request_record.scan_id,
-                request_record.source,
-                request_record.method,
-                stored_url,
-                parsed.netloc,
-                parsed.path or "/",
-                request_record.normalized_endpoint,
-                _json(redact_headers(request_record.headers)),
-                _json(redact(request_record.body)),
-                request_record.auth_profile_id,
-                request_record.auth_role,
-                request_record.timestamp,
-                request_record.hash,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO requests (
+                    request_id, scan_id, source, method, url, host, path,
+                    normalized_endpoint, headers_json, body, auth_profile_id,
+                    auth_role, timestamp, hash, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_record.request_id,
+                    request_record.scan_id,
+                    request_record.source,
+                    request_record.method,
+                    stored_url,
+                    parsed.netloc,
+                    parsed.path or "/",
+                    request_record.normalized_endpoint,
+                    _json(redact_headers(request_record.headers)),
+                    _json(redact(request_record.body)),
+                    request_record.auth_profile_id,
+                    request_record.auth_role,
+                    request_record.timestamp,
+                    request_record.hash,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return request_record.request_id
 
     def save_response(self, response_record: ResponseRecord) -> str:
         data = response_record.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO responses (
-                response_id, request_id, status_code, headers_json, body_excerpt,
-                body_hash, content_type, content_length, response_time_ms,
-                title, json_shape_hash, dom_hash, timestamp, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                response_record.response_id,
-                response_record.request_id,
-                response_record.status_code,
-                _json(redact_headers(response_record.headers)),
-                response_record.body_excerpt,
-                response_record.body_hash,
-                response_record.content_type,
-                response_record.content_length,
-                response_record.response_time_ms,
-                response_record.title,
-                response_record.json_shape_hash,
-                response_record.dom_hash,
-                response_record.timestamp,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO responses (
+                    response_id, request_id, status_code, headers_json, body_excerpt,
+                    body_hash, content_type, content_length, response_time_ms,
+                    title, json_shape_hash, dom_hash, timestamp, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    response_record.response_id,
+                    response_record.request_id,
+                    response_record.status_code,
+                    _json(redact_headers(response_record.headers)),
+                    response_record.body_excerpt,
+                    response_record.body_hash,
+                    response_record.content_type,
+                    response_record.content_length,
+                    response_record.response_time_ms,
+                    response_record.title,
+                    response_record.json_shape_hash,
+                    response_record.dom_hash,
+                    response_record.timestamp,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return response_record.response_id
 
     def save_finding(self, finding: Finding) -> str:
@@ -332,24 +338,27 @@ class StorageRepository:
             where.append("(r.url LIKE ? OR r.body LIKE ?)")
             params.extend([needle, needle])
 
-        rows = self.conn.execute(
-            f"SELECT r.raw_json FROM requests r WHERE {' AND '.join(where)} ORDER BY r.timestamp ASC",
-            params,
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT r.raw_json FROM requests r WHERE {' AND '.join(where)} ORDER BY r.timestamp ASC",
+                params,
+            ).fetchall()
         return [_loads(row["raw_json"], {}) for row in rows]
 
     def get_request(self, request_id: str) -> Optional[Dict[str, Any]]:
-        row = self.conn.execute(
-            "SELECT raw_json FROM requests WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
         return _loads(row["raw_json"], {}) if row else None
 
     def get_response_for_request(self, request_id: str) -> Optional[Dict[str, Any]]:
-        row = self.conn.execute(
-            "SELECT raw_json FROM responses WHERE request_id = ? ORDER BY timestamp DESC LIMIT 1",
-            (request_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM responses WHERE request_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (request_id,),
+            ).fetchone()
         return _loads(row["raw_json"], {}) if row else None
 
     def list_findings(self, scan_id: str, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -365,17 +374,19 @@ class StorageRepository:
         if filters.get("auth_role"):
             where.append("auth_role = ?")
             params.append(str(filters["auth_role"]))
-        rows = self.conn.execute(
-            f"SELECT raw_json FROM findings WHERE {' AND '.join(where)} ORDER BY severity, title",
-            params,
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT raw_json FROM findings WHERE {' AND '.join(where)} ORDER BY severity, title",
+                params,
+            ).fetchall()
         return [_loads(row["raw_json"], {}) for row in rows]
 
     def get_finding(self, finding_id: str) -> Optional[Dict[str, Any]]:
-        row = self.conn.execute(
-            "SELECT raw_json FROM findings WHERE finding_id = ?",
-            (finding_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM findings WHERE finding_id = ?",
+                (finding_id,),
+            ).fetchone()
         return _loads(row["raw_json"], {}) if row else None
 
 

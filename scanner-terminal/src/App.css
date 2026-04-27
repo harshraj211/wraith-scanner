@@ -1027,6 +1027,94 @@ button {
   line-height: 1.6;
 }
 
+.proxy-control {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-bottom: 1px solid #eef2f6;
+  background: #ffffff;
+}
+
+.proxy-control-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.proxy-control-header h2 {
+  margin: 4px 0 6px;
+  color: #17202c;
+  font-size: 17px;
+}
+
+.proxy-control-header p {
+  margin: 0;
+  color: #6c7888;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.proxy-actions,
+.proxy-intercept-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.proxy-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.proxy-status-grid .metric {
+  min-height: 64px;
+}
+
+.proxy-intercept-row {
+  justify-content: space-between;
+}
+
+.proxy-intercept-row label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #253446;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.proxy-intercept-row input {
+  width: auto;
+}
+
+.pending-proxy-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pending-proxy-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 92px 104px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #e3e9f1;
+  border-radius: 4px;
+  background: #f8fafc;
+}
+
+.pending-proxy-row strong {
+  min-width: 0;
+  color: #253446;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .decoder-grid {
   min-height: 0;
   flex: 1;
@@ -1785,8 +1873,17 @@ textarea:focus {
   .kpi-row,
   .corpus-viewer,
   .corpus-filters,
-  .manual-options {
+  .manual-options,
+  .proxy-status-grid,
+  .pending-proxy-row {
     grid-template-columns: 1fr;
+  }
+
+  .proxy-control-header,
+  .proxy-actions,
+  .proxy-intercept-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .hero-actions {

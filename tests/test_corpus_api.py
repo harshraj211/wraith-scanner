@@ -113,6 +113,40 @@ class CorpusApiTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 400)
 
+    def test_manual_proxy_lifecycle_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            client = app.test_client()
+            with patch("api_server._storage_repo", return_value=repo):
+                start = client.post(
+                    "/api/manual/proxy/start",
+                    json={
+                        "scan_id": "proxy-api",
+                        "target_base_url": "http://127.0.0.1:5000",
+                        "scope": ["http://127.0.0.1:5000"],
+                        "port": 0,
+                    },
+                )
+                self.assertEqual(start.status_code, 200)
+                self.assertTrue(start.get_json()["running"])
+
+                intercept = client.post("/api/manual/proxy/intercept", json={"enabled": True})
+                self.assertEqual(intercept.status_code, 200)
+                self.assertTrue(intercept.get_json()["intercept_enabled"])
+
+                status = client.get("/api/manual/proxy/status")
+                self.assertEqual(status.status_code, 200)
+                self.assertEqual(status.get_json()["scan_id"], "proxy-api")
+
+                pending = client.get("/api/manual/proxy/pending")
+                self.assertEqual(pending.status_code, 200)
+                self.assertEqual(pending.get_json()["count"], 0)
+
+                stop = client.post("/api/manual/proxy/stop")
+                self.assertEqual(stop.status_code, 200)
+                self.assertFalse(stop.get_json()["running"])
+            repo.close()
+
 
 if __name__ == "__main__":
     unittest.main()

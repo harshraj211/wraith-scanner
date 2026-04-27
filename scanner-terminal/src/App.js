@@ -100,6 +100,9 @@ function App() {
   const [corpusRequests, setCorpusRequests] = useState([]);
   const [selectedExchange, setSelectedExchange] = useState(null);
   const [corpusState, setCorpusState] = useState('idle');
+  const [proxyStatus, setProxyStatus] = useState({ running: false });
+  const [proxyState, setProxyState] = useState('idle');
+  const [pendingProxyRequests, setPendingProxyRequests] = useState([]);
 
   const addProgress = useCallback((event) => {
     setProgressEvents((current) => [
@@ -394,6 +397,106 @@ function App() {
     }
   };
 
+  const refreshProxyStatus = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/manual/proxy/status`);
+      setProxyStatus(response.data || { running: false });
+    } catch (error) {
+      addProgress({
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const startManualProxy = async () => {
+    setProxyState('starting');
+    try {
+      const origin = safeOrigin(manualRequest.url) || safeOrigin(form.targetUrl) || 'http://127.0.0.1:5000';
+      const response = await axios.post(`${API_URL}/api/manual/proxy/start`, {
+        scan_id: manualRequest.scanId || latestScanId,
+        target_base_url: origin,
+        scope: [origin],
+        auth_role: 'manual',
+        intercept_enabled: false,
+      });
+      const status = response.data || {};
+      setProxyStatus(status);
+      setProxyState('running');
+      if (status.scan_id) {
+        setLatestScanId(status.scan_id);
+        setManualRequest((current) => ({ ...current, scanId: status.scan_id }));
+      }
+      addProgress({
+        scan_id: status.scan_id,
+        type: 'success',
+        message: `Manual proxy listening on ${status.host}:${status.port}`,
+      });
+    } catch (error) {
+      setProxyState('error');
+      addProgress({
+        scan_id: manualRequest.scanId || latestScanId,
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const stopManualProxy = async () => {
+    setProxyState('stopping');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/proxy/stop`);
+      setProxyStatus(response.data || { running: false });
+      setPendingProxyRequests([]);
+      setProxyState('stopped');
+    } catch (error) {
+      setProxyState('error');
+      addProgress({
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const toggleManualProxyIntercept = async (enabled) => {
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/proxy/intercept`, { enabled });
+      setProxyStatus(response.data || { running: false });
+    } catch (error) {
+      addProgress({
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const loadProxyPending = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/manual/proxy/pending`);
+      setPendingProxyRequests(response.data.requests || []);
+    } catch (error) {
+      addProgress({
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const decideProxyRequest = async (requestId, action) => {
+    try {
+      await axios.post(`${API_URL}/api/manual/proxy/pending/${requestId}`, { action });
+      await loadProxyPending();
+      if (action === 'forward') {
+        setTimeout(() => loadCorpus(manualRequest.scanId || latestScanId), 300);
+      }
+    } catch (error) {
+      addProgress({
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
   const updateCorpusFilter = (name, value) => {
     setCorpusFilters((current) => ({ ...current, [name]: value }));
   };
@@ -448,6 +551,15 @@ function App() {
           terminalRef={terminalRef}
           activeTab={manualTab}
           setActiveTab={setManualTab}
+          proxyStatus={proxyStatus}
+          proxyState={proxyState}
+          pendingProxyRequests={pendingProxyRequests}
+          refreshProxyStatus={refreshProxyStatus}
+          startManualProxy={startManualProxy}
+          stopManualProxy={stopManualProxy}
+          toggleManualProxyIntercept={toggleManualProxyIntercept}
+          loadProxyPending={loadProxyPending}
+          decideProxyRequest={decideProxyRequest}
         />
       )}
     </div>
@@ -612,6 +724,15 @@ function AutomatedPage({
   terminalRef,
   activeTab,
   setActiveTab,
+  proxyStatus,
+  proxyState,
+  pendingProxyRequests,
+  refreshProxyStatus,
+  startManualProxy,
+  stopManualProxy,
+  toggleManualProxyIntercept,
+  loadProxyPending,
+  decideProxyRequest,
 }) {
   const findings = scanStatus?.canonical_findings || scanStatus?.findings || [];
   return (
@@ -756,6 +877,15 @@ function ManualPage({
   terminalRef,
   activeTab,
   setActiveTab,
+  proxyStatus,
+  proxyState,
+  pendingProxyRequests,
+  refreshProxyStatus,
+  startManualProxy,
+  stopManualProxy,
+  toggleManualProxyIntercept,
+  loadProxyPending,
+  decideProxyRequest,
 }) {
   return (
     <div className="app-shell manual-shell enterprise-shell">
@@ -798,6 +928,17 @@ function ManualPage({
         <div className={`workspace-tab-panel manual-tab manual-tab-${activeTab}`}>
           {activeTab === 'proxy' && (
             <section id="proxy-history" className="history-panel manual-wide-panel">
+              <ProxyControlPanel
+                proxyStatus={proxyStatus}
+                proxyState={proxyState}
+                pendingProxyRequests={pendingProxyRequests}
+                refreshProxyStatus={refreshProxyStatus}
+                startManualProxy={startManualProxy}
+                stopManualProxy={stopManualProxy}
+                toggleManualProxyIntercept={toggleManualProxyIntercept}
+                loadProxyPending={loadProxyPending}
+                decideProxyRequest={decideProxyRequest}
+              />
               <CorpusHeader
                 latestScanId={manualRequest.scanId || latestScanId}
                 loadCorpus={loadCorpus}
@@ -1243,6 +1384,72 @@ function IssuesTable({ findings }) {
   );
 }
 
+function ProxyControlPanel({
+  proxyStatus,
+  proxyState,
+  pendingProxyRequests,
+  refreshProxyStatus,
+  startManualProxy,
+  stopManualProxy,
+  toggleManualProxyIntercept,
+  loadProxyPending,
+  decideProxyRequest,
+}) {
+  const running = Boolean(proxyStatus?.running);
+  const proxyAddress = running ? `${proxyStatus.host}:${proxyStatus.port}` : 'not listening';
+  return (
+    <div className="proxy-control">
+      <div className="proxy-control-header">
+        <div>
+          <span className="eyebrow">Live capture</span>
+          <h2>HTTP Proxy</h2>
+          <p>Configure your browser HTTP proxy to <strong>{proxyAddress}</strong>. HTTPS CONNECT is intentionally not intercepted yet.</p>
+        </div>
+        <div className="proxy-actions">
+          <button className="secondary-button" onClick={refreshProxyStatus}>Status</button>
+          {running ? (
+            <button className="secondary-button" onClick={stopManualProxy} disabled={proxyState === 'stopping'}>Stop</button>
+          ) : (
+            <button className="primary-button" onClick={startManualProxy} disabled={proxyState === 'starting'}>
+              {proxyState === 'starting' ? 'Starting' : 'Start proxy'}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="proxy-status-grid">
+        <Metric label="State" value={running ? 'running' : proxyState} />
+        <Metric label="Captured" value={proxyStatus?.captured_count ?? 0} />
+        <Metric label="Pending" value={proxyStatus?.pending_count ?? pendingProxyRequests.length} />
+        <Metric label="Dropped" value={proxyStatus?.dropped_count ?? 0} />
+      </div>
+      <div className="proxy-intercept-row">
+        <label>
+          <input
+            type="checkbox"
+            checked={Boolean(proxyStatus?.intercept_enabled)}
+            onChange={(event) => toggleManualProxyIntercept(event.target.checked)}
+            disabled={!running}
+          />
+          <span>Pause requests for forward/drop</span>
+        </label>
+        <button className="secondary-button" onClick={loadProxyPending} disabled={!running}>Load pending</button>
+      </div>
+      {pendingProxyRequests.length > 0 && (
+        <div className="pending-proxy-list">
+          {pendingProxyRequests.map((item) => (
+            <div className="pending-proxy-row" key={item.request_id}>
+              <span className={`method method-${String(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
+              <strong>{item.url}</strong>
+              <button className="secondary-button" onClick={() => decideProxyRequest(item.request_id, 'drop')}>Drop</button>
+              <button className="primary-button" onClick={() => decideProxyRequest(item.request_id, 'forward')}>Forward</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CorpusHeader({
   latestScanId,
   loadCorpus,
@@ -1658,6 +1865,18 @@ function parseKeyValueLines(value) {
     if (key) out[key] = val;
     return out;
   }, {});
+}
+
+function safeOrigin(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.origin;
+    }
+  } catch (_error) {
+    return '';
+  }
+  return '';
 }
 
 function countImports(imports) {
