@@ -570,6 +570,15 @@ class SemgrepScanner:
         print(f"[[x]] Semgrep not found in PATH or {os.path.dirname(sys.executable)}")
         return False
 
+    def _semgrep_env(self) -> Dict[str, str]:
+        env = {**os.environ, "PYTHONUTF8": "1"}
+        if self._semgrep_bin:
+            semgrep_dir = os.path.dirname(self._semgrep_bin)
+            path = env.get("PATH", "")
+            if semgrep_dir and semgrep_dir not in path.split(os.pathsep):
+                env["PATH"] = semgrep_dir + os.pathsep + path
+        return env
+
     def _is_semgrep_logged_in(self) -> bool:
         """
         Check if the user is authenticated to semgrep.dev.
@@ -579,14 +588,13 @@ class SemgrepScanner:
         if self._logged_in is not None:
             return self._logged_in
 
-        _utf8_env = {**os.environ, "PYTHONUTF8": "1"}
         try:
             result = subprocess.run(
                 [self._semgrep_bin, "show", "identity"],
                 capture_output=True,
                 text=True,
                 timeout=15,
-                env=_utf8_env,
+                env=self._semgrep_env(),
             )
             # 'semgrep show identity' prints identity info to stderr
             output = (result.stdout + result.stderr).lower()
@@ -756,7 +764,7 @@ class SemgrepScanner:
                 text=True,
                 check=False,   # Semgrep exits non-zero when it finds issues
                 timeout=subprocess_timeout,
-                env={**os.environ, "PYTHONUTF8": "1"},
+                env=self._semgrep_env(),
             )
 
             # Always try stdout first

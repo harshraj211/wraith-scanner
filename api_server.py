@@ -1064,6 +1064,8 @@ def get_scan_status(scan_id):
         'intelligent_mutation': scan.get('intelligent_mutation', {}),
         'oob_mapping_summary':  scan.get('oob_mapping_summary', {}),
         'auth_health':          scan.get('auth_health', {}),
+        'api_imports':          scan.get('api_imports', {}),
+        'sequence_workflows':   scan.get('sequence_workflows', []),
         'tech_stack':           scan.get('tech_stack', {}),
         'findings':             scan.get('findings', []),
         'canonical_findings':   scan.get('canonical_findings', []),
@@ -1103,6 +1105,70 @@ def download_json_report(scan_id):
         download_name=f'wraith_scan_{scan_id}.json',
         mimetype='application/json',
     )
+
+
+@app.route('/api/corpus/<scan_id>/requests', methods=['GET'])
+def list_corpus_requests(scan_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+
+    filters = {}
+    for key in ('method', 'host', 'content_type', 'source', 'auth_role', 'parameter_name'):
+        value = request.args.get(key)
+        if value:
+            filters[key] = value
+    path_contains = request.args.get('path_contains') or request.args.get('path')
+    if path_contains:
+        filters['path_contains'] = path_contains
+    status_code = request.args.get('status_code')
+    if status_code:
+        try:
+            filters['status_code'] = int(status_code)
+        except ValueError:
+            return jsonify({'error': 'status_code must be an integer'}), 400
+    has_finding = request.args.get('has_finding')
+    if has_finding is not None and has_finding != '':
+        filters['has_finding'] = str(has_finding).lower() in {'1', 'true', 'yes', 'on'}
+
+    requests_list = repo.list_requests(scan_id, filters)
+    return jsonify({
+        'scan_id': scan_id,
+        'count': len(requests_list),
+        'requests': requests_list,
+    })
+
+
+@app.route('/api/corpus/request/<request_id>', methods=['GET'])
+def get_corpus_request(request_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    request_record = repo.get_request(request_id)
+    if not request_record:
+        return jsonify({'error': 'Request not found'}), 404
+    return jsonify({
+        'request': request_record,
+        'response': repo.get_response_for_request(request_id),
+    })
+
+
+@app.route('/api/corpus/<scan_id>/findings', methods=['GET'])
+def list_corpus_findings(scan_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    filters = {}
+    for key in ('severity', 'vuln_type', 'auth_role'):
+        value = request.args.get(key)
+        if value:
+            filters[key] = value
+    findings = repo.list_findings(scan_id, filters)
+    return jsonify({
+        'scan_id': scan_id,
+        'count': len(findings),
+        'findings': findings,
+    })
 
 
 @app.route('/api/mode', methods=['GET'])

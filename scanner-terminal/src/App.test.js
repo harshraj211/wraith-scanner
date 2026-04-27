@@ -34,4 +34,5 @@ test('renders the Wraith scan setup workbench', () => {
   expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
   expect(screen.getByText(/api imports/i)).toBeInTheDocument();
   expect(screen.getByText(/sequence workflows/i)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /requests/i })).toBeInTheDocument();
 });

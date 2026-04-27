@@ -25,6 +25,7 @@ npm start
 - API import inputs for OpenAPI, Postman, HAR, and GraphQL schema files or URLs.
 - Sequence workflow inputs for YAML/JSON workflow paths.
 - Live progress panel fed by Socket.IO scan events.
+- Corpus viewer for persisted requests, responses, and sanitized evidence details.
 - xterm command view for `scan`, `scanrepo`, `status`, and `download`.
 
 ## Verify

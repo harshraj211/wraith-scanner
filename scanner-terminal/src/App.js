@@ -45,6 +45,15 @@ function App() {
   const [latestScanId, setLatestScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
   const [progressEvents, setProgressEvents] = useState([]);
+  const [corpusFilters, setCorpusFilters] = useState({
+    method: '',
+    source: '',
+    statusCode: '',
+    pathContains: '',
+  });
+  const [corpusRequests, setCorpusRequests] = useState([]);
+  const [selectedExchange, setSelectedExchange] = useState(null);
+  const [corpusState, setCorpusState] = useState('idle');
 
   const addProgress = useCallback((event) => {
     setProgressEvents((current) => [
@@ -211,6 +220,51 @@ function App() {
     }
   };
 
+  const loadCorpus = async () => {
+    if (!latestScanId) return;
+    setCorpusState('loading');
+    try {
+      const params = {};
+      if (corpusFilters.method) params.method = corpusFilters.method;
+      if (corpusFilters.source) params.source = corpusFilters.source;
+      if (corpusFilters.statusCode) params.status_code = corpusFilters.statusCode;
+      if (corpusFilters.pathContains) params.path_contains = corpusFilters.pathContains;
+      const response = await axios.get(`${API_URL}/api/corpus/${latestScanId}/requests`, { params });
+      setCorpusRequests(response.data.requests || []);
+      setCorpusState('loaded');
+      if ((response.data.requests || []).length > 0) {
+        loadExchange(response.data.requests[0].request_id);
+      } else {
+        setSelectedExchange(null);
+      }
+    } catch (error) {
+      setCorpusState('error');
+      addProgress({
+        scan_id: latestScanId,
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const loadExchange = async (requestId) => {
+    if (!requestId) return;
+    try {
+      const response = await axios.get(`${API_URL}/api/corpus/request/${requestId}`);
+      setSelectedExchange(response.data);
+    } catch (error) {
+      addProgress({
+        scan_id: latestScanId,
+        type: 'error',
+        message: error?.response?.data?.error || error.message,
+      });
+    }
+  };
+
+  const updateCorpusFilter = (name, value) => {
+    setCorpusFilters((current) => ({ ...current, [name]: value }));
+  };
+
   const importCount = countImports(scanPayload.imports);
   const workflowCount = (scanPayload.sequence_workflows || []).length;
 
@@ -238,6 +292,7 @@ function App() {
           <nav className="nav-stack" aria-label="Workbench sections">
             <a href="#scan-setup">Setup</a>
             <a href="#scan-progress">Progress</a>
+            <a href="#corpus">Corpus</a>
             <a href="#terminal">Terminal</a>
           </nav>
           <div className="sidebar-metrics">
@@ -382,6 +437,56 @@ function App() {
             </div>
           </section>
 
+          <section id="corpus" className="corpus-panel">
+            <div className="section-heading compact">
+              <div>
+                <span className="eyebrow">Traffic corpus</span>
+                <h2>Requests</h2>
+              </div>
+              <button className="secondary-button" onClick={loadCorpus} disabled={!latestScanId || corpusState === 'loading'}>
+                {corpusState === 'loading' ? 'Loading' : 'Load'}
+              </button>
+            </div>
+            <div className="corpus-filters">
+              <label>
+                <span>Method</span>
+                <select value={corpusFilters.method} onChange={(e) => updateCorpusFilter('method', e.target.value)}>
+                  <option value="">Any</option>
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="PATCH">PATCH</option>
+                  <option value="DELETE">DELETE</option>
+                </select>
+              </label>
+              <label>
+                <span>Source</span>
+                <select value={corpusFilters.source} onChange={(e) => updateCorpusFilter('source', e.target.value)}>
+                  <option value="">Any</option>
+                  <option value="crawler">crawler</option>
+                  <option value="import">import</option>
+                  <option value="replay">replay</option>
+                  <option value="fuzzer">fuzzer</option>
+                  <option value="proof">proof</option>
+                  <option value="manual">manual</option>
+                </select>
+              </label>
+              <label>
+                <span>Status</span>
+                <input value={corpusFilters.statusCode} onChange={(e) => updateCorpusFilter('statusCode', e.target.value)} />
+              </label>
+              <label>
+                <span>Path</span>
+                <input value={corpusFilters.pathContains} onChange={(e) => updateCorpusFilter('pathContains', e.target.value)} />
+              </label>
+            </div>
+            <CorpusViewer
+              requests={corpusRequests}
+              selectedExchange={selectedExchange}
+              onSelect={loadExchange}
+            />
+          </section>
+
           <section id="terminal" className="terminal-panel">
             <div className="section-heading compact">
               <div>
@@ -428,6 +533,73 @@ function StatusSummary({ scanId, status, launchState }) {
       </div>
     </div>
   );
+}
+
+function CorpusViewer({ requests, selectedExchange, onSelect }) {
+  return (
+    <div className="corpus-viewer">
+      <div className="request-table" role="table" aria-label="Corpus requests">
+        {requests.length === 0 ? (
+          <p className="empty-state">Load a completed or running scan to inspect captured traffic.</p>
+        ) : requests.map((item) => (
+          <button
+            className={`request-row ${selectedExchange?.request?.request_id === item.request_id ? 'selected' : ''}`}
+            key={item.request_id}
+            onClick={() => onSelect(item.request_id)}
+          >
+            <span className={`method method-${(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
+            <span className="request-url">{item.url}</span>
+            <span>{item.source}</span>
+            <span>{item.auth_role || 'anonymous'}</span>
+          </button>
+        ))}
+      </div>
+      <ExchangeDetail exchange={selectedExchange} />
+    </div>
+  );
+}
+
+function ExchangeDetail({ exchange }) {
+  if (!exchange?.request) {
+    return (
+      <div className="exchange-detail">
+        <p className="empty-state">Select a request to see sanitized request and response evidence.</p>
+      </div>
+    );
+  }
+  const request = exchange.request;
+  const response = exchange.response || {};
+  return (
+    <div className="exchange-detail">
+      <div className="detail-header">
+        <strong>{request.method} {request.normalized_endpoint || request.url}</strong>
+        <span>{response.status_code || 'no response'}</span>
+      </div>
+      <DetailBlock title="Request Headers" value={request.headers} />
+      <DetailBlock title="Request Body" value={request.body} />
+      <DetailBlock title="Response Headers" value={response.headers} />
+      <DetailBlock title="Response Body" value={response.body_excerpt} />
+    </div>
+  );
+}
+
+function DetailBlock({ title, value }) {
+  return (
+    <div className="detail-block">
+      <span>{title}</span>
+      <pre>{formatDetail(value)}</pre>
+    </div>
+  );
+}
+
+function formatDetail(value) {
+  if (value === undefined || value === null || value === '') return 'none';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return String(value);
+  }
 }
 
 function buildScanPayload(form) {

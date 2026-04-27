@@ -276,6 +276,16 @@ Backend API scans write `reports/scan_<scan-id>.json` beside the PDF. Download i
 GET http://127.0.0.1:5001/api/download-json/<scan-id>
 ```
 
+Inspect persisted corpus traffic from the frontend Corpus panel or through the API:
+
+```text
+GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
+GET http://127.0.0.1:5001/api/corpus/request/<request-id>
+GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
+```
+
+Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
+
 ## Canonical Models and Corpus
 
 Phase 0/1 introduces stable models under `scanner.core.models`:
@@ -385,13 +395,14 @@ Focused upgrade regression tests live in:
 - `tests/test_advanced_engine_upgrades.py`
 - `tests/test_auth_profiles.py`
 - `tests/test_canonical_storage.py`
+- `tests/test_corpus_api.py`
 - `tests/test_startup_smoke.py`
 
-If Semgrep is installed but its `pysemgrep` entrypoint is broken, the Semgrep fixture tests may fail before Wraith code runs. Reinstalling Semgrep normally fixes that environment issue.
+Wraith resolves Semgrep from common Python script locations and adds the discovered directory to child process `PATH`, which helps Windows installs where `semgrep.exe` and `pysemgrep.exe` live together outside the shell path.
 
 ## Notes
 
-- The React terminal keeps the original terminal-style UX and now exposes deep-state, mutation, taint, and OOB status summaries.
+- The React workbench keeps the original terminal-style UX and now exposes scan setup, progress, API imports, sequence workflows, and a request/response corpus viewer.
 - PDF reports include the merged findings from DAST, Semgrep, taint analysis, and secrets or dependency scanning.
 - The repo may contain local artifacts like `reports/` or `test.db`; Wraith does not require them for installation.
 
