@@ -3,3 +3,8 @@
 The active product roadmap is maintained in [Full_future_plan.md](Full_future_plan.md).
 
 Use that file for the current frontend, desktop agent, controlled browser, proxy capture, manual tools, scanner-depth, reporting, and installer plan.
+
+Current implementation status:
+
+- Manual Workbench now has proxy capture, Repeater, Intruder, Decoder, response diffs, and corpus-backed request history.
+- Proof Mode skeleton is underway with deterministic task creation, policy checks, evidence persistence, and a safe open-redirect proof executor.

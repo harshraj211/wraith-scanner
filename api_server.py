@@ -33,8 +33,13 @@ from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
-from scanner.core.models import RequestRecord, ScanConfig, findings_from_legacy
+from scanner.core.models import Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
 from scanner.core.models import ResponseRecord
+from scanner.exploitation.evidence import persist_proof_result
+from scanner.exploitation.models import ProofContext
+from scanner.exploitation.planner import create_proof_task
+from scanner.exploitation.registry import default_registry
+from scanner.exploitation.runner import run_proof_coroutine
 from scanner.importers.common import (
     candidates_to_scan_targets,
     load_candidates_from_imports,
@@ -1174,6 +1179,60 @@ def list_corpus_findings(scan_id):
         'count': len(findings),
         'findings': findings,
     })
+
+
+@app.route('/api/proof/<finding_id>/task', methods=['POST'])
+def create_proof_task_endpoint(finding_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    finding_payload = repo.get_finding(finding_id)
+    if not finding_payload:
+        return jsonify({'error': 'Finding not found'}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        finding = Finding(**finding_payload)
+        task = create_proof_task(
+            finding,
+            safety_mode=str(payload.get('safety_mode') or 'safe'),
+            max_attempts=int(payload.get('max_attempts') or 1),
+            requires_human_approval=bool(payload.get('requires_human_approval') or False),
+        )
+        repo.save_proof_task(task)
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'task': task.to_dict()})
+
+
+@app.route('/api/proof/<task_id>/run', methods=['POST'])
+def run_proof_task_endpoint(task_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    task_payload = repo.get_proof_task(task_id)
+    if not task_payload:
+        return jsonify({'error': 'Proof task not found'}), 404
+    try:
+        task = ProofTask(**task_payload)
+        finding_payload = repo.get_finding(task.finding_id)
+        if not finding_payload:
+            return jsonify({'error': 'Finding not found'}), 404
+        finding = Finding(**finding_payload)
+        scan_payload = repo.get_scan(finding.scan_id) if finding.scan_id else None
+        scan_config = ScanConfig(**scan_payload) if scan_payload else None
+        technique_id = task.allowed_techniques[0] if task.allowed_techniques else ''
+        executor = default_registry().get(technique_id)
+        if not executor:
+            return jsonify({'error': 'No deterministic proof executor is available for this task'}), 400
+        result = run_proof_coroutine(executor.execute(task, ProofContext(
+            finding=finding,
+            scan_config=scan_config,
+            repository=repo,
+        )))
+        persist_proof_result(repo, finding=finding, task=task, result=result)
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'result': result.to_dict()})
 
 
 @app.route('/api/manual/replay', methods=['POST'])

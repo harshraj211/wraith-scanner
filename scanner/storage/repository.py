@@ -77,6 +77,14 @@ class StorageRepository:
             )
             self.conn.commit()
 
+    def get_scan(self, scan_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM scans WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+        return _loads(row["raw_json"], {}) if row else None
+
     def save_request(self, request_record: RequestRecord) -> str:
         data = request_record.to_dict()
         parsed = urlparse(request_record.url)
@@ -270,6 +278,45 @@ class StorageRepository:
         self.conn.commit()
         return task.task_id
 
+    def get_proof_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM proof_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return _loads(row["raw_json"], {}) if row else None
+
+    def list_proof_tasks(self, finding_id: str = "") -> List[Dict[str, Any]]:
+        where: List[str] = []
+        params: List[Any] = []
+        if finding_id:
+            where.append("finding_id = ?")
+            params.append(finding_id)
+        query = "SELECT raw_json FROM proof_tasks"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [_loads(row["raw_json"], {}) for row in rows]
+
+    def list_evidence_artifacts(self, finding_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
+        where: List[str] = []
+        params: List[Any] = []
+        if finding_id:
+            where.append("finding_id = ?")
+            params.append(finding_id)
+        if task_id:
+            where.append("task_id = ?")
+            params.append(task_id)
+        query = "SELECT raw_json FROM evidence_artifacts"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [_loads(row["raw_json"], {}) for row in rows]
+
     def save_oob_event(self, event: Dict[str, Any]) -> str:
         event = redact(event or {})
         event_id = str(event.get("event_id") or "oob_" + uuid.uuid4().hex[:16])
@@ -412,6 +459,10 @@ def create_scan(scan_config: ScanConfig) -> None:
     get_repository().create_scan(scan_config)
 
 
+def get_scan(scan_id: str) -> Optional[Dict[str, Any]]:
+    return get_repository().get_scan(scan_id)
+
+
 def save_request(request_record: RequestRecord) -> str:
     return get_repository().save_request(request_record)
 
@@ -432,6 +483,10 @@ def save_evidence_artifact(artifact: EvidenceArtifact) -> str:
     return get_repository().save_evidence_artifact(artifact)
 
 
+def save_proof_task(task: ProofTask) -> str:
+    return get_repository().save_proof_task(task)
+
+
 def list_requests(scan_id: str, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     return get_repository().list_requests(scan_id, filters)
 
@@ -450,3 +505,15 @@ def list_findings(scan_id: str, filters: Optional[Dict[str, Any]] = None) -> Lis
 
 def get_finding(finding_id: str) -> Optional[Dict[str, Any]]:
     return get_repository().get_finding(finding_id)
+
+
+def get_proof_task(task_id: str) -> Optional[Dict[str, Any]]:
+    return get_repository().get_proof_task(task_id)
+
+
+def list_proof_tasks(finding_id: str = "") -> List[Dict[str, Any]]:
+    return get_repository().list_proof_tasks(finding_id)
+
+
+def list_evidence_artifacts(finding_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
+    return get_repository().list_evidence_artifacts(finding_id, task_id)

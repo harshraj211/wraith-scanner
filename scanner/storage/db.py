@@ -179,6 +179,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_findings_param ON findings(parameter_name);
         CREATE INDEX IF NOT EXISTS idx_evidence_finding ON evidence_artifacts(finding_id);
         CREATE INDEX IF NOT EXISTS idx_oob_scan ON oob_events(scan_id);
+        CREATE INDEX IF NOT EXISTS idx_proof_tasks_finding ON proof_tasks(finding_id);
         """
     )
     conn.commit()
