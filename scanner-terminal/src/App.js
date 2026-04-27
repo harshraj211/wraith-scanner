@@ -482,9 +482,11 @@ function App() {
     }
   };
 
-  const decideProxyRequest = async (requestId, action) => {
+  const decideProxyRequest = async (requestId, action, requestUpdate) => {
     try {
-      await axios.post(`${API_URL}/api/manual/proxy/pending/${requestId}`, { action });
+      const payload = { action };
+      if (requestUpdate) payload.request = requestUpdate;
+      await axios.post(`${API_URL}/api/manual/proxy/pending/${requestId}`, payload);
       await loadProxyPending();
       if (action === 'forward') {
         setTimeout(() => loadCorpus(manualRequest.scanId || latestScanId), 300);
@@ -1395,8 +1397,45 @@ function ProxyControlPanel({
   loadProxyPending,
   decideProxyRequest,
 }) {
+  const [pendingEdits, setPendingEdits] = useState({});
   const running = Boolean(proxyStatus?.running);
   const proxyAddress = running ? `${proxyStatus.host}:${proxyStatus.port}` : 'not listening';
+
+  useEffect(() => {
+    setPendingEdits((current) => {
+      const next = {};
+      pendingProxyRequests.forEach((item) => {
+        next[item.request_id] = current[item.request_id] || {
+          method: item.method || 'GET',
+          url: item.url || '',
+          headers: formatKeyValueLines(item.headers || {}),
+          body: item.body || item.body_excerpt || '',
+        };
+      });
+      return next;
+    });
+  }, [pendingProxyRequests]);
+
+  const updateEdit = (requestId, name, value) => {
+    setPendingEdits((current) => ({
+      ...current,
+      [requestId]: {
+        ...(current[requestId] || {}),
+        [name]: value,
+      },
+    }));
+  };
+
+  const forwardPending = (item) => {
+    const edit = pendingEdits[item.request_id] || {};
+    decideProxyRequest(item.request_id, 'forward', {
+      method: edit.method || item.method,
+      url: edit.url || item.url,
+      headers: parseKeyValueLines(edit.headers || ''),
+      body: edit.body || '',
+    });
+  };
+
   return (
     <div className="proxy-control">
       <div className="proxy-control-header">
@@ -1420,7 +1459,7 @@ function ProxyControlPanel({
         <Metric label="State" value={running ? 'running' : proxyState} />
         <Metric label="Captured" value={proxyStatus?.captured_count ?? 0} />
         <Metric label="Pending" value={proxyStatus?.pending_count ?? pendingProxyRequests.length} />
-        <Metric label="Dropped" value={proxyStatus?.dropped_count ?? 0} />
+        <Metric label="Modified" value={proxyStatus?.modified_count ?? 0} />
       </div>
       <div className="proxy-intercept-row">
         <label>
@@ -1437,11 +1476,41 @@ function ProxyControlPanel({
       {pendingProxyRequests.length > 0 && (
         <div className="pending-proxy-list">
           {pendingProxyRequests.map((item) => (
-            <div className="pending-proxy-row" key={item.request_id}>
-              <span className={`method method-${String(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
-              <strong>{item.url}</strong>
-              <button className="secondary-button" onClick={() => decideProxyRequest(item.request_id, 'drop')}>Drop</button>
-              <button className="primary-button" onClick={() => decideProxyRequest(item.request_id, 'forward')}>Forward</button>
+            <div className="pending-proxy-card" key={item.request_id}>
+              <div className="pending-proxy-row">
+                <select
+                  value={pendingEdits[item.request_id]?.method || item.method || 'GET'}
+                  onChange={(event) => updateEdit(item.request_id, 'method', event.target.value)}
+                >
+                  {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((method) => (
+                    <option key={method} value={method}>{method}</option>
+                  ))}
+                </select>
+                <input
+                  value={pendingEdits[item.request_id]?.url || item.url || ''}
+                  onChange={(event) => updateEdit(item.request_id, 'url', event.target.value)}
+                />
+                <button className="secondary-button" onClick={() => decideProxyRequest(item.request_id, 'drop')}>Drop</button>
+                <button className="primary-button" onClick={() => forwardPending(item)}>Forward</button>
+              </div>
+              <div className="pending-proxy-editors">
+                <label className="raw-field">
+                  <span>Headers</span>
+                  <textarea
+                    value={pendingEdits[item.request_id]?.headers || ''}
+                    onChange={(event) => updateEdit(item.request_id, 'headers', event.target.value)}
+                    spellCheck="false"
+                  />
+                </label>
+                <label className="raw-field">
+                  <span>Body</span>
+                  <textarea
+                    value={pendingEdits[item.request_id]?.body || ''}
+                    onChange={(event) => updateEdit(item.request_id, 'body', event.target.value)}
+                    spellCheck="false"
+                  />
+                </label>
+              </div>
             </div>
           ))}
         </div>
@@ -1865,6 +1934,12 @@ function parseKeyValueLines(value) {
     if (key) out[key] = val;
     return out;
   }, {});
+}
+
+function formatKeyValueLines(value) {
+  return Object.entries(value || {})
+    .map(([key, val]) => `${key}: ${val}`)
+    .join('\n');
 }
 
 function safeOrigin(value) {

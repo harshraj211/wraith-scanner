@@ -147,6 +147,58 @@ class ManualProxyTests(unittest.TestCase):
                 proxy.stop()
                 repo.close()
 
+    def test_intercept_can_modify_request_before_forward(self):
+        with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            proxy = WraithProxyController()
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                status = proxy.start(
+                    repo,
+                    ProxyConfig(
+                        scan_id="proxy-edit",
+                        target_base_url=base_url,
+                        scope=[base_url],
+                        intercept_enabled=True,
+                        intercept_timeout_sec=5,
+                    ),
+                )
+                proxy_url = f"http://{status['host']}:{status['port']}"
+                future = executor.submit(
+                    lambda: proxied_session().get(
+                        f"{base_url}/hello?name=original",
+                        proxies={"http": proxy_url},
+                        timeout=10,
+                    )
+                )
+
+                pending = []
+                for _ in range(30):
+                    pending = proxy.list_pending()
+                    if pending:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(len(pending), 1)
+                self.assertTrue(
+                    proxy.decide(
+                        pending[0]["request_id"],
+                        "forward",
+                        {"url": f"{base_url}/hello?name=edited"},
+                    )
+                )
+
+                response = future.result(timeout=10)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.text, "hello edited")
+                saved = repo.list_requests("proxy-edit", {"source": "proxy"})
+                self.assertEqual(len(saved), 1)
+                self.assertTrue(any("name=edited" in item["url"] for item in saved))
+                self.assertEqual(proxy.status()["modified_count"], 1)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+                proxy.stop()
+                repo.close()
+
 
 if __name__ == "__main__":
     unittest.main()

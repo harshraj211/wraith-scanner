@@ -54,9 +54,10 @@ class PendingProxyRequest:
     method: str
     url: str
     headers: Dict[str, Any]
-    body_excerpt: str
+    body: str
     created_at: str = field(default_factory=utc_now)
     action: str = ""
+    edited: bool = False
     event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -65,9 +66,11 @@ class PendingProxyRequest:
             "method": self.method,
             "url": redact_text(self.url),
             "headers": redact_headers(self.headers),
-            "body_excerpt": redact_text(self.body_excerpt),
+            "body": redact_text(self.body),
+            "body_excerpt": redact_text(self.body[:1000]),
             "created_at": self.created_at,
             "action": self.action,
+            "edited": self.edited,
         }
 
 
@@ -83,6 +86,7 @@ class WraithProxyController:
         self._pending: Dict[str, PendingProxyRequest] = {}
         self._captured_count = 0
         self._dropped_count = 0
+        self._modified_count = 0
 
     def start(self, repo: StorageRepository, config: Optional[ProxyConfig] = None) -> Dict[str, Any]:
         with self._lock:
@@ -149,6 +153,7 @@ class WraithProxyController:
                 "pending_count": len(self._pending),
                 "captured_count": self._captured_count,
                 "dropped_count": self._dropped_count,
+                "modified_count": self._modified_count,
             }
 
     def set_intercept(self, enabled: bool) -> Dict[str, Any]:
@@ -160,13 +165,18 @@ class WraithProxyController:
         with self._lock:
             return [pending.to_dict() for pending in self._pending.values()]
 
-    def decide(self, request_id: str, action: str) -> bool:
+    def decide(self, request_id: str, action: str, updates: Optional[Dict[str, Any]] = None) -> bool:
         if action not in {"forward", "drop"}:
             raise ValueError("action must be forward or drop")
         with self._lock:
             pending = self._pending.get(request_id)
             if pending is None:
                 return False
+            if action == "forward" and updates:
+                self._apply_pending_updates(pending, updates)
+                scope_error = self._scope_error(pending.url)
+                if scope_error:
+                    raise ValueError(scope_error)
             pending.action = action
             pending.event.set()
             return True
@@ -240,11 +250,30 @@ class WraithProxyController:
         with self._lock:
             self._captured_count += 1
 
-        if self._should_drop_for_intercept(request_record, headers, body_text):
+        decision = self._intercept_decision(request_record, headers, body_text)
+        if decision is None:
             self._write_text(handler, 403, "Dropped by Wraith intercept")
             with self._lock:
                 self._dropped_count += 1
             return
+        if decision.edited:
+            method = decision.method
+            url = decision.url
+            headers = decision.headers
+            body_text = decision.body
+            body_bytes = body_text.encode("utf-8", errors="replace")
+            request_record = RequestRecord.create(
+                scan_id=self._config.scan_id,
+                source="proxy",
+                method=method,
+                url=url,
+                headers=headers,
+                body=body_text,
+                auth_role=self._config.auth_role,
+            )
+            repo.save_request(request_record)
+            with self._lock:
+                self._modified_count += 1
 
         try:
             response = requests.request(
@@ -270,31 +299,73 @@ class WraithProxyController:
         repo.save_response(response_record)
         self._write_response(handler, response)
 
-    def _should_drop_for_intercept(
+    def _intercept_decision(
         self,
         request_record: RequestRecord,
         headers: Dict[str, Any],
         body_text: str,
-    ) -> bool:
+    ) -> Optional[PendingProxyRequest]:
         with self._lock:
             enabled = self._config.intercept_enabled
             timeout = self._config.intercept_timeout_sec
         if not enabled:
-            return False
+            return PendingProxyRequest(
+                request_id=request_record.request_id,
+                method=request_record.method,
+                url=request_record.url,
+                headers=headers,
+                body=body_text,
+                action="forward",
+            )
 
         pending = PendingProxyRequest(
             request_id=request_record.request_id,
             method=request_record.method,
             url=request_record.url,
             headers=headers,
-            body_excerpt=body_text[:1000],
+            body=body_text,
         )
         with self._lock:
             self._pending[pending.request_id] = pending
         pending.event.wait(timeout=max(1.0, float(timeout)))
         with self._lock:
             self._pending.pop(pending.request_id, None)
-        return pending.action != "forward"
+        if pending.action != "forward":
+            return None
+        return pending
+
+    def _apply_pending_updates(self, pending: PendingProxyRequest, updates: Dict[str, Any]) -> None:
+        if "method" in updates:
+            method = str(updates.get("method") or pending.method).upper()
+            if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                raise ValueError("Unsupported HTTP method")
+            if method != pending.method:
+                pending.method = method
+                pending.edited = True
+        if "url" in updates:
+            url = str(updates.get("url") or pending.url).strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("Proxy forward requires an absolute HTTP URL")
+            if url != pending.url:
+                pending.url = url
+                pending.edited = True
+        if "headers" in updates and isinstance(updates.get("headers"), dict):
+            merged = dict(pending.headers)
+            for name, value in updates["headers"].items():
+                key = str(name)
+                new_value = str(value)
+                if new_value == "[REDACTED]" and key in merged:
+                    continue
+                merged[key] = new_value
+            if merged != pending.headers:
+                pending.headers = merged
+                pending.edited = True
+        if "body" in updates:
+            body = str(updates.get("body") or "")
+            if body != pending.body:
+                pending.body = body
+                pending.edited = True
 
     def _request_url(self, handler: BaseHTTPRequestHandler) -> str:
         raw_path = str(handler.path or "")

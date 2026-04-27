@@ -1095,15 +1095,25 @@ button {
   gap: 8px;
 }
 
-.pending-proxy-row {
+.pending-proxy-card {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr) 92px 104px;
-  gap: 8px;
-  align-items: center;
+  gap: 10px;
   padding: 8px;
   border: 1px solid #e3e9f1;
   border-radius: 4px;
   background: #f8fafc;
+}
+
+.pending-proxy-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 92px 104px;
+  gap: 8px;
+  align-items: center;
+}
+
+.pending-proxy-row input,
+.pending-proxy-row select {
+  height: 36px;
 }
 
 .pending-proxy-row strong {
@@ -1113,6 +1123,20 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pending-proxy-editors {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(260px, 1.1fr);
+  gap: 10px;
+}
+
+.pending-proxy-editors textarea {
+  min-height: 112px;
+  resize: vertical;
+  font-family: "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .decoder-grid {
@@ -1875,7 +1899,8 @@ textarea:focus {
   .corpus-filters,
   .manual-options,
   .proxy-status-grid,
-  .pending-proxy-row {
+  .pending-proxy-row,
+  .pending-proxy-editors {
     grid-template-columns: 1fr;
   }
 

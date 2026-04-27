@@ -1313,8 +1313,9 @@ def manual_proxy_pending():
 def manual_proxy_decide(request_id):
     payload = request.get_json(silent=True) or {}
     action = str(payload.get('action') or '').lower()
+    updates = payload.get('request') if isinstance(payload.get('request'), dict) else None
     try:
-        found = manual_proxy.decide(request_id, action)
+        found = manual_proxy.decide(request_id, action, updates)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     if not found:
