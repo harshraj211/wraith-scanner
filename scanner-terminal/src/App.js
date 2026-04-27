@@ -499,6 +499,21 @@ function App() {
     }
   };
 
+  const sendRequestToRepeater = (requestRecord) => {
+    if (!requestRecord) return;
+    setManualRequest((current) => ({
+      ...current,
+      scanId: requestRecord.scan_id || current.scanId || latestScanId,
+      method: requestRecord.method || 'GET',
+      url: requestRecord.url || current.url,
+      headers: formatKeyValueLines(requestRecord.headers || {}),
+      body: stringifyBody(requestRecord.body),
+    }));
+    setManualTab('repeater');
+    setViewState('manual');
+    window.history.replaceState(null, '', `${window.location.pathname}#replay`);
+  };
+
   const updateCorpusFilter = (name, value) => {
     setCorpusFilters((current) => ({ ...current, [name]: value }));
   };
@@ -562,6 +577,7 @@ function App() {
           toggleManualProxyIntercept={toggleManualProxyIntercept}
           loadProxyPending={loadProxyPending}
           decideProxyRequest={decideProxyRequest}
+          sendRequestToRepeater={sendRequestToRepeater}
         />
       )}
     </div>
@@ -726,15 +742,6 @@ function AutomatedPage({
   terminalRef,
   activeTab,
   setActiveTab,
-  proxyStatus,
-  proxyState,
-  pendingProxyRequests,
-  refreshProxyStatus,
-  startManualProxy,
-  stopManualProxy,
-  toggleManualProxyIntercept,
-  loadProxyPending,
-  decideProxyRequest,
 }) {
   const findings = scanStatus?.canonical_findings || scanStatus?.findings || [];
   return (
@@ -821,7 +828,11 @@ function AutomatedPage({
                 corpusFilters={corpusFilters}
                 updateCorpusFilter={updateCorpusFilter}
               />
-              <CorpusViewer requests={corpusRequests} selectedExchange={selectedExchange} onSelect={loadExchange} />
+              <CorpusViewer
+                requests={corpusRequests}
+                selectedExchange={selectedExchange}
+                onSelect={loadExchange}
+              />
             </section>
           )}
 
@@ -888,6 +899,7 @@ function ManualPage({
   toggleManualProxyIntercept,
   loadProxyPending,
   decideProxyRequest,
+  sendRequestToRepeater,
 }) {
   return (
     <div className="app-shell manual-shell enterprise-shell">
@@ -1575,31 +1587,40 @@ function CorpusHeader({
   );
 }
 
-function CorpusViewer({ requests, selectedExchange, onSelect }) {
+function CorpusViewer({ requests, selectedExchange, onSelect, onSendToRepeater }) {
   return (
     <div className="corpus-viewer">
-      <RequestHistory requests={requests} selectedExchange={selectedExchange} onSelect={onSelect} />
+      <RequestHistory
+        requests={requests}
+        selectedExchange={selectedExchange}
+        onSelect={onSelect}
+        onSendToRepeater={onSendToRepeater}
+      />
       <ExchangeDetail exchange={selectedExchange} />
     </div>
   );
 }
 
-function RequestHistory({ requests, selectedExchange, onSelect }) {
+function RequestHistory({ requests, selectedExchange, onSelect, onSendToRepeater }) {
   return (
     <div className="request-table" role="table" aria-label="Corpus requests">
       {requests.length === 0 ? (
         <p className="empty-state">No requests loaded.</p>
       ) : requests.map((item) => (
-        <button
+        <div
           className={`request-row ${selectedExchange?.request?.request_id === item.request_id ? 'selected' : ''}`}
           key={item.request_id}
-          onClick={() => onSelect(item.request_id)}
         >
-          <span className={`method method-${(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
-          <span className="request-url">{item.url}</span>
-          <span>{item.source}</span>
-          <span>{item.auth_role || 'anonymous'}</span>
-        </button>
+          <button className="request-main" onClick={() => onSelect(item.request_id)}>
+            <span className={`method method-${(item.method || 'GET').toLowerCase()}`}>{item.method}</span>
+            <span className="request-url">{item.url}</span>
+            <span>{item.source}</span>
+            <span>{item.auth_role || 'anonymous'}</span>
+          </button>
+          {onSendToRepeater && (
+            <button className="request-repeater-button" onClick={() => onSendToRepeater(item)}>Repeater</button>
+          )}
+        </div>
       ))}
     </div>
   );
@@ -1645,13 +1666,14 @@ function DecoderPanel() {
 
   const runTransform = (type) => {
     try {
-      if (type === 'url-decode') setOutput(decodeURIComponent(input));
-      if (type === 'url-encode') setOutput(encodeURIComponent(input));
-      if (type === 'base64-decode') setOutput(atob(input.trim()));
-      if (type === 'base64-encode') setOutput(btoa(input));
-      if (type === 'json-pretty') setOutput(JSON.stringify(JSON.parse(input), null, 2));
+      const source = output || input;
+      if (type === 'url-decode') setOutput(decodeURIComponent(source));
+      if (type === 'url-encode') setOutput(encodeURIComponent(source));
+      if (type === 'base64-decode') setOutput(atob(source.trim()));
+      if (type === 'base64-encode') setOutput(btoa(source));
+      if (type === 'json-pretty') setOutput(JSON.stringify(JSON.parse(source), null, 2));
       if (type === 'jwt-decode') {
-        const parts = input.trim().split('.');
+        const parts = source.trim().split('.');
         if (parts.length < 2) throw new Error('JWT must have at least header and payload');
         const decodePart = (part) => JSON.stringify(JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))), null, 2);
         setOutput(`Header\n${decodePart(parts[0])}\n\nPayload\n${decodePart(parts[1])}`);
@@ -1672,7 +1694,14 @@ function DecoderPanel() {
       <div className="decoder-grid">
         <label className="raw-field">
           <span>Input</span>
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} spellCheck="false" />
+          <textarea
+            value={input}
+            onChange={(event) => {
+              setInput(event.target.value);
+              setOutput('');
+            }}
+            spellCheck="false"
+          />
         </label>
         <div className="decoder-actions">
           <button className="secondary-button" onClick={() => runTransform('url-decode')}>URL decode</button>
@@ -1940,6 +1969,16 @@ function formatKeyValueLines(value) {
   return Object.entries(value || {})
     .map(([key, val]) => `${key}: ${val}`)
     .join('\n');
+}
+
+function stringifyBody(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (_error) {
+    return String(value);
+  }
 }
 
 function safeOrigin(value) {

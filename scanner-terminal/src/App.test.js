@@ -28,6 +28,10 @@ jest.mock('socket.io-client', () => jest.fn(() => ({
 import { fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
 
+beforeEach(() => {
+  window.history.replaceState(null, '', '/');
+});
+
 test('renders the Wraith website and opens automated mode', () => {
   render(<App />);
   expect(screen.getByRole('heading', { name: /wraith v4/i })).toBeInTheDocument();
@@ -42,4 +46,18 @@ test('renders the Wraith website and opens automated mode', () => {
   expect(screen.getByText(/sequence workflows/i)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: /scanned urls/i }));
   expect(screen.getByRole('heading', { name: /requests/i })).toBeInTheDocument();
+});
+
+test('decoder chains repeated transforms from output', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: /manual workbench/i }));
+  fireEvent.click(screen.getByRole('button', { name: /decoder/i }));
+
+  const input = screen.getByLabelText(/input/i);
+  fireEvent.change(input, { target: { value: '%252Fadmin' } });
+  fireEvent.click(screen.getByRole('button', { name: /url decode/i }));
+  expect(screen.getByLabelText(/output/i)).toHaveValue('%2Fadmin');
+
+  fireEvent.click(screen.getByRole('button', { name: /url decode/i }));
+  expect(screen.getByLabelText(/output/i)).toHaveValue('/admin');
 });

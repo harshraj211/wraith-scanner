@@ -922,6 +922,20 @@ button {
   flex-direction: column;
 }
 
+.manual-tab-proxy {
+  overflow: auto;
+}
+
+.manual-tab-proxy .history-panel {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.manual-tab-proxy .corpus-viewer {
+  min-height: 430px;
+  flex: 0 0 auto;
+}
+
 .empty-panel {
   margin: 16px;
   padding: 28px;
@@ -1614,7 +1628,7 @@ textarea:focus {
   width: 100%;
   min-height: 44px;
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) 70px 88px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -1626,13 +1640,43 @@ textarea:focus {
   text-align: left;
 }
 
+.request-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 70px 88px;
+  gap: 8px;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.request-repeater-button {
+  border: 1px solid #d5dfea;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #1f75bd;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.request-repeater-button:hover {
+  border-color: #1f93ff;
+  background: #eef7ff;
+}
+
 .request-row:hover,
 .request-row.selected {
   border-color: #1f93ff;
   background: #eef7ff;
 }
 
-.request-row > span {
+.request-main > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
