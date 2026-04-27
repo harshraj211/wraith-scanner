@@ -114,6 +114,17 @@ npm start
 
 The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, response inspector, Decoder, reporting actions, and terminal panel.
 
+### Frontend Architecture
+
+The React frontend now uses a reusable enterprise dashboard structure instead of page-specific markup:
+
+- `src/components/layout`: shared `AppShell`, `Sidebar`, `Topbar`, and `PageHeader`
+- `src/components/ui`: buttons, cards, badges, tables, drawers, terminal/code panels, and empty states
+- `src/components/scanner`: scan status, severity summary, evidence, proof, request/response, timeline, and export panels
+- `src/pages`: Overview, Automated Scan Setup, Automated Workspace, Findings, Evidence Corpus, Manual Testing, Proxy History, Repeater, Intruder, Decoder, Repository Scan, Proof Mode, Reports, and Settings
+
+The visual system uses a dark navy cybersecurity theme, cyan primary actions, severity-aware colors, Inter UI text, and IBM Plex Mono for HTTP, terminal, JSON, and logs.
+
 ### CLI
 
 ```bash
