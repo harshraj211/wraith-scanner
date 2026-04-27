@@ -34,7 +34,7 @@ from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
-from scanner.core.models import Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
+from scanner.core.models import EvidenceArtifact, Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
 from scanner.core.models import ResponseRecord
 from scanner.exploitation.evidence import persist_proof_result
 from scanner.exploitation.models import ProofContext
@@ -47,6 +47,7 @@ from scanner.importers.common import (
     merge_scan_targets,
     save_candidates_to_corpus,
 )
+from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, normalize_targets
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -194,6 +195,30 @@ def _persist_findings(repo, canonical_findings):
             repo.save_finding(finding)
         except Exception:
             pass
+
+
+def _parse_list_value(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).replace("\n", ",").split(",") if item.strip()]
+
+
+def _targets_for_nuclei(repo, scan_id, payload, scan_payload):
+    explicit_targets = _parse_list_value(payload.get("targets"))
+    if explicit_targets:
+        return normalize_targets(explicit_targets)
+
+    candidates = [scan_payload.get("target_base_url", "")]
+    try:
+        for request_record in repo.list_requests(scan_id, {}):
+            url = request_record.get("url")
+            if url:
+                candidates.append(url)
+    except Exception:
+        pass
+    return normalize_targets(candidates)[: int(payload.get("max_targets") or 200)]
 
 
 def emit_progress(scan_id, message, type="info"):
@@ -1077,6 +1102,8 @@ def get_scan_status(scan_id):
         'auth_health':          scan.get('auth_health', {}),
         'api_imports':          scan.get('api_imports', {}),
         'sequence_workflows':   scan.get('sequence_workflows', []),
+        'nuclei_summary':       scan.get('nuclei_summary', {}),
+        'nuclei_runs':          scan.get('nuclei_runs', []),
         'tech_stack':           scan.get('tech_stack', {}),
         'findings':             scan.get('findings', []),
         'canonical_findings':   scan.get('canonical_findings', []),
@@ -1180,6 +1207,64 @@ def list_corpus_findings(scan_id):
         'count': len(findings),
         'findings': findings,
     })
+
+
+@app.route('/api/integrations/nuclei/run', methods=['POST'])
+def run_nuclei_endpoint():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    payload = request.get_json(silent=True) or {}
+    scan_id = str(payload.get('scan_id') or '').strip()
+    if not scan_id:
+        return jsonify({'error': 'scan_id is required'}), 400
+    scan_payload = repo.get_scan(scan_id)
+    if not scan_payload:
+        return jsonify({'error': 'Scan not found'}), 404
+
+    targets = _targets_for_nuclei(repo, scan_id, payload, scan_payload)
+    allow_intrusive = bool(payload.get('allow_intrusive') or False)
+    config = NucleiRunConfig(
+        scan_id=scan_id,
+        target_base_url=str(scan_payload.get('target_base_url') or ''),
+        targets=targets,
+        templates=_parse_list_value(payload.get('templates')),
+        severity=_parse_list_value(payload.get('severity')) or ['critical', 'high', 'medium', 'low', 'info'],
+        tags=_parse_list_value(payload.get('tags')),
+        exclude_tags=_parse_list_value(payload.get('exclude_tags')),
+        rate_limit=int(payload.get('rate_limit') or 5),
+        timeout=int(payload.get('timeout') or 5),
+        retries=int(payload.get('retries') or 0),
+        process_timeout=int(payload.get('process_timeout') or 120),
+        safe_templates_only=not allow_intrusive,
+        nuclei_binary=str(payload.get('nuclei_binary') or ''),
+    )
+
+    adapter = NucleiAdapter(binary=config.nuclei_binary)
+    result = adapter.run(config)
+    if not result.available:
+        return jsonify(result.to_dict()), 503
+    if result.errors and result.raw_count == 0 and result.returncode not in (0, 1):
+        return jsonify(result.to_dict()), 400
+
+    for finding in result.findings:
+        repo.save_finding(finding)
+    for artifact in result.evidence:
+        repo.save_evidence_artifact(artifact)
+
+    active_scan = active_scans.setdefault(scan_id, {})
+    active_scan.setdefault('nuclei_runs', []).append(result.to_dict())
+    active_scan['nuclei_summary'] = {
+        'raw_count': result.raw_count,
+        'findings': len(result.findings),
+        'errors': len(result.errors),
+        'targets': len(result.targets),
+    }
+    existing = active_scan.setdefault('canonical_findings', [])
+    existing.extend([finding.to_dict() for finding in result.findings])
+    active_scan['total_vulnerabilities'] = len(existing) or active_scan.get('total_vulnerabilities', 0)
+
+    return jsonify(result.to_dict())
 
 
 @app.route('/api/authz/matrix/run', methods=['POST'])
