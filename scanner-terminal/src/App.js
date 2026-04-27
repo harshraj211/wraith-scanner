@@ -45,6 +45,13 @@ const initialManualRequest = {
   allowStateChange: false,
 };
 
+const initialIntruderConfig = {
+  marker: '§payload§',
+  payloads: 'wraith-test\nwraith_probe\n%27',
+  delayMs: '150',
+  maxRequests: '25',
+};
+
 const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
 
 function initialViewFromLocation() {
@@ -81,6 +88,7 @@ function App() {
   const terminalRef = useRef(null);
   const fitAddonRef = useRef(null);
   const termRef = useRef(null);
+  const intruderAbortRef = useRef(false);
   const [terminal, setTerminal] = useState(null);
   const [view, setViewState] = useState(initialViewFromLocation);
   const [automatedTab, setAutomatedTab] = useState(initialAutomatedTabFromLocation);
@@ -98,6 +106,9 @@ function App() {
   }]);
   const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
   const [manualState, setManualState] = useState('idle');
+  const [intruderConfig, setIntruderConfig] = useState(initialIntruderConfig);
+  const [intruderState, setIntruderState] = useState('idle');
+  const [intruderResults, setIntruderResults] = useState([]);
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
@@ -298,6 +309,10 @@ function App() {
 
   const updateManualRequest = (name, value) => {
     applyManualRequestUpdate((current) => ({ ...current, [name]: value }));
+  };
+
+  const updateIntruderConfig = (name, value) => {
+    setIntruderConfig((current) => ({ ...current, [name]: value }));
   };
 
   const selectRepeaterTab = (tabId) => {
@@ -597,14 +612,7 @@ function App() {
 
   const sendRequestToRepeater = (requestRecord) => {
     if (!requestRecord) return;
-    const nextRequest = {
-      ...manualRequest,
-      scanId: requestRecord.scan_id || manualRequest.scanId || latestScanId,
-      method: requestRecord.method || 'GET',
-      url: requestRecord.url || manualRequest.url,
-      headers: formatKeyValueLines(requestRecord.headers || {}),
-      body: stringifyBody(requestRecord.body),
-    };
+    const nextRequest = manualRequestFromRecord(requestRecord, manualRequest, latestScanId);
     const sourceRequestId = requestRecord.request_id || '';
     const existingTab = repeaterTabs.find((tab) => tab.sourceRequestId && tab.sourceRequestId === sourceRequestId);
     if (existingTab) {
@@ -630,6 +638,68 @@ function App() {
     setManualTab('repeater');
     setViewState('manual');
     window.history.replaceState(null, '', `${window.location.pathname}#replay`);
+  };
+
+  const sendRequestToIntruder = (requestRecord) => {
+    if (!requestRecord) return;
+    const nextRequest = manualRequestFromRecord(requestRecord, manualRequest, latestScanId);
+    setManualRequest(nextRequest);
+    setManualTab('intruder');
+    setViewState('manual');
+    window.history.replaceState(null, '', `${window.location.pathname}#intruder`);
+  };
+
+  const runIntruder = async () => {
+    const payloads = parseList(intruderConfig.payloads);
+    const maxRequests = Math.max(1, Math.min(parseInt(intruderConfig.maxRequests, 10) || 25, 100));
+    const delayMs = Math.max(0, Math.min(parseInt(intruderConfig.delayMs, 10) || 0, 5000));
+    const marker = intruderConfig.marker || '§payload§';
+    const selectedPayloads = payloads.slice(0, maxRequests);
+    if (!manualRequest.url.trim() || selectedPayloads.length === 0) return;
+
+    intruderAbortRef.current = false;
+    setIntruderState('running');
+    setIntruderResults([]);
+
+    let scanId = manualRequest.scanId || latestScanId;
+    let lastExchange = null;
+    for (const payload of selectedPayloads) {
+      if (intruderAbortRef.current) break;
+      const requestForPayload = buildIntruderRequest(manualRequest, marker, payload);
+      try {
+        const response = await axios.post(`${API_URL}/api/manual/replay`, {
+          scan_id: scanId,
+          method: requestForPayload.method,
+          url: requestForPayload.url.trim(),
+          headers: parseKeyValueLines(requestForPayload.headers),
+          body: requestForPayload.body,
+          timeout: parseInt(requestForPayload.timeout, 10) || 10,
+          safety_mode: requestForPayload.safetyMode || 'safe',
+          allow_state_change: Boolean(requestForPayload.allowStateChange),
+          auth_role: 'manual',
+          source: 'fuzzer',
+        });
+        scanId = response.data.scan_id || scanId;
+        const result = buildIntruderResult(payload, response.data.request, response.data.response);
+        setLatestScanId(scanId);
+        lastExchange = result.exchange;
+        setSelectedExchange(result.exchange);
+        setIntruderResults((current) => [...current, result]);
+      } catch (error) {
+        setIntruderResults((current) => [...current, buildIntruderError(payload, error)]);
+      }
+      if (delayMs) await wait(delayMs);
+    }
+
+    setIntruderState(intruderAbortRef.current ? 'stopped' : 'complete');
+    if (scanId) applyManualRequestUpdate((current) => ({ ...current, scanId }));
+    if (scanId) await loadCorpus(scanId);
+    if (lastExchange) setSelectedExchange(lastExchange);
+  };
+
+  const stopIntruder = () => {
+    intruderAbortRef.current = true;
+    setIntruderState('stopping');
   };
 
   const updateCorpusFilter = (name, value) => {
@@ -674,6 +744,12 @@ function App() {
           manualRequest={manualRequest}
           updateManualRequest={updateManualRequest}
           sendManualReplay={sendManualReplay}
+          intruderConfig={intruderConfig}
+          updateIntruderConfig={updateIntruderConfig}
+          runIntruder={runIntruder}
+          stopIntruder={stopIntruder}
+          intruderState={intruderState}
+          intruderResults={intruderResults}
           manualState={manualState}
           latestScanId={latestScanId}
           loadCorpus={loadCorpus}
@@ -703,6 +779,7 @@ function App() {
           loadProxyPending={loadProxyPending}
           decideProxyRequest={decideProxyRequest}
           sendRequestToRepeater={sendRequestToRepeater}
+          sendRequestToIntruder={sendRequestToIntruder}
         />
       )}
     </div>
@@ -1003,6 +1080,12 @@ function ManualPage({
   manualRequest,
   updateManualRequest,
   sendManualReplay,
+  intruderConfig,
+  updateIntruderConfig,
+  runIntruder,
+  stopIntruder,
+  intruderState,
+  intruderResults,
   manualState,
   latestScanId,
   loadCorpus,
@@ -1032,6 +1115,7 @@ function ManualPage({
   loadProxyPending,
   decideProxyRequest,
   sendRequestToRepeater,
+  sendRequestToIntruder,
 }) {
   return (
     <div className="app-shell manual-shell enterprise-shell">
@@ -1098,6 +1182,7 @@ function ManualPage({
                 selectedExchange={selectedExchange}
                 onSelect={loadExchange}
                 onSendToRepeater={sendRequestToRepeater}
+                onSendToIntruder={sendRequestToIntruder}
               />
             </section>
           )}
@@ -1117,9 +1202,12 @@ function ManualPage({
                     <span className="eyebrow">Repeater</span>
                     <h2>Request</h2>
                   </div>
-                  <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
-                    {manualState === 'sending' ? 'Sending' : 'Send'}
-                  </button>
+                  <div className="button-row">
+                    <button className="secondary-button" onClick={() => setActiveTab('intruder')}>Intruder</button>
+                    <button className="primary-button" onClick={sendManualReplay} disabled={manualState === 'sending'}>
+                      {manualState === 'sending' ? 'Sending' : 'Send'}
+                    </button>
+                  </div>
                 </div>
                 <ManualRequestEditor request={manualRequest} updateRequest={updateManualRequest} />
               </section>
@@ -1140,7 +1228,18 @@ function ManualPage({
             </div>
           )}
 
-          {activeTab === 'intruder' && <ToolPlaceholder title="Intruder" body="Payload positions, sniper mode, rate limits, and response clustering are next in the build plan." />}
+          {activeTab === 'intruder' && (
+            <IntruderPanel
+              request={manualRequest}
+              updateRequest={updateManualRequest}
+              config={intruderConfig}
+              updateConfig={updateIntruderConfig}
+              onRun={runIntruder}
+              onStop={stopIntruder}
+              state={intruderState}
+              results={intruderResults}
+            />
+          )}
           {activeTab === 'decoder' && <DecoderPanel />}
 
           {activeTab === 'reporting' && (
@@ -1459,6 +1558,87 @@ function ManualRequestEditor({ request, updateRequest }) {
         <textarea value={request.body} onChange={(e) => updateRequest('body', e.target.value)} spellCheck="false" />
       </label>
     </form>
+  );
+}
+
+function IntruderPanel({
+  request,
+  updateRequest,
+  config,
+  updateConfig,
+  onRun,
+  onStop,
+  state,
+  results,
+}) {
+  const summary = summarizeIntruderResults(results);
+  const running = state === 'running' || state === 'stopping';
+  return (
+    <section id="intruder" className="intruder-panel">
+      <div className="section-heading compact">
+        <div>
+          <span className="eyebrow">Intruder</span>
+          <h2>Payload Runner</h2>
+        </div>
+        <div className="button-row">
+          <button className="secondary-button" onClick={onStop} disabled={!running}>Stop</button>
+          <button className="primary-button" onClick={onRun} disabled={running}>
+            {running ? 'Running' : 'Run attack'}
+          </button>
+        </div>
+      </div>
+      <div className="intruder-grid">
+        <div className="intruder-config">
+          <ManualRequestEditor request={request} updateRequest={updateRequest} />
+          <div className="intruder-controls">
+            <label>
+              <span>Payload marker</span>
+              <input value={config.marker} onChange={(event) => updateConfig('marker', event.target.value)} />
+            </label>
+            <label>
+              <span>Delay ms</span>
+              <input value={config.delayMs} onChange={(event) => updateConfig('delayMs', event.target.value)} />
+            </label>
+            <label>
+              <span>Max requests</span>
+              <input value={config.maxRequests} onChange={(event) => updateConfig('maxRequests', event.target.value)} />
+            </label>
+            <label className="raw-field payload-list">
+              <span>Payloads</span>
+              <textarea value={config.payloads} onChange={(event) => updateConfig('payloads', event.target.value)} spellCheck="false" />
+            </label>
+          </div>
+        </div>
+        <div className="intruder-results">
+          <div className="intruder-summary">
+            <Metric label="State" value={state} />
+            <Metric label="Sent" value={results.length} />
+            <Metric label="Clusters" value={summary.clusters} />
+            <Metric label="Errors" value={summary.errors} />
+          </div>
+          <div className="intruder-table" role="table" aria-label="Intruder results">
+            <div className="intruder-row intruder-row-head">
+              <span>Payload</span>
+              <span>Status</span>
+              <span>Length</span>
+              <span>Time</span>
+              <span>Cluster</span>
+            </div>
+            {results.length === 0 ? (
+              <p className="empty-state">Insert the payload marker into the URL, headers, or body, then run a capped safe-mode attack.</p>
+            ) : results.map((result) => (
+              <div className="intruder-row" key={result.resultId}>
+                <span title={result.payload}>{result.payload}</span>
+                <strong>{result.status}</strong>
+                <span>{result.length} B</span>
+                <span>{result.timeMs} ms</span>
+                <em title={result.error || result.cluster}>{result.error || result.cluster}</em>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1796,7 +1976,7 @@ function CorpusHeader({
   );
 }
 
-function CorpusViewer({ requests, selectedExchange, onSelect, onSendToRepeater }) {
+function CorpusViewer({ requests, selectedExchange, onSelect, onSendToRepeater, onSendToIntruder }) {
   return (
     <div className="corpus-viewer">
       <RequestHistory
@@ -1804,13 +1984,14 @@ function CorpusViewer({ requests, selectedExchange, onSelect, onSendToRepeater }
         selectedExchange={selectedExchange}
         onSelect={onSelect}
         onSendToRepeater={onSendToRepeater}
+        onSendToIntruder={onSendToIntruder}
       />
       <ExchangeDetail exchange={selectedExchange} />
     </div>
   );
 }
 
-function RequestHistory({ requests, selectedExchange, onSelect, onSendToRepeater }) {
+function RequestHistory({ requests, selectedExchange, onSelect, onSendToRepeater, onSendToIntruder }) {
   return (
     <div className="request-table" role="table" aria-label="Corpus requests">
       {requests.length === 0 ? (
@@ -1828,6 +2009,9 @@ function RequestHistory({ requests, selectedExchange, onSelect, onSendToRepeater
           </button>
           {onSendToRepeater && (
             <button className="request-repeater-button" onClick={() => onSendToRepeater(item)}>Repeater</button>
+          )}
+          {onSendToIntruder && (
+            <button className="request-repeater-button" onClick={() => onSendToIntruder(item)}>Intruder</button>
           )}
         </div>
       ))}
@@ -1856,16 +2040,6 @@ function ExchangeDetail({ exchange }) {
       <DetailBlock title="Response Headers" value={response.headers} />
       <DetailBlock title="Response Body" value={response.body_excerpt} />
     </div>
-  );
-}
-
-function ToolPlaceholder({ title, body }) {
-  return (
-    <section className="tool-placeholder">
-      <span className="eyebrow">Queued tool</span>
-      <h2>{title}</h2>
-      <p>{body}</p>
-    </section>
   );
 }
 
@@ -2161,6 +2335,86 @@ function parseList(value) {
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function manualRequestFromRecord(requestRecord, fallbackRequest, latestScanId) {
+  return {
+    ...fallbackRequest,
+    scanId: requestRecord.scan_id || fallbackRequest.scanId || latestScanId,
+    method: requestRecord.method || 'GET',
+    url: requestRecord.url || fallbackRequest.url,
+    headers: formatKeyValueLines(requestRecord.headers || {}),
+    body: stringifyBody(requestRecord.body),
+  };
+}
+
+function buildIntruderRequest(baseRequest, marker, payload) {
+  const token = marker || '§payload§';
+  const next = {
+    ...baseRequest,
+    url: replacePayloadMarker(baseRequest.url, token, payload),
+    headers: replacePayloadMarker(baseRequest.headers, token, payload),
+    body: replacePayloadMarker(baseRequest.body, token, payload),
+  };
+  const markerWasPresent = [baseRequest.url, baseRequest.headers, baseRequest.body]
+    .some((value) => String(value || '').includes(token));
+  if (!markerWasPresent) {
+    next.url = appendPayloadParam(baseRequest.url, payload);
+  }
+  return next;
+}
+
+function replacePayloadMarker(value, marker, payload) {
+  return String(value || '').split(marker).join(payload);
+}
+
+function appendPayloadParam(url, payload) {
+  try {
+    const parsed = new URL(String(url || ''));
+    parsed.searchParams.set('wraith_payload', payload);
+    return parsed.toString();
+  } catch (_error) {
+    return url;
+  }
+}
+
+function buildIntruderResult(payload, request, response) {
+  const status = response?.status_code || 'error';
+  const length = Number(response?.content_length || 0);
+  const timeMs = Number(response?.response_time_ms || 0);
+  return {
+    resultId: `intr_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`,
+    payload,
+    status,
+    length,
+    timeMs,
+    cluster: `${status}:${length}:${response?.body_hash || ''}`.slice(0, 80),
+    exchange: { request, response },
+  };
+}
+
+function buildIntruderError(payload, error) {
+  return {
+    resultId: `intr_err_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`,
+    payload,
+    status: 'error',
+    length: 0,
+    timeMs: 0,
+    cluster: 'error',
+    error: error?.response?.data?.error || error.message,
+  };
+}
+
+function summarizeIntruderResults(results) {
+  const clusters = new Set(results.map((item) => item.cluster).filter(Boolean));
+  return {
+    clusters: clusters.size,
+    errors: results.filter((item) => item.status === 'error').length,
+  };
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseKeyValueLines(value) {

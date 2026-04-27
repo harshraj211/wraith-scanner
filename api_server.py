@@ -1187,9 +1187,12 @@ def manual_replay_request():
     auth_role = str(payload.get('auth_role') or 'manual')
     safety_mode = str(payload.get('safety_mode') or 'safe').lower()
     allow_state_change = bool(payload.get('allow_state_change'))
+    source = str(payload.get('source') or 'manual').strip().lower()
 
     if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
         return jsonify({'error': 'Unsupported HTTP method'}), 400
+    if source not in {'manual', 'replay', 'fuzzer', 'proof'}:
+        return jsonify({'error': 'Unsupported manual replay source'}), 400
     parsed = urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
         return jsonify({'error': 'Manual replay requires an absolute http(s) URL'}), 400
@@ -1214,7 +1217,7 @@ def manual_replay_request():
 
     request_record = RequestRecord.create(
         scan_id=scan_id,
-        source='manual',
+        source=source,
         method=method,
         url=url,
         headers=headers,

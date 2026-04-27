@@ -71,3 +71,14 @@ test('manual repeater supports multiple request tabs', () => {
   fireEvent.click(screen.getByRole('button', { name: /^new$/i }));
   expect(screen.getByRole('button', { name: /^new request$/i })).toBeInTheDocument();
 });
+
+test('manual intruder exposes capped payload runner controls', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: /manual workbench/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^intruder$/i }));
+
+  expect(screen.getByRole('heading', { name: /payload runner/i })).toBeInTheDocument();
+  expect(screen.getByLabelText(/payload marker/i)).toHaveValue('§payload§');
+  expect(screen.getByLabelText(/max requests/i)).toHaveValue('25');
+  expect(screen.getByRole('button', { name: /run attack/i })).toBeInTheDocument();
+});

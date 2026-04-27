@@ -863,6 +863,7 @@ button {
 .replay-panel,
 .response-panel,
 .issues-panel,
+.intruder-panel,
 .decoder-panel,
 .tool-placeholder,
 .reporting-panel {
@@ -888,6 +889,7 @@ button {
 .replay-panel,
 .response-panel,
 .issues-panel,
+.intruder-panel,
 .decoder-panel,
 .tool-placeholder,
 .reporting-panel {
@@ -934,6 +936,12 @@ button {
 .manual-tab-proxy .corpus-viewer {
   min-height: 430px;
   flex: 0 0 auto;
+}
+
+.button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .empty-panel {
@@ -1774,7 +1782,7 @@ textarea:focus {
   width: 100%;
   min-height: 44px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -1962,6 +1970,129 @@ textarea:focus {
   background: #ffffff;
 }
 
+.intruder-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.intruder-grid {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(420px, 0.92fr) minmax(460px, 1.08fr);
+  gap: 1px;
+  background: #eef2f6;
+}
+
+.intruder-config,
+.intruder-results {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.intruder-config {
+  overflow: auto;
+}
+
+.intruder-config .manual-form {
+  flex: 0 0 auto;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.intruder-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+}
+
+.intruder-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.intruder-controls span {
+  color: #536273;
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.payload-list {
+  grid-column: 1 / -1;
+}
+
+.payload-list textarea {
+  min-height: 150px;
+}
+
+.intruder-summary {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid #eef2f6;
+  background: #f8fafc;
+}
+
+.intruder-table {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.intruder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px 84px 78px minmax(120px, 0.8fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #e3e9f1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #253446;
+}
+
+.intruder-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: #536273;
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.intruder-row span,
+.intruder-row strong,
+.intruder-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.intruder-row strong {
+  color: #1f75bd;
+  font-weight: 900;
+}
+
+.intruder-row em {
+  color: #6c7888;
+  font-style: normal;
+}
+
 .check-field {
   color: #536273;
 }
@@ -2013,7 +2144,8 @@ textarea:focus {
   }
 
   .automated-tab-overview,
-  .manual-grid {
+  .manual-grid,
+  .intruder-grid {
     overflow: auto;
     grid-template-columns: 1fr;
     grid-template-rows: auto;
@@ -2038,6 +2170,7 @@ textarea:focus {
   .replay-panel,
   .response-panel,
   .issues-panel,
+  .intruder-panel,
   .decoder-panel,
   .tool-placeholder,
   .reporting-panel {
@@ -2091,7 +2224,10 @@ textarea:focus {
   .proxy-status-grid,
   .pending-proxy-row,
   .pending-proxy-editors,
-  .attempt-row {
+  .attempt-row,
+  .intruder-controls,
+  .intruder-summary,
+  .intruder-row {
     grid-template-columns: 1fr;
   }
 

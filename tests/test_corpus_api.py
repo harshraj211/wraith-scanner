@@ -89,6 +89,7 @@ class CorpusApiTests(unittest.TestCase):
                         "url": "https://app.example.test/api/replay",
                         "headers": {"Authorization": "Bearer secret-token-value"},
                         "body": "marker=1",
+                        "source": "fuzzer",
                     },
                 )
 
@@ -99,7 +100,7 @@ class CorpusApiTests(unittest.TestCase):
                 self.assertEqual(payload["request"]["headers"]["Authorization"], "[REDACTED]")
                 replay.assert_called_once()
 
-                saved = repo.list_requests(payload["scan_id"], {"source": "manual"})
+                saved = repo.list_requests(payload["scan_id"], {"source": "fuzzer"})
                 self.assertEqual(len(saved), 1)
                 self.assertEqual(saved[0]["headers"]["Authorization"], "[REDACTED]")
             repo.close()
