@@ -1269,6 +1269,65 @@ button {
   cursor: pointer;
 }
 
+.repeater-response-panel {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.repeater-attempts {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid #eef2f6;
+  background: #f8fafc;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.attempt-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 86px 78px 110px;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #e3e9f1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #253446;
+  padding: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.attempt-row.active,
+.attempt-row:hover {
+  border-color: #1f93ff;
+  background: #eef7ff;
+}
+
+.attempt-row span,
+.attempt-row strong,
+.attempt-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.attempt-row strong {
+  color: #1f75bd;
+  font-weight: 900;
+}
+
+.attempt-row em {
+  color: #6c7888;
+  font-style: normal;
+}
+
 .section-heading {
   flex: 0 0 auto;
   display: flex;
@@ -2031,7 +2090,8 @@ textarea:focus {
   .manual-options,
   .proxy-status-grid,
   .pending-proxy-row,
-  .pending-proxy-editors {
+  .pending-proxy-editors,
+  .attempt-row {
     grid-template-columns: 1fr;
   }
 

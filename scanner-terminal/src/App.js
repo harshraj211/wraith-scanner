@@ -93,6 +93,8 @@ function App() {
     title: 'Manual request',
     request: initialManualRequest,
     sourceRequestId: '',
+    attempts: [],
+    activeAttemptId: '',
   }]);
   const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
   const [manualState, setManualState] = useState('idle');
@@ -129,6 +131,10 @@ function App() {
   const dashboard = useMemo(
     () => buildDashboard(scanStatus, corpusRequests, progressEvents, scanPayload),
     [scanPayload, scanStatus, corpusRequests, progressEvents],
+  );
+  const activeRepeaterTab = useMemo(
+    () => repeaterTabs.find((tab) => tab.tabId === activeRepeaterTabId) || repeaterTabs[0],
+    [activeRepeaterTabId, repeaterTabs],
   );
 
   const setView = useCallback((nextView) => {
@@ -299,6 +305,8 @@ function App() {
     if (!tab) return;
     setActiveRepeaterTabId(tabId);
     setManualRequest(tab.request);
+    const activeAttempt = selectedRepeaterAttempt(tab);
+    setSelectedExchange(activeAttempt?.exchange || null);
     setManualTab('repeater');
   };
 
@@ -312,6 +320,8 @@ function App() {
       title: 'New request',
       request,
       sourceRequestId: '',
+      attempts: [],
+      activeAttemptId: '',
     };
     setRepeaterTabs((current) => [...current, tab]);
     setActiveRepeaterTabId(tab.tabId);
@@ -329,9 +339,20 @@ function App() {
         const replacement = next[Math.max(0, index - 1)] || next[0];
         setActiveRepeaterTabId(replacement.tabId);
         setManualRequest(replacement.request);
+        const activeAttempt = selectedRepeaterAttempt(replacement);
+        setSelectedExchange(activeAttempt?.exchange || null);
       }
       return next;
     });
+  };
+
+  const selectRepeaterAttempt = (attemptId) => {
+    setRepeaterTabs((current) => current.map((tab) => {
+      if (tab.tabId !== activeRepeaterTabId) return tab;
+      const attempt = (tab.attempts || []).find((item) => item.attemptId === attemptId);
+      if (attempt) setSelectedExchange(attempt.exchange || null);
+      return { ...tab, activeAttemptId: attemptId };
+    }));
   };
 
   const submitScan = async (event) => {
@@ -439,11 +460,24 @@ function App() {
       setManualState('sent');
       setLatestScanId(scanId);
       applyManualRequestUpdate((current) => ({ ...current, scanId }));
-      setSelectedExchange({
+      const exchange = {
         request: response.data.request,
         response: response.data.response,
-      });
+      };
+      setSelectedExchange(exchange);
+      const attempt = buildRepeaterAttempt(response.data.request, response.data.response);
+      setRepeaterTabs((tabs) => tabs.map((tab) => (
+        tab.tabId === activeRepeaterTabId
+          ? {
+              ...tab,
+              attempts: [attempt, ...(tab.attempts || [])].slice(0, 50),
+              activeAttemptId: attempt.attemptId,
+              request: { ...tab.request, scanId },
+            }
+          : tab
+      )));
       await loadCorpus(scanId);
+      setSelectedExchange(exchange);
       addProgress({
         scan_id: scanId,
         type: 'success',
@@ -586,6 +620,8 @@ function App() {
         title: repeaterTitle(nextRequest),
         request: nextRequest,
         sourceRequestId,
+        attempts: [],
+        activeAttemptId: '',
       };
       setRepeaterTabs((current) => [...current, tab]);
       setActiveRepeaterTabId(tab.tabId);
@@ -652,7 +688,9 @@ function App() {
           setActiveTab={setManualTab}
           repeaterTabs={repeaterTabs}
           activeRepeaterTabId={activeRepeaterTabId}
+          activeRepeaterTab={activeRepeaterTab}
           selectRepeaterTab={selectRepeaterTab}
+          selectRepeaterAttempt={selectRepeaterAttempt}
           createRepeaterTab={createRepeaterTab}
           closeRepeaterTab={closeRepeaterTab}
           proxyStatus={proxyStatus}
@@ -979,7 +1017,9 @@ function ManualPage({
   setActiveTab,
   repeaterTabs,
   activeRepeaterTabId,
+  activeRepeaterTab,
   selectRepeaterTab,
+  selectRepeaterAttempt,
   createRepeaterTab,
   closeRepeaterTab,
   proxyStatus,
@@ -1091,7 +1131,11 @@ function ManualPage({
                     <h2>Response</h2>
                   </div>
                 </div>
-                <ExchangeDetail exchange={selectedExchange} />
+                <RepeaterResponsePanel
+                  tab={activeRepeaterTab}
+                  selectedExchange={selectedExchange}
+                  onSelectAttempt={selectRepeaterAttempt}
+                />
               </section>
             </div>
           )}
@@ -1415,6 +1459,38 @@ function ManualRequestEditor({ request, updateRequest }) {
         <textarea value={request.body} onChange={(e) => updateRequest('body', e.target.value)} spellCheck="false" />
       </label>
     </form>
+  );
+}
+
+function RepeaterResponsePanel({ tab, selectedExchange, onSelectAttempt }) {
+  const attempts = tab?.attempts || [];
+  const activeExchange = selectedRepeaterAttempt(tab)?.exchange || selectedExchange;
+  return (
+    <div className="repeater-response-panel">
+      <div className="repeater-attempts">
+        {attempts.length === 0 ? (
+          <p className="empty-state">No repeater attempts yet.</p>
+        ) : attempts.map((attempt, index) => {
+          const previous = attempts[index + 1];
+          const active = attempt.attemptId === tab.activeAttemptId;
+          const response = attempt.exchange?.response || {};
+          return (
+            <button
+              className={active ? 'attempt-row active' : 'attempt-row'}
+              key={attempt.attemptId}
+              onClick={() => onSelectAttempt(attempt.attemptId)}
+            >
+              <span>{attempt.label}</span>
+              <strong>{response.status_code || 'error'}</strong>
+              <span>{response.content_length ?? 0} B</span>
+              <span>{response.response_time_ms ?? 0} ms</span>
+              <em>{attemptDelta(attempt, previous)}</em>
+            </button>
+          );
+        })}
+      </div>
+      <ExchangeDetail exchange={activeExchange} />
+    </div>
   );
 }
 
@@ -2110,6 +2186,47 @@ function repeaterTitle(request) {
     return `${request.method || 'GET'} ${parsed.pathname || '/'}`;
   } catch (_error) {
     return `${request.method || 'GET'} request`;
+  }
+}
+
+function buildRepeaterAttempt(request, response) {
+  const attemptId = `attempt_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+  const status = response?.status_code || 'error';
+  const endpoint = request?.normalized_endpoint || safePath(request?.url) || '/';
+  return {
+    attemptId,
+    label: `${request?.method || 'GET'} ${endpoint}`,
+    timestamp: new Date().toISOString(),
+    exchange: { request, response },
+    status,
+  };
+}
+
+function selectedRepeaterAttempt(tab) {
+  const attempts = tab?.attempts || [];
+  return attempts.find((item) => item.attemptId === tab?.activeAttemptId) || attempts[0] || null;
+}
+
+function attemptDelta(attempt, previous) {
+  if (!previous) return 'baseline';
+  const currentResponse = attempt.exchange?.response || {};
+  const previousResponse = previous.exchange?.response || {};
+  const parts = [];
+  if (currentResponse.status_code !== previousResponse.status_code) {
+    parts.push(`${previousResponse.status_code || '?'}->${currentResponse.status_code || '?'}`);
+  }
+  const lengthDelta = Number(currentResponse.content_length || 0) - Number(previousResponse.content_length || 0);
+  if (lengthDelta) parts.push(`${lengthDelta > 0 ? '+' : ''}${lengthDelta} B`);
+  const timeDelta = Number(currentResponse.response_time_ms || 0) - Number(previousResponse.response_time_ms || 0);
+  if (timeDelta) parts.push(`${timeDelta > 0 ? '+' : ''}${timeDelta} ms`);
+  return parts.join(', ') || 'same';
+}
+
+function safePath(value) {
+  try {
+    return new URL(String(value || '')).pathname || '/';
+  } catch (_error) {
+    return '/';
   }
 }
 
