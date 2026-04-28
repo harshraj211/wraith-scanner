@@ -48,6 +48,7 @@ from scanner.importers.common import (
     save_candidates_to_corpus,
 )
 from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, normalize_targets
+from scanner.integrations.cve_intel import enrich_findings, finding_from_dict
 from scanner.integrations.nuclei_manager import NucleiAssetManager
 from scanner.integrations.nuclei_policy import policy_options, validate_policy_acknowledgement
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
@@ -1106,6 +1107,7 @@ def get_scan_status(scan_id):
         'sequence_workflows':   scan.get('sequence_workflows', []),
         'nuclei_summary':       scan.get('nuclei_summary', {}),
         'nuclei_runs':          scan.get('nuclei_runs', []),
+        'cve_intel_summary':    scan.get('cve_intel_summary', {}),
         'tech_stack':           scan.get('tech_stack', {}),
         'findings':             scan.get('findings', []),
         'canonical_findings':   scan.get('canonical_findings', []),
@@ -1303,6 +1305,53 @@ def run_nuclei_endpoint():
     active_scan['total_vulnerabilities'] = len(existing) or active_scan.get('total_vulnerabilities', 0)
 
     return jsonify(result.to_dict())
+
+
+@app.route('/api/intel/cve/enrich', methods=['POST'])
+def enrich_cve_intel_endpoint():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    payload = request.get_json(silent=True) or {}
+    scan_id = str(payload.get('scan_id') or '').strip()
+    if not scan_id:
+        return jsonify({'error': 'scan_id is required'}), 400
+    scan_payload = repo.get_scan(scan_id)
+    if not scan_payload:
+        return jsonify({'error': 'Scan not found'}), 404
+
+    finding_ids = set(_parse_list_value(payload.get('finding_ids')))
+    raw_findings = []
+    if finding_ids:
+        for finding_id in finding_ids:
+            finding = repo.get_finding(finding_id)
+            if finding:
+                raw_findings.append(finding)
+    else:
+        raw_findings = repo.list_findings(scan_id, {})
+    findings = []
+    for raw_finding in raw_findings:
+        try:
+            findings.append(finding_from_dict(raw_finding))
+        except Exception:
+            continue
+
+    summary = enrich_findings(findings)
+    for finding in findings:
+        repo.update_finding(finding)
+
+    active_scan = active_scans.setdefault(scan_id, {})
+    active_scan['cve_intel_summary'] = {
+        'cve_count': summary.get('cve_count', 0),
+        'updated_findings': summary.get('updated_findings', 0),
+        'kev_count': summary.get('kev_count', 0),
+    }
+    if not finding_ids:
+        active_scan['canonical_findings'] = [finding.to_dict() for finding in findings]
+    return jsonify({
+        'scan_id': scan_id,
+        **summary,
+    })
 
 
 @app.route('/api/authz/matrix/run', methods=['POST'])

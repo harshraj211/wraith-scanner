@@ -19,11 +19,14 @@ export default function AutomatedWorkspace({
   nucleiResult,
   nucleiAssetState,
   nucleiAssetStatus,
+  cveIntelState,
+  cveIntelResult,
   updateNucleiConfig,
   runNucleiIntegration,
   loadNucleiStatus,
   installNucleiEngine,
   updateNucleiTemplates,
+  enrichCveIntel,
   refreshStatus,
   submitScan,
   onNavigate,
@@ -38,6 +41,8 @@ export default function AutomatedWorkspace({
   const nucleiErrors = Array.isArray(nucleiResult?.errors) ? nucleiResult.errors : [];
   const templateCount = nucleiAssetStatus?.metadata?.template_count || 0;
   const engineReady = Boolean(nucleiAssetStatus?.ok || nucleiAssetStatus?.binary_path);
+  const cveCount = cveIntelResult?.cve_count || 0;
+  const kevCount = cveIntelResult?.kev_count || 0;
   const policyOptions = Array.isArray(nucleiAssetStatus?.policy_options)
     ? nucleiAssetStatus.policy_options
     : [
@@ -263,6 +268,22 @@ export default function AutomatedWorkspace({
                   Safe mode excludes brute force, DoS, fuzzing, RCE, intrusive,
                   and destructive template tags unless explicitly enabled.
                 </p>
+              </div>
+              <div className="nuclei-asset-card">
+                <div>
+                  <span>CVE Intelligence</span>
+                  <strong>{cveIntelState}</strong>
+                  <code>{cveCount} CVEs enriched, {kevCount} CISA KEV matches</code>
+                </div>
+                <div className="nuclei-asset-actions">
+                  <Button
+                    variant="secondary"
+                    onClick={enrichCveIntel}
+                    disabled={!latestScanId || cveIntelState === 'running'}
+                  >
+                    {cveIntelState === 'running' ? 'Enriching...' : 'Enrich CVEs'}
+                  </Button>
+                </div>
               </div>
               {nucleiErrors.length > 0 && (
                 <div className="nuclei-errors">

@@ -11,3 +11,4 @@ Current implementation status:
 - Authorization Matrix / BOLA v1 is now underway with safe role-diff replay from the corpus, `authz` evidence storage, and frontend Proof Mode controls.
 - Nuclei integration v1 is implemented with a safe local adapter, `/api/integrations/nuclei/run`, corpus target selection, canonical finding import, evidence persistence, and Automated Workspace controls.
 - Managed Nuclei assets are implemented for desktop/web use: status, engine install/update, template update, and Wraith-owned template directories remove the need for terminal setup.
+- CVE intelligence v1 is implemented for CVE-backed findings with NVD metadata, FIRST EPSS scoring, CISA KEV flags, persisted finding metadata, and an Automated Workspace enrichment action.

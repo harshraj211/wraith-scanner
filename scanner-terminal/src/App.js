@@ -186,6 +186,8 @@ function App() {
   const [nucleiResult, setNucleiResult] = useState(null);
   const [nucleiAssetState, setNucleiAssetState] = useState('idle');
   const [nucleiAssetStatus, setNucleiAssetStatus] = useState(null);
+  const [cveIntelState, setCveIntelState] = useState('idle');
+  const [cveIntelResult, setCveIntelResult] = useState(null);
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -841,6 +843,33 @@ function App() {
     }
   };
 
+  const enrichCveIntel = async () => {
+    if (!latestScanId) {
+      addProgress({ type: 'error', message: 'Run or select a scan before enriching CVE intelligence.' });
+      return;
+    }
+    setCveIntelState('running');
+    try {
+      const response = await axios.post(`${API_URL}/api/intel/cve/enrich`, {
+        scan_id: latestScanId,
+      });
+      setCveIntelResult(response.data);
+      setCveIntelState('complete');
+      addProgress({
+        scan_id: latestScanId,
+        type: response.data?.kev_count ? 'warning' : 'success',
+        message: `CVE intelligence enriched ${response.data?.updated_findings || 0} findings across ${response.data?.cve_count || 0} CVEs.`,
+      });
+      await loadFindings(latestScanId);
+      await refreshStatus(latestScanId);
+    } catch (error) {
+      setCveIntelState('error');
+      const payload = error?.response?.data;
+      if (payload) setCveIntelResult(payload);
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
+    }
+  };
+
   const downloadPdf = () => {
     if (latestScanId) window.open(`${API_URL}/api/download/${latestScanId}`, '_blank');
   };
@@ -910,11 +939,14 @@ function App() {
             nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
             nucleiAssetState={nucleiAssetState}
             nucleiAssetStatus={nucleiAssetStatus}
+            cveIntelState={cveIntelState}
+            cveIntelResult={cveIntelResult || scanStatus?.cve_intel_summary || null}
             updateNucleiConfig={updateNucleiConfig}
             runNucleiIntegration={runNucleiIntegration}
             loadNucleiStatus={loadNucleiStatus}
             installNucleiEngine={installNucleiEngine}
             updateNucleiTemplates={updateNucleiTemplates}
+            enrichCveIntel={enrichCveIntel}
             refreshStatus={() => refreshStatus(latestScanId)}
             submitScan={submitScan}
             onNavigate={navigate}

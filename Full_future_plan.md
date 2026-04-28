@@ -531,9 +531,9 @@ Add a `NucleiAdapter`:
 Add CVE intelligence:
 
 - OSV for dependencies.
-- NVD API for CVE metadata.
-- EPSS score for exploit likelihood.
-- CISA KEV flag.
+- NVD API for CVE metadata. **Implemented v1:** CVE-backed findings can be enriched from the NVD CVE 2.0 API.
+- EPSS score for exploit likelihood. **Implemented v1:** FIRST EPSS scores and percentiles are added to finding metadata.
+- CISA KEV flag. **Implemented v1:** CISA Known Exploited Vulnerabilities catalog matches are added to finding metadata.
 - Known exploited in the wild flag.
 
 Prioritization score:

@@ -250,6 +250,7 @@ class Finding:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     scan_id: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.vuln_type = str(self.vuln_type or "unknown").lower()
@@ -316,6 +317,7 @@ class Finding:
             created_at=str(raw.get("created_at") or utc_now()),
             updated_at=str(raw.get("updated_at") or utc_now()),
             scan_id=scan_id,
+            metadata=dict(raw.get("metadata") or {}),
         )
 
     def to_dict(self, *, redact_output: bool = True) -> Dict[str, Any]:

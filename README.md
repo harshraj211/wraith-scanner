@@ -324,6 +324,30 @@ POST http://127.0.0.1:5001/api/integrations/nuclei/install
 POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 ```
 
+### CVE Intelligence
+
+Wraith can enrich CVE-backed findings, especially Nuclei and dependency findings, with public exploitability context:
+
+- NVD CVE metadata, CVSS, CWE, and descriptions.
+- FIRST EPSS probability and percentile.
+- CISA Known Exploited Vulnerabilities catalog flags and remediation due-date context.
+
+The Automated Workspace includes an `Enrich CVEs` action. The backend API is:
+
+```text
+POST http://127.0.0.1:5001/api/intel/cve/enrich
+```
+
+Example:
+
+```json
+{
+  "scan_id": "scan-id"
+}
+```
+
+Set `NVD_API_KEY` for higher NVD API rate limits. Enrichment is optional and offline-tolerant; if one public source is unavailable, Wraith preserves the finding and records bounded source errors in the finding metadata.
+
 ## Terminal Commands
 
 - `scan <url>`
@@ -354,6 +378,7 @@ GET  http://127.0.0.1:5001/api/integrations/nuclei/status
 POST http://127.0.0.1:5001/api/integrations/nuclei/install
 POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 POST http://127.0.0.1:5001/api/integrations/nuclei/run
+POST http://127.0.0.1:5001/api/intel/cve/enrich
 POST http://127.0.0.1:5001/api/manual/replay
 POST http://127.0.0.1:5001/api/manual/proxy/start
 GET  http://127.0.0.1:5001/api/manual/proxy/status
