@@ -34,7 +34,7 @@ from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
-from scanner.core.models import EvidenceArtifact, Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
+from scanner.core.models import Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
 from scanner.core.models import ResponseRecord
 from scanner.exploitation.evidence import persist_proof_result
 from scanner.exploitation.models import ProofContext

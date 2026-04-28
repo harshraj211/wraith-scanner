@@ -10,6 +10,7 @@ Wraith now ships with four major engine upgrades plus the first VA+Proof platfor
 - Richer OOB profiling for blind SSRF-style callbacks with per-parameter correlation and egress hints.
 - Canonical scan schemas, stable finding IDs, redaction, JSON exports, and a durable SQLite request/response corpus.
 - Safe Authorization Matrix / BOLA role-diff testing from the persisted request corpus.
+- Safe ProjectDiscovery Nuclei integration for broad CVE/template coverage imported into Wraith findings.
 
 ## What It Scans
 
@@ -29,6 +30,7 @@ Wraith now ships with four major engine upgrades plus the first VA+Proof platfor
 - Headers and crypto misconfigurations
 - GraphQL and WebSocket surfaces
 - WordPress-specific checks
+- Nuclei template matches for known CVEs and exposed products
 
 ### SAST
 
@@ -57,6 +59,7 @@ Flask API Server  --->  PDF Reporting
         |      +--> DAST modules
         |      +--> Adaptive response intelligence
         |      +--> OOB correlation
+        |      +--> Nuclei template integration
         |
         +--> Repo SAST
                |
@@ -94,8 +97,10 @@ cd ..
 ## Optional Integrations
 
 - `semgrep`: recommended for the full SAST experience. Without it, Wraith still runs taint, secret, and dependency analysis.
+- `nuclei`: optional ProjectDiscovery binary for known CVE/template coverage. Wraith shells out locally, imports JSONL matches, and keeps safe template exclusions enabled by default.
 - `OPENAI_API_KEY`: enables optional LLM-assisted payload mutation in the response-intelligence layer. Without it, Wraith uses the built-in heuristic mutator.
 - `WRAITH_DB_PATH`: optional path for the local SQLite corpus database. Defaults to `reports/wraith.sqlite3`.
+- `WRAITH_NUCLEI_BIN`: optional explicit path to the Nuclei executable if it is not on `PATH`.
 
 ## Run
 
@@ -270,6 +275,32 @@ API scans can pass the same fields under `auth`:
 
 Auth profiles are saved to the local corpus with secrets redacted. Playwright storage state files are referenced by path; Wraith does not store passwords.
 
+### Nuclei Coverage
+
+Wraith can run a locally installed ProjectDiscovery Nuclei binary against the active scan target and persisted corpus URLs. Results are parsed from JSONL, converted into canonical `Finding` objects, de-duplicated by stable IDs, and linked to sanitized evidence artifacts.
+
+The default integration is conservative:
+
+- Uses bounded rate, HTTP timeout, and process timeout settings.
+- Does not run template auto-update from Wraith.
+- Excludes `bruteforce`, `dos`, `fuzz`, `fuzzing`, `intrusive`, `rce`, and `destructive` template tags unless explicitly allowed.
+- Stores redacted evidence only.
+
+Run from the frontend Automated Workspace using the Nuclei Coverage panel, or call the API:
+
+```json
+{
+  "scan_id": "scan-id",
+  "targets": ["https://app.example.test"],
+  "templates": ["nuclei-templates/http/cves"],
+  "severity": ["critical", "high", "medium"],
+  "rate_limit": 5,
+  "timeout": 5,
+  "process_timeout": 120,
+  "allow_intrusive": false
+}
+```
+
 ## Terminal Commands
 
 - `scan <url>`
@@ -296,6 +327,7 @@ GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
 GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
 POST http://127.0.0.1:5001/api/authz/matrix/run
+POST http://127.0.0.1:5001/api/integrations/nuclei/run
 POST http://127.0.0.1:5001/api/manual/replay
 POST http://127.0.0.1:5001/api/manual/proxy/start
 GET  http://127.0.0.1:5001/api/manual/proxy/status
@@ -327,6 +359,8 @@ Authorization Matrix / BOLA testing replays object-specific corpus requests unde
   ]
 }
 ```
+
+Nuclei integration uses the active scan and corpus URLs as targets when no explicit targets are supplied. Successful matches are persisted as source `nuclei`, so they appear in Findings, Evidence Corpus, JSON output, and report workflows alongside native scanner findings.
 
 Proof Mode is a deterministic post-scan verifier. The first executor safely proves open redirects by mutating the affected parameter to a controlled `.invalid` target, refusing out-of-scope findings, not following the redirect, storing the proof request/response as source `proof`, and linking sanitized evidence back to the finding.
 

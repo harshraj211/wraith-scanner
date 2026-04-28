@@ -82,11 +82,6 @@ class NucleiAdapterTests(unittest.TestCase):
                 method="GET",
                 url="https://app.example.test/admin",
             ))
-            real_result = NucleiAdapter(binary="nuclei").run(NucleiRunConfig(
-                scan_id=scan.scan_id,
-                target_base_url=scan.target_base_url,
-                targets=[scan.target_base_url],
-            ))
             # Rebuild the result with mocked stdout rather than requiring nuclei.
             with patch("scanner.integrations.nuclei_adapter.subprocess.run") as run_mock:
                 run_mock.return_value = subprocess.CompletedProcess(["nuclei"], 0, NUCLEI_JSONL + "\n", "")

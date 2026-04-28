@@ -61,6 +61,18 @@ const initialIntruderConfig = {
   maxRequests: '25',
 };
 
+const initialNucleiConfig = {
+  targets: '',
+  templates: '',
+  severity: 'critical,high,medium,low,info',
+  tags: '',
+  excludeTags: '',
+  rateLimit: '5',
+  timeout: '5',
+  processTimeout: '120',
+  allowIntrusive: false,
+};
+
 const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
 
 const hashToPage = {
@@ -167,6 +179,9 @@ function App() {
   const [authzProfilesText, setAuthzProfilesText] = useState('');
   const [authzMatrixState, setAuthzMatrixState] = useState('idle');
   const [authzMatrixResult, setAuthzMatrixResult] = useState(null);
+  const [nucleiConfig, setNucleiConfig] = useState(initialNucleiConfig);
+  const [nucleiState, setNucleiState] = useState('idle');
+  const [nucleiResult, setNucleiResult] = useState(null);
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -259,6 +274,10 @@ function App() {
 
   const updateAuthzProfilesText = (value) => {
     setAuthzProfilesText(value);
+  };
+
+  const updateNucleiConfig = (name, value) => {
+    setNucleiConfig((current) => ({ ...current, [name]: value }));
   };
 
   const submitScan = async (event) => {
@@ -726,6 +745,43 @@ function App() {
     }
   };
 
+  const runNucleiIntegration = async () => {
+    if (!latestScanId) {
+      addProgress({ type: 'error', message: 'Run or select a scan before starting Nuclei coverage.' });
+      return;
+    }
+    setNucleiState('running');
+    try {
+      const response = await axios.post(`${API_URL}/api/integrations/nuclei/run`, {
+        scan_id: latestScanId,
+        targets: parseList(nucleiConfig.targets),
+        templates: parseList(nucleiConfig.templates),
+        severity: parseList(nucleiConfig.severity),
+        tags: parseList(nucleiConfig.tags),
+        exclude_tags: parseList(nucleiConfig.excludeTags),
+        rate_limit: parseInt(nucleiConfig.rateLimit, 10) || 5,
+        timeout: parseInt(nucleiConfig.timeout, 10) || 5,
+        process_timeout: parseInt(nucleiConfig.processTimeout, 10) || 120,
+        allow_intrusive: Boolean(nucleiConfig.allowIntrusive),
+      });
+      setNucleiResult(response.data);
+      setNucleiState('complete');
+      addProgress({
+        scan_id: latestScanId,
+        type: response.data?.findings?.length ? 'warning' : 'success',
+        message: `Nuclei checked ${response.data?.targets?.length || 0} targets and imported ${response.data?.findings?.length || 0} findings.`,
+      });
+      await loadCorpus(latestScanId);
+      await loadFindings(latestScanId);
+      await refreshStatus(latestScanId);
+    } catch (error) {
+      setNucleiState('error');
+      const payload = error?.response?.data;
+      if (payload) setNucleiResult(payload);
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
+    }
+  };
+
   const downloadPdf = () => {
     if (latestScanId) window.open(`${API_URL}/api/download/${latestScanId}`, '_blank');
   };
@@ -783,6 +839,11 @@ function App() {
             dashboard={dashboard}
             progressEvents={progressEvents}
             corpusRequests={corpusRequests}
+            nucleiConfig={nucleiConfig}
+            nucleiState={nucleiState}
+            nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
+            updateNucleiConfig={updateNucleiConfig}
+            runNucleiIntegration={runNucleiIntegration}
             refreshStatus={() => refreshStatus(latestScanId)}
             submitScan={submitScan}
             onNavigate={navigate}

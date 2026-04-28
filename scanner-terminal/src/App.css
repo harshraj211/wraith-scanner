@@ -840,6 +840,10 @@ textarea:disabled {
   gap: 14px;
 }
 
+.form-grid.compact {
+  gap: 10px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -1019,6 +1023,11 @@ textarea:focus {
 }
 
 .dashboard-grid > .card:nth-child(4) {
+  grid-column: 1 / -1;
+}
+
+.dashboard-grid > .dashboard-wide,
+.dashboard-grid > .terminal-card {
   grid-column: 1 / -1;
 }
 
@@ -1602,6 +1611,112 @@ textarea:focus {
   font-size: 20px;
 }
 
+.nuclei-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 14px;
+}
+
+.nuclei-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.nuclei-form textarea {
+  min-height: 76px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.nuclei-safety {
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.nuclei-safety span {
+  color: #fbbf24;
+}
+
+.nuclei-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nuclei-result-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.nuclei-result-strip div {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #080d16;
+}
+
+.nuclei-result-strip span {
+  display: block;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.nuclei-result-strip strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--primary);
+  font-family: var(--mono);
+  font-size: 22px;
+  text-transform: uppercase;
+}
+
+.nuclei-note {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  border-radius: 8px;
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.nuclei-note .material-symbols-outlined {
+  color: var(--primary);
+}
+
+.nuclei-note p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.nuclei-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.nuclei-errors code {
+  display: block;
+  padding: 10px;
+  border: 1px solid rgba(251, 113, 133, 0.28);
+  border-radius: 8px;
+  background: rgba(159, 18, 57, 0.12);
+  color: #fecdd3;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .proof-policy-card {
   padding: 18px;
   border: 1px solid rgba(52, 211, 153, 0.28);
@@ -1712,6 +1827,7 @@ textarea:focus {
   .proof-grid,
   .proof-data-grid,
   .authz-matrix-grid,
+  .nuclei-layout,
   .split-workspace {
     grid-template-columns: 1fr;
   }
@@ -1786,6 +1902,8 @@ textarea:focus {
   .settings-grid,
   .proof-data-grid,
   .authz-matrix-grid,
+  .nuclei-layout,
+  .nuclei-result-strip,
   .reports-grid,
   .report-export-grid,
   .form-grid,

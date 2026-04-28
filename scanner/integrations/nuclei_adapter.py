@@ -158,6 +158,15 @@ class NucleiAdapter:
                 timeout=config.process_timeout,
                 env={**os.environ, "NO_COLOR": "true"},
             )
+        except OSError as exc:
+            return NucleiRunResult(
+                scan_id=config.scan_id,
+                available=False,
+                command=safe_command(command),
+                targets=config.targets,
+                errors=[f"Nuclei could not be started: {exc}"],
+                returncode=127,
+            )
         except subprocess.TimeoutExpired:
             return NucleiRunResult(
                 scan_id=config.scan_id,
