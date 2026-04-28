@@ -1617,6 +1617,13 @@ textarea:focus {
   gap: 14px;
 }
 
+.nuclei-page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
 .nuclei-form {
   display: flex;
   flex-direction: column;
@@ -1726,6 +1733,10 @@ textarea:focus {
   gap: 8px;
 }
 
+.nuclei-asset-actions.split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .nuclei-result-strip {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1794,6 +1805,24 @@ textarea:focus {
   font-family: var(--mono);
   font-size: 12px;
   white-space: pre-wrap;
+}
+
+.nuclei-intel-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.nuclei-intel-header > span:not(.status-pill) {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #080d16;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .proof-policy-card {
@@ -1907,6 +1936,7 @@ textarea:focus {
   .proof-data-grid,
   .authz-matrix-grid,
   .nuclei-layout,
+  .nuclei-page-grid,
   .split-workspace {
     grid-template-columns: 1fr;
   }
@@ -1982,7 +2012,9 @@ textarea:focus {
   .proof-data-grid,
   .authz-matrix-grid,
   .nuclei-layout,
+  .nuclei-page-grid,
   .nuclei-result-strip,
+  .nuclei-asset-actions.split,
   .reports-grid,
   .report-export-grid,
   .form-grid,

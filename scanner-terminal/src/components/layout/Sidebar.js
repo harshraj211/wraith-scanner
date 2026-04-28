@@ -5,6 +5,7 @@ const navItems = [
   ['automated-setup', 'radar', 'Automated Scans'],
   ['manual', 'biotech', 'Manual Testing'],
   ['repository', 'source', 'Repository Scan'],
+  ['nuclei', 'hub', 'Nuclei & CVE'],
   ['evidence', 'storage', 'Evidence Corpus'],
   ['findings', 'gavel', 'Findings'],
   ['proof', 'verified_user', 'Proof Mode'],

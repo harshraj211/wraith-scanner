@@ -16,6 +16,7 @@ import Repeater from './pages/Repeater';
 import Intruder from './pages/Intruder';
 import Decoder from './pages/Decoder';
 import RepositoryScan from './pages/RepositoryScan';
+import NucleiCve from './pages/NucleiCve';
 import ProofMode from './pages/ProofMode';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
@@ -103,6 +104,9 @@ const hashToPage = {
   '#decoder': 'decoder',
   '#repository': 'repository',
   '#repository-scan': 'repository',
+  '#nuclei': 'nuclei',
+  '#nuclei-cve': 'nuclei',
+  '#cve': 'nuclei',
   '#proof': 'proof',
   '#proof-mode': 'proof',
   '#reports': 'reports',
@@ -124,6 +128,7 @@ const pageToHash = {
   intruder: '#intruder',
   decoder: '#decoder',
   repository: '#repository-scan',
+  nuclei: '#nuclei-cve',
   proof: '#proof-mode',
   reports: '#reports',
   settings: '#settings',
@@ -915,7 +920,7 @@ function App() {
 
   useEffect(() => {
     if (process.env.NODE_ENV === 'test') return undefined;
-    if (activePage !== 'automated-workspace') return undefined;
+    if (!['automated-workspace', 'nuclei'].includes(activePage)) return undefined;
     loadNucleiStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage]);
@@ -1027,6 +1032,27 @@ function App() {
         return <Decoder />;
       case 'repository':
         return <RepositoryScan repoForm={repoForm} updateRepoForm={updateRepoForm} submitRepoScan={submitRepoScan} repoState={repoState} progressEvents={progressEvents} />;
+      case 'nuclei':
+        return (
+          <NucleiCve
+            latestScanId={latestScanId}
+            scanStatus={scanStatus}
+            nucleiConfig={nucleiConfig}
+            nucleiState={nucleiState}
+            nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
+            nucleiAssetState={nucleiAssetState}
+            nucleiAssetStatus={nucleiAssetStatus}
+            cveIntelState={cveIntelState}
+            cveIntelResult={cveIntelResult || scanStatus?.cve_intel_summary || null}
+            updateNucleiConfig={updateNucleiConfig}
+            runNucleiIntegration={runNucleiIntegration}
+            loadNucleiStatus={loadNucleiStatus}
+            installNucleiEngine={installNucleiEngine}
+            updateNucleiTemplates={updateNucleiTemplates}
+            enrichCveIntel={enrichCveIntel}
+            onNavigate={navigate}
+          />
+        );
       case 'proof':
         return (
           <ProofMode

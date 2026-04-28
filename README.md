@@ -120,7 +120,7 @@ cd scanner-terminal
 npm start
 ```
 
-The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, response inspector, Decoder, reporting actions, and terminal panel.
+The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, response inspector, Decoder, reporting actions, and terminal panel. The sidebar also includes a dedicated `Nuclei & CVE` page for managed Nuclei engine/template updates, policy selection, template runs, and CVE enrichment.
 
 ### Frontend Architecture
 
@@ -278,7 +278,7 @@ Auth profiles are saved to the local corpus with secrets redacted. Playwright st
 
 ### Nuclei Coverage
 
-Wraith can manage ProjectDiscovery Nuclei as a desktop/web app asset instead of requiring terminal setup. The Automated Workspace exposes buttons to:
+Wraith can manage ProjectDiscovery Nuclei as a desktop/web app asset instead of requiring terminal setup. Use the dedicated `Nuclei & CVE` sidebar page, or the Automated Workspace coverage panel, to:
 
 - Check Nuclei engine/template status.
 - Install or update the managed Nuclei engine under the Wraith tools directory.
