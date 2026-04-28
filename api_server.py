@@ -200,6 +200,44 @@ def _persist_findings(repo, canonical_findings):
             pass
 
 
+def _refresh_scan_artifacts(scan_id):
+    """Regenerate downloadable artifacts after post-scan enrichment."""
+    scan = active_scans.get(scan_id) or {}
+    if scan.get("status") != "completed":
+        return
+
+    findings = scan.get("canonical_findings") or []
+    target = scan.get("target") or scan.get("target_base_url") or ""
+    urls = scan.get("urls") or []
+    forms = scan.get("forms") or []
+
+    report_path = scan.get("report_path")
+    if report_path:
+        try:
+            generate_pdf_report(target, urls, forms, findings, report_path)
+        except Exception as exc:
+            print(f"[report] PDF refresh failed for {scan_id}: {exc}")
+
+    json_report_path = scan.get("json_report_path")
+    if json_report_path and os.path.exists(json_report_path):
+        try:
+            with open(json_report_path, "r", encoding="utf-8") as handle:
+                payload = _json.load(handle)
+            payload["findings"] = findings
+            metadata = dict(payload.get("metadata") or {})
+            metadata.update({
+                "nuclei_summary": scan.get("nuclei_summary", {}),
+                "nuclei_runs": scan.get("nuclei_runs", []),
+                "cve_intel_summary": scan.get("cve_intel_summary", {}),
+            })
+            payload["metadata"] = metadata
+            with open(json_report_path, "w", encoding="utf-8") as handle:
+                _json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+        except Exception as exc:
+            print(f"[report] JSON refresh failed for {scan_id}: {exc}")
+
+
 def _parse_list_value(value):
     if value is None:
         return []
@@ -1303,6 +1341,7 @@ def run_nuclei_endpoint():
     existing = active_scan.setdefault('canonical_findings', [])
     existing.extend([finding.to_dict() for finding in result.findings])
     active_scan['total_vulnerabilities'] = len(existing) or active_scan.get('total_vulnerabilities', 0)
+    _refresh_scan_artifacts(scan_id)
 
     return jsonify(result.to_dict())
 
@@ -1348,6 +1387,7 @@ def enrich_cve_intel_endpoint():
     }
     if not finding_ids:
         active_scan['canonical_findings'] = [finding.to_dict() for finding in findings]
+    _refresh_scan_artifacts(scan_id)
     return jsonify({
         'scan_id': scan_id,
         **summary,

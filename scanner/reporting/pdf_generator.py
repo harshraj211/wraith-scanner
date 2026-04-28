@@ -327,15 +327,15 @@ def _severity_from_cvss(cvss_score: float) -> str:
 
 def _overall_risk(findings: List[Dict[str, Any]]) -> str:
     has_critical = any(
-        _severity_from_cvss(calculate_cvss(f.get("type", ""), f.get("confidence", 0))['score']) == "critical"
+        _severity_from_cvss(_finding_cvss_data(f)['score']) == "critical"
         for f in findings
     )
     has_high = any(
-        _severity_from_cvss(calculate_cvss(f.get("type", ""), f.get("confidence", 0))['score']) == "high"
+        _severity_from_cvss(_finding_cvss_data(f)['score']) == "high"
         for f in findings
     )
     has_medium = any(
-        _severity_from_cvss(calculate_cvss(f.get("type", ""), f.get("confidence", 0))['score']) == "medium"
+        _severity_from_cvss(_finding_cvss_data(f)['score']) == "medium"
         for f in findings
     )
     if has_critical: return "Critical"
@@ -355,6 +355,156 @@ def _clean_evidence(evidence: str) -> str:
 def _esc(text) -> str:
     """Escape text for safe insertion into ReportLab Paragraph XML."""
     return html_mod.escape(str(text or 'N/A'))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_report_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept canonical or legacy finding dictionaries for report rendering."""
+    data = dict(finding or {})
+    data.setdefault("type", data.get("vuln_type") or data.get("category") or "")
+    data.setdefault("url", data.get("target_url") or data.get("action") or "")
+    data.setdefault("param", data.get("parameter_name") or data.get("parameter") or data.get("sink") or "")
+    data.setdefault("evidence", data.get("discovery_evidence") or data.get("message") or "")
+    data.setdefault("source", data.get("discovery_method") or "")
+    data.setdefault("method", data.get("method") or "GET")
+    data.setdefault("payload", data.get("payload_used") or "")
+    data.setdefault("title", data.get("title") or data.get("type") or "Finding")
+    data.setdefault("metadata", data.get("metadata") or {})
+    references = data.get("references") or []
+    if isinstance(references, str):
+        references = [references]
+    data["references"] = list(references)
+    data["confidence"] = int(_safe_float(data.get("confidence"), 0))
+    return data
+
+
+def _finding_cvss_data(finding: Dict[str, Any]) -> Dict[str, Any]:
+    calculated = calculate_cvss(finding.get("type", ""), finding.get("confidence", 0))
+    explicit_score = _safe_float(finding.get("cvss_score"), 0.0)
+    if explicit_score > 0:
+        severity = str(finding.get("severity") or _severity_from_cvss(explicit_score)).lower()
+        return {
+            "score": explicit_score,
+            "severity": severity,
+            "vector": finding.get("cvss_vector") or calculated.get("vector", ""),
+        }
+    return calculated
+
+
+def _cve_records(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    metadata = finding.get("metadata") or {}
+    records = metadata.get("cve_intelligence") or []
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _is_nuclei_finding(finding: Dict[str, Any]) -> bool:
+    return str(finding.get("source") or finding.get("discovery_method") or "").lower() == "nuclei"
+
+
+def _append_nuclei_cve_summary(story: List[Any], findings: List[Dict[str, Any]], normal, subheading) -> None:
+    nuclei_findings = [finding for finding in findings if _is_nuclei_finding(finding)]
+    records = {
+        str(record.get("cve_id") or "").upper(): record
+        for finding in findings
+        for record in _cve_records(finding)
+        if record.get("cve_id")
+    }
+    cve_ids = sorted(records)
+    if not nuclei_findings and not cve_ids:
+        return
+
+    kev_count = sum(1 for record in records.values() if record.get("cisa_kev"))
+    epss_hot = sum(1 for record in records.values() if _safe_float(record.get("epss_score")) >= 0.5)
+    story.append(Paragraph("<b>Nuclei and CVE Intelligence</b>", subheading))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        "Wraith imported Nuclei template matches into the canonical findings model and enriched CVE-backed "
+        "findings with NVD, EPSS, and CISA KEV context where available.",
+        normal,
+    ))
+    story.append(Spacer(1, 6))
+
+    summary_table = Table(
+        [
+            ["Signal", "Count"],
+            ["Nuclei findings", str(len(nuclei_findings))],
+            ["Enriched CVEs", str(len(cve_ids))],
+            ["CISA KEV matches", str(kev_count)],
+            ["EPSS >= 0.500", str(epss_hot)],
+        ],
+        colWidths=[2.4 * inch, 1.4 * inch],
+    )
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.darkblue),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 8))
+
+    if cve_ids:
+        cve_rows = [["CVE", "CVSS", "EPSS", "KEV", "Priority"]]
+        for cve_id in cve_ids[:18]:
+            record = records[cve_id]
+            cve_rows.append([
+                cve_id,
+                str(record.get("cvss_score") or "0.0"),
+                f"{_safe_float(record.get('epss_score')):.3f}",
+                "yes" if record.get("cisa_kev") else "no",
+                str(record.get("priority_score") or 0),
+            ])
+        if len(cve_ids) > 18:
+            cve_rows.append([f"+{len(cve_ids) - 18} more", "", "", "", ""])
+        cve_table = Table(cve_rows, colWidths=[1.4 * inch, 0.7 * inch, 0.8 * inch, 0.6 * inch, 0.8 * inch])
+        cve_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(cve_table)
+        story.append(Spacer(1, 12))
+
+
+def _append_cve_intel_detail(story: List[Any], finding: Dict[str, Any], normal, subheading) -> None:
+    records = _cve_records(finding)
+    if not records:
+        return
+    story.append(Paragraph("<b>CVE Intelligence:</b>", normal))
+    rows = [["CVE", "NVD Severity", "CVSS", "EPSS", "CISA KEV", "Priority"]]
+    for record in records[:8]:
+        rows.append([
+            _esc(record.get("cve_id")),
+            _esc(record.get("nvd_severity") or "unknown"),
+            _esc(record.get("cvss_score") or "0.0"),
+            f"{_safe_float(record.get('epss_score')):.3f}",
+            "yes" if record.get("cisa_kev") else "no",
+            _esc(record.get("priority_score") or 0),
+        ])
+    table = Table(rows, colWidths=[1.1 * inch, 1.0 * inch, 0.6 * inch, 0.7 * inch, 0.8 * inch, 0.7 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 8))
+    for record in records[:3]:
+        detail = record.get("description") or record.get("cisa_required_action") or ""
+        if detail:
+            story.append(Paragraph(f"<b>{_esc(record.get('cve_id'))}:</b> {_esc(detail[:700])}", normal))
+            story.append(Spacer(1, 4))
 
 
 def _is_passive_finding(vuln_type: str) -> bool:
@@ -538,6 +688,7 @@ def generate_pdf_report(
     scan_duration: float = 0.0,
 ) -> None:
     """Generate a multi-page PDF vulnerability report."""
+    findings = [_normalize_report_finding(finding) for finding in (findings or [])]
 
     doc    = SimpleDocTemplate(output_path, pagesize=letter,
                                rightMargin=72, leftMargin=72,
@@ -584,9 +735,9 @@ def generate_pdf_report(
 
     story.append(Paragraph("<b>Executive Summary</b>", subheading))
     critical_findings = [f for f in findings
-                         if calculate_cvss(f.get('type', ''), f.get('confidence', 0))['score'] >= 9.0]
+                         if _finding_cvss_data(f)['score'] >= 9.0]
     high_findings     = [f for f in findings
-                         if 7.0 <= calculate_cvss(f.get('type', ''), f.get('confidence', 0))['score'] < 9.0]
+                         if 7.0 <= _finding_cvss_data(f)['score'] < 9.0]
 
     if critical_findings:
         summary = (
@@ -616,7 +767,7 @@ def generate_pdf_report(
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "informational": 0}
     for f in findings:
-        cvss_data = calculate_cvss(f.get("type", ""), f.get("confidence", 0))
+        cvss_data = _finding_cvss_data(f)
         sev       = _severity_from_cvss(cvss_data['score'])
         counts[sev] = counts.get(sev, 0) + 1
 
@@ -707,7 +858,7 @@ def generate_pdf_report(
         story.append(Spacer(1, 4))
         summary_rows = [["#", "Type", "Severity", "CVSS", "Parameter", "URL"]]
         for idx, f in enumerate(findings, 1):
-            cvss_data = calculate_cvss(f.get('type', ''), f.get('confidence', 0))
+            cvss_data = _finding_cvss_data(f)
             sev = _severity_from_cvss(cvss_data['score'])
             vtype = f.get('type', '')
             param_short = (f.get('param', '') or '')[:15]
@@ -727,6 +878,8 @@ def generate_pdf_report(
         ]))
         story.append(summary_table)
         story.append(Spacer(1, 12))
+
+    _append_nuclei_cve_summary(story, findings, normal, subheading)
 
     # Methodology & Scope
     story.append(PageBreak())
@@ -944,6 +1097,20 @@ def generate_pdf_report(
             desc  = VULN_DESCRIPTIONS["vulnerable-component"][1]
             rems  = REMEDIATIONS["vulnerable-component"]
 
+        if _is_nuclei_finding(f) and kind == "Other":
+            kind = f.get("title") or "Nuclei Template Match"
+            desc = "A ProjectDiscovery Nuclei template matched this target and was imported into Wraith as evidence-backed coverage."
+        if f.get("owasp_category"):
+            owasp = f.get("owasp_category")
+        if f.get("cwe"):
+            cwe = f.get("cwe")
+        if f.get("remediation"):
+            rems = [f.get("remediation")]
+        if not desc:
+            desc = _clean_evidence(f.get("evidence", "")) or "Indicator detected during automated testing."
+        if not rems:
+            rems = ["Review the finding evidence, validate affected versions or behavior, and remediate according to vendor or framework guidance."]
+
         param       = f.get('param', 'unknown') or 'unknown'
         raw_params  = param
         param_list  = [p.strip() for p in raw_params.split(',')]
@@ -956,7 +1123,7 @@ def generate_pdf_report(
         if len(param_list) > 1:
             short_param += f' +{len(param_list)-1}'
         title    = f"{kind} — {_esc(short_param)} ({_esc(url_path[:40])})"
-        cvss_data = calculate_cvss(f.get('type', ''), f.get('confidence', 0))
+        cvss_data = _finding_cvss_data(f)
 
         story.append(Paragraph(title, heading))
         story.append(Spacer(1, 6))
@@ -1052,6 +1219,7 @@ def generate_pdf_report(
         ]))
         story.append(tech_table)
         story.append(Spacer(1, 6))
+        _append_cve_intel_detail(story, f, normal, subheading)
 
         story.append(Spacer(1, 12))
         story.append(Paragraph("<b>HTTP Evidence:</b>", normal))
@@ -1077,7 +1245,8 @@ def generate_pdf_report(
         story.append(Spacer(1, 6))
 
         story.append(Paragraph("<b>References:</b>", normal))
-        for r in ["https://owasp.org/", "https://cwe.mitre.org/"]:
+        report_refs = list(dict.fromkeys(["https://owasp.org/", "https://cwe.mitre.org/"] + list(f.get("references") or [])))
+        for r in report_refs[:12]:
             story.append(Paragraph(r, normal))
 
         story.append(PageBreak())
