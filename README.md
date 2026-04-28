@@ -133,6 +133,27 @@ The React frontend now uses a reusable enterprise dashboard structure instead of
 
 The visual system uses a dark navy cybersecurity theme, cyan primary actions, severity-aware colors, Inter UI text, and IBM Plex Mono for HTTP, terminal, JSON, and logs.
 
+### Desktop App Foundation
+
+Wraith now includes a first desktop packaging foundation under `desktop/`. It starts the Flask API locally, serves the compiled React frontend, and opens the local UI for the operator.
+
+Build the Windows desktop bundle:
+
+```powershell
+.\scripts\build_desktop.ps1
+```
+
+Run the launcher without packaging:
+
+```powershell
+cd scanner-terminal
+npm run build
+cd ..
+python -m desktop.wraith_desktop
+```
+
+The current desktop wrapper is a local launcher, not a source-protection guarantee. Future commercial distribution should add signed installers, update channels, and server-side licensing for any private scanner logic.
+
 ### CLI
 
 ```bash
