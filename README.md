@@ -294,6 +294,12 @@ The default integration is conservative:
 - Excludes `bruteforce`, `dos`, `fuzz`, `fuzzing`, `intrusive`, `rce`, and `destructive` template tags unless explicitly allowed.
 - Stores redacted evidence only.
 
+Nuclei policy profiles:
+
+- `safe`: default non-intrusive coverage. Blocks brute force, DoS, fuzzing, intrusive, RCE, headless, code, and destructive template tags.
+- `professional`: for authorized professional assessments. Allows broader template classes while still blocking brute force, DoS, and destructive tags. Requires explicit acknowledgement.
+- `lab`: for local vulnerable apps and CTF-style labs. Wraith adds no default tag exclusions. Requires explicit acknowledgement.
+
 Run from the frontend Automated Workspace using the Nuclei Coverage panel, or call the API:
 
 ```json
@@ -305,7 +311,8 @@ Run from the frontend Automated Workspace using the Nuclei Coverage panel, or ca
   "rate_limit": 5,
   "timeout": 5,
   "process_timeout": 120,
-  "allow_intrusive": false
+  "policy_profile": "professional",
+  "policy_acknowledged": true
 }
 ```
 

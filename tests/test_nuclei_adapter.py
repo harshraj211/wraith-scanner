@@ -70,6 +70,36 @@ class NucleiAdapterTests(unittest.TestCase):
         self.assertIn("-duc", command)
         self.assertIn("-exclude-tags", command)
         self.assertIn("destructive", ",".join(command))
+        self.assertIn("headless", ",".join(command))
+
+    @patch("scanner.integrations.nuclei_adapter.find_nuclei_binary", return_value="nuclei")
+    @patch("scanner.integrations.nuclei_adapter.subprocess.run")
+    def test_professional_policy_requires_acknowledgement_and_reduces_exclusions(self, run_mock, _which):
+        adapter = NucleiAdapter()
+        blocked = adapter.run(NucleiRunConfig(
+            scan_id="scan-nuclei",
+            target_base_url="https://app.example.test",
+            targets=["https://app.example.test"],
+            policy_profile="professional",
+            policy_acknowledged=False,
+        ))
+        self.assertEqual(blocked.returncode, 126)
+        self.assertIn("requires explicit", blocked.errors[0])
+
+        run_mock.return_value = subprocess.CompletedProcess(["nuclei"], 0, "", "")
+        adapter.run(NucleiRunConfig(
+            scan_id="scan-nuclei",
+            target_base_url="https://app.example.test",
+            targets=["https://app.example.test"],
+            policy_profile="professional",
+            policy_acknowledged=True,
+        ))
+        command = run_mock.call_args.args[0]
+        exclusions = set(command[command.index("-exclude-tags") + 1].split(","))
+        self.assertIn("destructive", exclusions)
+        self.assertIn("dos", exclusions)
+        self.assertNotIn("intrusive", exclusions)
+        self.assertNotIn("rce", exclusions)
 
     def test_manager_selects_release_asset_for_platform(self):
         release = {

@@ -17,18 +17,14 @@ from urllib.parse import urlparse
 
 from scanner.core.models import EvidenceArtifact, Finding, stable_hash
 from scanner.integrations.nuclei_manager import find_any_nuclei_binary, managed_template_dir
+from scanner.integrations.nuclei_policy import (
+    effective_exclude_tags,
+    normalize_policy_profile,
+    validate_policy_acknowledgement,
+)
 from scanner.utils.redaction import redact, redact_text
 
 
-DEFAULT_SAFE_EXCLUDE_TAGS = {
-    "bruteforce",
-    "dos",
-    "fuzz",
-    "fuzzing",
-    "intrusive",
-    "rce",
-    "destructive",
-}
 DEFAULT_SEVERITIES = ["critical", "high", "medium", "low", "info"]
 SEVERITY_CONFIDENCE = {
     "critical": 95,
@@ -54,6 +50,8 @@ class NucleiRunConfig:
     process_timeout: int = 120
     safe_templates_only: bool = True
     nuclei_binary: str = ""
+    policy_profile: str = "safe"
+    policy_acknowledged: bool = False
 
     def __post_init__(self) -> None:
         self.targets = normalize_targets(self.targets)
@@ -69,6 +67,12 @@ class NucleiRunConfig:
         self.timeout = max(1, min(int(self.timeout or 5), 60))
         self.retries = max(0, min(int(self.retries or 0), 3))
         self.process_timeout = max(10, min(int(self.process_timeout or 120), 900))
+        self.policy_profile = normalize_policy_profile(
+            self.policy_profile,
+            allow_intrusive=not self.safe_templates_only,
+        )
+        if self.policy_profile == "safe":
+            self.safe_templates_only = True
 
 
 @dataclass
@@ -103,6 +107,12 @@ class NucleiAdapter:
         binary = config.nuclei_binary or self.binary
         if not binary:
             raise FileNotFoundError("Nuclei binary not found. Install nuclei and ensure it is on PATH.")
+        valid_policy, message = validate_policy_acknowledgement(
+            config.policy_profile,
+            config.policy_acknowledged,
+        )
+        if not valid_policy:
+            raise PermissionError(message)
 
         command = [
             binary,
@@ -125,11 +135,12 @@ class NucleiAdapter:
             command.extend(["-t", template])
         if config.tags:
             command.extend(["-tags", ",".join(config.tags)])
-        exclude_tags = set(config.exclude_tags)
-        if config.safe_templates_only:
-            exclude_tags.update(DEFAULT_SAFE_EXCLUDE_TAGS)
+        exclude_tags = effective_exclude_tags(
+            policy_profile=config.policy_profile,
+            user_exclude_tags=config.exclude_tags,
+        )
         if exclude_tags:
-            command.extend(["-exclude-tags", ",".join(sorted(exclude_tags))])
+            command.extend(["-exclude-tags", ",".join(exclude_tags)])
         return command
 
     def run(self, config: NucleiRunConfig) -> NucleiRunResult:
@@ -153,14 +164,24 @@ class NucleiAdapter:
                 target_handle.write(target + "\n")
             target_file = target_handle.name
 
-        command = self.build_command(config, target_file)
+        command: List[str] = []
         try:
+            command = self.build_command(config, target_file)
             completed = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 timeout=config.process_timeout,
                 env={**os.environ, "NO_COLOR": "true"},
+            )
+        except PermissionError as exc:
+            return NucleiRunResult(
+                scan_id=config.scan_id,
+                available=True,
+                command=[],
+                targets=config.targets,
+                errors=[str(exc)],
+                returncode=126,
             )
         except OSError as exc:
             return NucleiRunResult(

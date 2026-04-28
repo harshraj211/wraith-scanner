@@ -49,6 +49,7 @@ from scanner.importers.common import (
 )
 from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, normalize_targets
 from scanner.integrations.nuclei_manager import NucleiAssetManager
+from scanner.integrations.nuclei_policy import policy_options, validate_policy_acknowledgement
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -1212,7 +1213,9 @@ def list_corpus_findings(scan_id):
 
 @app.route('/api/integrations/nuclei/status', methods=['GET'])
 def nuclei_status_endpoint():
-    return jsonify(NucleiAssetManager().status().to_dict())
+    payload = NucleiAssetManager().status().to_dict()
+    payload['policy_options'] = policy_options()
+    return jsonify(payload)
 
 
 @app.route('/api/integrations/nuclei/install', methods=['POST'])
@@ -1249,6 +1252,13 @@ def run_nuclei_endpoint():
 
     targets = _targets_for_nuclei(repo, scan_id, payload, scan_payload)
     allow_intrusive = bool(payload.get('allow_intrusive') or False)
+    policy_profile = str(payload.get('policy_profile') or payload.get('safety_profile') or '').strip().lower()
+    if not policy_profile:
+        policy_profile = 'professional' if allow_intrusive else 'safe'
+    policy_acknowledged = bool(payload.get('policy_acknowledged') or payload.get('operator_acknowledged') or False)
+    valid_policy, policy_error = validate_policy_acknowledgement(policy_profile, policy_acknowledged)
+    if not valid_policy:
+        return jsonify({'error': policy_error, 'policy_options': policy_options()}), 400
     config = NucleiRunConfig(
         scan_id=scan_id,
         target_base_url=str(scan_payload.get('target_base_url') or ''),
@@ -1261,8 +1271,10 @@ def run_nuclei_endpoint():
         timeout=int(payload.get('timeout') or 5),
         retries=int(payload.get('retries') or 0),
         process_timeout=int(payload.get('process_timeout') or 120),
-        safe_templates_only=not allow_intrusive,
+        safe_templates_only=policy_profile == 'safe' and not allow_intrusive,
         nuclei_binary=str(payload.get('nuclei_binary') or ''),
+        policy_profile=policy_profile,
+        policy_acknowledged=policy_acknowledged,
     )
 
     adapter = NucleiAdapter(binary=config.nuclei_binary)
@@ -1284,6 +1296,7 @@ def run_nuclei_endpoint():
         'findings': len(result.findings),
         'errors': len(result.errors),
         'targets': len(result.targets),
+        'policy_profile': config.policy_profile,
     }
     existing = active_scan.setdefault('canonical_findings', [])
     existing.extend([finding.to_dict() for finding in result.findings])

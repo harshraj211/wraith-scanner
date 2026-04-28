@@ -71,6 +71,8 @@ const initialNucleiConfig = {
   timeout: '5',
   processTimeout: '120',
   allowIntrusive: false,
+  policyProfile: 'safe',
+  policyAcknowledged: false,
 };
 
 const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
@@ -279,7 +281,14 @@ function App() {
   };
 
   const updateNucleiConfig = (name, value) => {
-    setNucleiConfig((current) => ({ ...current, [name]: value }));
+    setNucleiConfig((current) => {
+      const next = { ...current, [name]: value };
+      if (name === 'policyProfile') {
+        next.allowIntrusive = value !== 'safe';
+        if (value === 'safe') next.policyAcknowledged = false;
+      }
+      return next;
+    });
   };
 
   const submitScan = async (event) => {
@@ -765,6 +774,8 @@ function App() {
         timeout: parseInt(nucleiConfig.timeout, 10) || 5,
         process_timeout: parseInt(nucleiConfig.processTimeout, 10) || 120,
         allow_intrusive: Boolean(nucleiConfig.allowIntrusive),
+        policy_profile: nucleiConfig.policyProfile || 'safe',
+        policy_acknowledged: Boolean(nucleiConfig.policyAcknowledged),
       });
       setNucleiResult(response.data);
       setNucleiState('complete');

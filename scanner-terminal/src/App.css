@@ -1631,6 +1631,9 @@ textarea:focus {
 }
 
 .nuclei-safety {
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr);
+  align-items: center;
   padding: 10px 12px;
   border: 1px solid rgba(245, 158, 11, 0.28);
   border-radius: 8px;
@@ -1639,6 +1642,36 @@ textarea:focus {
 
 .nuclei-safety span {
   color: #fbbf24;
+}
+
+.nuclei-ack {
+  display: flex;
+}
+
+.nuclei-policy-note {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #080d16;
+}
+
+.nuclei-policy-note strong {
+  color: var(--primary);
+}
+
+.nuclei-policy-note p {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.nuclei-policy-note code {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: normal;
 }
 
 .nuclei-summary {

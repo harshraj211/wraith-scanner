@@ -38,6 +38,14 @@ export default function AutomatedWorkspace({
   const nucleiErrors = Array.isArray(nucleiResult?.errors) ? nucleiResult.errors : [];
   const templateCount = nucleiAssetStatus?.metadata?.template_count || 0;
   const engineReady = Boolean(nucleiAssetStatus?.ok || nucleiAssetStatus?.binary_path);
+  const policyOptions = Array.isArray(nucleiAssetStatus?.policy_options)
+    ? nucleiAssetStatus.policy_options
+    : [
+        { profile: 'safe', label: 'Safe', description: 'Non-intrusive default mode.' },
+        { profile: 'professional', label: 'Professional', description: 'Broader authorized assessment mode.' },
+        { profile: 'lab', label: 'Lab', description: 'Local labs and CTF targets only.' },
+      ];
+  const activePolicy = policyOptions.find((option) => option.profile === nucleiConfig?.policyProfile) || policyOptions[0];
   return (
     <div className="page-stack">
       <PageHeader
@@ -172,13 +180,35 @@ export default function AutomatedWorkspace({
                 </label>
               </div>
               <label className="check-row nuclei-safety">
-                <input
-                  type="checkbox"
-                  checked={Boolean(nucleiConfig?.allowIntrusive)}
-                  onChange={(event) => updateNucleiConfig('allowIntrusive', event.target.checked)}
-                />
-                <span>Allow intrusive templates for authorized lab scopes only</span>
+                <span>Policy Profile</span>
+                <select
+                  value={nucleiConfig?.policyProfile || 'safe'}
+                  onChange={(event) => updateNucleiConfig('policyProfile', event.target.value)}
+                >
+                  {policyOptions.map((option) => (
+                    <option key={option.profile} value={option.profile}>
+                      {option.label || option.profile}
+                    </option>
+                  ))}
+                </select>
               </label>
+              <div className="nuclei-policy-note">
+                <strong>{activePolicy?.label || 'Safe'} mode</strong>
+                <p>{activePolicy?.description || 'Nuclei policy controls template tag exclusions.'}</p>
+                {activePolicy?.default_exclude_tags?.length > 0 && (
+                  <code>Excludes: {activePolicy.default_exclude_tags.join(', ')}</code>
+                )}
+              </div>
+              {nucleiConfig?.policyProfile !== 'safe' && (
+                <label className="check-row nuclei-safety nuclei-ack">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(nucleiConfig?.policyAcknowledged)}
+                    onChange={(event) => updateNucleiConfig('policyAcknowledged', event.target.checked)}
+                  />
+                  <span>I confirm this is an authorized professional test scope.</span>
+                </label>
+              )}
             </div>
             <div className="nuclei-summary">
               <div className="nuclei-asset-card">
