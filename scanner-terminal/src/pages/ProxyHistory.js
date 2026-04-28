@@ -20,6 +20,10 @@ export default function ProxyHistory({
   loadExchange,
   sendRequestToRepeater,
   sendRequestToIntruder,
+  browserState,
+  browserStatus,
+  openWraithBrowser,
+  closeWraithBrowser,
 }) {
   return (
     <div className="page-fill">
@@ -30,6 +34,9 @@ export default function ProxyHistory({
         actions={(
           <>
             <Button variant="secondary" onClick={refreshProxyStatus}>Status</Button>
+            <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
+              {browserState === 'opening' ? 'Opening...' : 'Open browser'}
+            </Button>
             {proxyStatus?.running ? <Button variant="danger" onClick={stopManualProxy}>Stop proxy</Button> : <Button onClick={startManualProxy}>Start proxy</Button>}
           </>
         )}
@@ -40,12 +47,16 @@ export default function ProxyHistory({
             <Metric label="State" value={proxyState || (proxyStatus?.running ? 'running' : 'stopped')} />
             <Metric label="Host" value={`${proxyStatus?.host || '127.0.0.1'}:${proxyStatus?.port || '-'}`} />
             <Metric label="Pending" value={pendingProxyRequests.length} />
+            <Metric label="Browser" value={browserStatus?.running ? 'open' : 'closed'} />
           </div>
           <label className="check-row">
             <input type="checkbox" checked={Boolean(proxyStatus?.intercept_enabled)} onChange={(event) => toggleManualProxyIntercept(event.target.checked)} />
             <span>Pause requests for forward/drop</span>
           </label>
           <Button variant="secondary" onClick={loadProxyPending}>Load pending</Button>
+          {browserStatus?.running && (
+            <Button variant="ghost" onClick={closeWraithBrowser}>Close browser</Button>
+          )}
           <div className="pending-list">
             {pendingProxyRequests.map((item) => (
               <div className="pending-row" key={item.request_id}>

@@ -187,6 +187,8 @@ function App() {
   const [proxyStatus, setProxyStatus] = useState({ running: false });
   const [proxyState, setProxyState] = useState('idle');
   const [pendingProxyRequests, setPendingProxyRequests] = useState([]);
+  const [browserState, setBrowserState] = useState('idle');
+  const [browserStatus, setBrowserStatus] = useState({ running: false });
   const [repoForm, setRepoForm] = useState({ url: '', token: '', branch: 'main' });
   const [repoState, setRepoState] = useState('idle');
   const [proofState, setProofState] = useState('safe mode');
@@ -550,9 +552,11 @@ function App() {
         applyManualRequestUpdate((current) => ({ ...current, scanId: status.scan_id }));
       }
       addProgress({ scan_id: status.scan_id, type: 'success', message: `Manual proxy listening on ${status.host}:${status.port}` });
+      return status;
     } catch (error) {
       setProxyState('error');
       addProgress({ scan_id: manualRequest.scanId || latestScanId, type: 'error', message: apiError(error) });
+      return null;
     }
   };
 
@@ -583,6 +587,58 @@ function App() {
       const response = await axios.get(`${API_URL}/api/manual/proxy/pending`);
       setPendingProxyRequests(response.data.requests || []);
     } catch (error) {
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const refreshBrowserStatus = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/manual/browser/status`);
+      setBrowserStatus(response.data || { running: false });
+      setBrowserState(response.data?.running ? 'running' : 'idle');
+    } catch (error) {
+      setBrowserState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const openWraithBrowser = async () => {
+    setBrowserState('opening');
+    try {
+      let status = proxyStatus;
+      if (!status?.running) {
+        status = await startManualProxy();
+      }
+      if (!status?.running) {
+        setBrowserState('error');
+        return;
+      }
+      const targetUrl = manualRequest.url || form.targetUrl || 'http://127.0.0.1:5000/';
+      const response = await axios.post(`${API_URL}/api/manual/browser/open`, {
+        target_url: targetUrl,
+        scan_id: manualRequest.scanId || latestScanId || status.scan_id,
+        use_proxy: true,
+      });
+      setBrowserStatus(response.data || { running: false });
+      setBrowserState(response.data?.running ? 'running' : 'idle');
+      addProgress({ scan_id: response.data?.scan_id || status.scan_id, type: 'success', message: 'Controlled Wraith browser opened through the manual proxy.' });
+    } catch (error) {
+      setBrowserState('error');
+      const payload = error?.response?.data;
+      if (payload) setBrowserStatus(payload);
+      addProgress({ scan_id: manualRequest.scanId || latestScanId, type: 'error', message: apiError(error) });
+    }
+  };
+
+  const closeWraithBrowser = async () => {
+    setBrowserState('closing');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/browser/close`);
+      setBrowserStatus(response.data || { running: false });
+      setBrowserState('idle');
+      addProgress({ type: 'success', message: 'Controlled Wraith browser closed.' });
+    } catch (error) {
+      setBrowserState('error');
       addProgress({ type: 'error', message: apiError(error) });
     }
   };
@@ -959,8 +1015,13 @@ function App() {
     if (process.env.NODE_ENV === 'test') return undefined;
     if (!['manual', 'proxy'].includes(activePage)) return undefined;
     refreshProxyStatus();
+    refreshBrowserStatus();
     const timer = window.setInterval(refreshProxyStatus, 5000);
-    return () => window.clearInterval(timer);
+    const browserTimer = window.setInterval(refreshBrowserStatus, 5000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearInterval(browserTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage]);
 
@@ -1026,7 +1087,17 @@ function App() {
           />
         );
       case 'manual':
-        return <ManualTesting onNavigate={navigate} proxyStatus={proxyStatus} corpusRequests={corpusRequests} />;
+        return (
+          <ManualTesting
+            onNavigate={navigate}
+            proxyStatus={proxyStatus}
+            corpusRequests={corpusRequests}
+            browserState={browserState}
+            browserStatus={browserStatus}
+            openWraithBrowser={openWraithBrowser}
+            closeWraithBrowser={closeWraithBrowser}
+          />
+        );
       case 'proxy':
         return (
           <ProxyHistory
@@ -1045,6 +1116,10 @@ function App() {
             loadExchange={loadExchange}
             sendRequestToRepeater={sendRequestToRepeater}
             sendRequestToIntruder={sendRequestToIntruder}
+            browserState={browserState}
+            browserStatus={browserStatus}
+            openWraithBrowser={openWraithBrowser}
+            closeWraithBrowser={closeWraithBrowser}
           />
         );
       case 'repeater':

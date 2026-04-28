@@ -57,6 +57,7 @@ from scanner.integrations.template_trust import (
     save_template_trust,
     trust_config_path,
 )
+from scanner.manual.browser_launcher import WraithBrowserController
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -97,6 +98,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 active_scans = {}
 manual_proxy = WraithProxyController()
+wraith_browser = WraithBrowserController()
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
@@ -1719,6 +1721,31 @@ def manual_proxy_decide(request_id):
     if not found:
         return jsonify({'error': 'Pending proxy request not found'}), 404
     return jsonify({'request_id': request_id, 'action': action})
+
+
+@app.route('/api/manual/browser/open', methods=['POST'])
+def manual_browser_open():
+    payload = request.get_json(silent=True) or {}
+    result = wraith_browser.open(
+        target_url=str(payload.get('target_url') or payload.get('url') or '').strip(),
+        scan_id=str(payload.get('scan_id') or manual_proxy.status().get('scan_id') or '').strip(),
+        use_proxy=payload.get('use_proxy', True) is not False,
+        proxy_status=manual_proxy.status(),
+    )
+    status = 200 if result.ok else 409
+    if result.error and 'Playwright is unavailable' in result.error:
+        status = 503
+    return jsonify(result.to_dict()), status
+
+
+@app.route('/api/manual/browser/status', methods=['GET'])
+def manual_browser_status():
+    return jsonify(wraith_browser.status().to_dict())
+
+
+@app.route('/api/manual/browser/close', methods=['POST'])
+def manual_browser_close():
+    return jsonify(wraith_browser.close().to_dict())
 
 
 @app.route('/api/mode', methods=['GET'])

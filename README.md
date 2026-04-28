@@ -391,6 +391,9 @@ POST http://127.0.0.1:5001/api/manual/proxy/intercept
 GET  http://127.0.0.1:5001/api/manual/proxy/pending
 POST http://127.0.0.1:5001/api/manual/proxy/pending/<request-id>
 POST http://127.0.0.1:5001/api/manual/proxy/stop
+POST http://127.0.0.1:5001/api/manual/browser/open
+GET  http://127.0.0.1:5001/api/manual/browser/status
+POST http://127.0.0.1:5001/api/manual/browser/close
 POST http://127.0.0.1:5001/api/proof/<finding-id>/task
 GET  http://127.0.0.1:5001/api/proof/tasks
 POST http://127.0.0.1:5001/api/proof/<task-id>/run
@@ -401,6 +404,8 @@ Request filters include `method`, `host`, `path_contains`, `status_code`, `conte
 Manual replay sends a bounded operator-specified request, blocks destructive verbs in safe mode unless explicitly allowed, and stores the sanitized exchange as source `manual`.
 
 Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
+
+Manual mode can also launch a controlled Wraith browser profile through the local HTTP proxy. The browser is headed, operator-controlled, and uses the active proxy for HTTP request capture. HTTPS interception is still not enabled until a future certificate-managed MITM setup is added.
 
 Authorization Matrix / BOLA testing replays object-specific corpus requests under two or more supplied auth profiles. Safe mode only sends read-only methods, refuses out-of-scope requests, does not follow redirects, stores replay traffic as source `authz`, and persists high-confidence role-diff findings plus sanitized diff evidence.
 
