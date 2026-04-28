@@ -283,6 +283,7 @@ Wraith can manage ProjectDiscovery Nuclei as a desktop/web app asset instead of 
 - Check Nuclei engine/template status.
 - Install or update the managed Nuclei engine under the Wraith tools directory.
 - Update Nuclei templates into the Wraith-managed template directory.
+- Maintain a local Template Trust Manager with allowed/denied tags and template path allow/deny lists.
 - Run Nuclei against the active scan target and persisted corpus URLs.
 
 Results are parsed from JSONL, converted into canonical `Finding` objects, de-duplicated by stable IDs, and linked to sanitized evidence artifacts.
@@ -320,6 +321,8 @@ Asset management endpoints:
 
 ```text
 GET  http://127.0.0.1:5001/api/integrations/nuclei/status
+GET  http://127.0.0.1:5001/api/integrations/nuclei/trust
+POST http://127.0.0.1:5001/api/integrations/nuclei/trust
 POST http://127.0.0.1:5001/api/integrations/nuclei/install
 POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 ```
@@ -375,6 +378,8 @@ GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
 POST http://127.0.0.1:5001/api/authz/matrix/run
 GET  http://127.0.0.1:5001/api/integrations/nuclei/status
+GET  http://127.0.0.1:5001/api/integrations/nuclei/trust
+POST http://127.0.0.1:5001/api/integrations/nuclei/trust
 POST http://127.0.0.1:5001/api/integrations/nuclei/install
 POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 POST http://127.0.0.1:5001/api/integrations/nuclei/run

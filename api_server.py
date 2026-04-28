@@ -51,6 +51,12 @@ from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, 
 from scanner.integrations.cve_intel import enrich_findings, finding_from_dict
 from scanner.integrations.nuclei_manager import NucleiAssetManager
 from scanner.integrations.nuclei_policy import policy_options, validate_policy_acknowledgement
+from scanner.integrations.template_trust import (
+    apply_template_trust,
+    load_template_trust,
+    save_template_trust,
+    trust_config_path,
+)
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -1255,7 +1261,27 @@ def list_corpus_findings(scan_id):
 def nuclei_status_endpoint():
     payload = NucleiAssetManager().status().to_dict()
     payload['policy_options'] = policy_options()
+    payload['template_trust'] = load_template_trust().to_dict()
+    payload['template_trust_path'] = str(trust_config_path())
     return jsonify(payload)
+
+
+@app.route('/api/integrations/nuclei/trust', methods=['GET'])
+def nuclei_template_trust_get_endpoint():
+    return jsonify({
+        'path': str(trust_config_path()),
+        'config': load_template_trust().to_dict(),
+    })
+
+
+@app.route('/api/integrations/nuclei/trust', methods=['POST'])
+def nuclei_template_trust_save_endpoint():
+    payload = request.get_json(silent=True) or {}
+    config = save_template_trust(payload.get('config') or payload)
+    return jsonify({
+        'path': str(trust_config_path()),
+        'config': config.to_dict(),
+    })
 
 
 @app.route('/api/integrations/nuclei/install', methods=['POST'])
@@ -1299,14 +1325,26 @@ def run_nuclei_endpoint():
     valid_policy, policy_error = validate_policy_acknowledgement(policy_profile, policy_acknowledged)
     if not valid_policy:
         return jsonify({'error': policy_error, 'policy_options': policy_options()}), 400
+    requested_templates = _parse_list_value(payload.get('templates'))
+    trust_result = apply_template_trust(
+        templates=requested_templates,
+        tags=_parse_list_value(payload.get('tags')),
+        exclude_tags=_parse_list_value(payload.get('exclude_tags')),
+    )
+    if requested_templates and not trust_result['templates']:
+        return jsonify({
+            'error': 'All requested Nuclei template paths were blocked by the local trust policy.',
+            'template_trust': trust_result,
+        }), 400
+
     config = NucleiRunConfig(
         scan_id=scan_id,
         target_base_url=str(scan_payload.get('target_base_url') or ''),
         targets=targets,
-        templates=_parse_list_value(payload.get('templates')),
+        templates=trust_result['templates'],
         severity=_parse_list_value(payload.get('severity')) or ['critical', 'high', 'medium', 'low', 'info'],
-        tags=_parse_list_value(payload.get('tags')),
-        exclude_tags=_parse_list_value(payload.get('exclude_tags')),
+        tags=trust_result['tags'],
+        exclude_tags=trust_result['exclude_tags'],
         rate_limit=int(payload.get('rate_limit') or 5),
         timeout=int(payload.get('timeout') or 5),
         retries=int(payload.get('retries') or 0),
@@ -1330,7 +1368,14 @@ def run_nuclei_endpoint():
         repo.save_evidence_artifact(artifact)
 
     active_scan = active_scans.setdefault(scan_id, {})
-    active_scan.setdefault('nuclei_runs', []).append(result.to_dict())
+    result_payload = result.to_dict()
+    result_payload['template_trust'] = {
+        'warnings': trust_result.get('warnings', []),
+        'blocked_templates': trust_result.get('blocked_templates', []),
+        'config': trust_result.get('config', {}),
+    }
+
+    active_scan.setdefault('nuclei_runs', []).append(result_payload)
     active_scan['nuclei_summary'] = {
         'raw_count': result.raw_count,
         'findings': len(result.findings),
@@ -1343,7 +1388,7 @@ def run_nuclei_endpoint():
     active_scan['total_vulnerabilities'] = len(existing) or active_scan.get('total_vulnerabilities', 0)
     _refresh_scan_artifacts(scan_id)
 
-    return jsonify(result.to_dict())
+    return jsonify(result_payload)
 
 
 @app.route('/api/intel/cve/enrich', methods=['POST'])

@@ -46,11 +46,16 @@ export default function NucleiCve({
   nucleiResult,
   nucleiAssetState,
   nucleiAssetStatus,
+  templateTrustState,
+  templateTrustConfig,
   cveIntelState,
   cveIntelResult,
   updateNucleiConfig,
+  updateTemplateTrustConfig,
   runNucleiIntegration,
   loadNucleiStatus,
+  loadTemplateTrust,
+  saveTemplateTrust,
   installNucleiEngine,
   updateNucleiTemplates,
   enrichCveIntel,
@@ -260,6 +265,78 @@ export default function NucleiCve({
                 <span>I confirm this is an authorized professional test scope.</span>
               </label>
             )}
+          </div>
+        </Card>
+
+        <Card
+          title="Template Trust Manager"
+          eyebrow="Local Policy"
+          actions={<Button variant="ghost" onClick={loadTemplateTrust}>Reload</Button>}
+        >
+          <div className="nuclei-form">
+            <div className="nuclei-intel-header">
+              <StatusPill status={templateTrustState || 'idle'} />
+              <span>Applied before every Nuclei run</span>
+            </div>
+            <div className="form-grid compact">
+              <label className="field">
+                <span>Allowed Tags</span>
+                <input
+                  value={templateTrustConfig?.allowed_tags || ''}
+                  onChange={(event) => updateTemplateTrustConfig('allowed_tags', event.target.value)}
+                  placeholder="Optional allowlist"
+                />
+              </label>
+              <label className="field">
+                <span>Denied Tags</span>
+                <input
+                  value={templateTrustConfig?.denied_tags || ''}
+                  onChange={(event) => updateTemplateTrustConfig('denied_tags', event.target.value)}
+                  placeholder="bruteforce, destructive, dos"
+                />
+              </label>
+            </div>
+            <label className="field wide">
+              <span>Allowed Template Paths</span>
+              <textarea
+                value={templateTrustConfig?.allowed_template_paths || ''}
+                onChange={(event) => updateTemplateTrustConfig('allowed_template_paths', event.target.value)}
+                placeholder="Optional explicit directories or files. Empty means no path allowlist."
+              />
+            </label>
+            <label className="field wide">
+              <span>Denied Template Paths</span>
+              <textarea
+                value={templateTrustConfig?.denied_template_paths || ''}
+                onChange={(event) => updateTemplateTrustConfig('denied_template_paths', event.target.value)}
+                placeholder="Directories or files to block even in professional mode."
+              />
+            </label>
+            <label className="field wide">
+              <span>Trusted Sources</span>
+              <input
+                value={templateTrustConfig?.trusted_sources || ''}
+                onChange={(event) => updateTemplateTrustConfig('trusted_sources', event.target.value)}
+              />
+            </label>
+            <label className="field wide">
+              <span>Notes</span>
+              <textarea
+                value={templateTrustConfig?.notes || ''}
+                onChange={(event) => updateTemplateTrustConfig('notes', event.target.value)}
+                placeholder="Operator notes for why these template sources are trusted."
+              />
+            </label>
+            <div className="nuclei-note">
+              <span className="material-symbols-outlined">policy</span>
+              <p>
+                This policy filters template paths and tags before the Nuclei process starts.
+                It does not approve intrusive mode by itself.
+              </p>
+            </div>
+            <Button variant="secondary" onClick={saveTemplateTrust} disabled={templateTrustState === 'saving'}>
+              {templateTrustState === 'saving' ? 'Saving...' : 'Save Trust Policy'}
+            </Button>
           </div>
         </Card>
 

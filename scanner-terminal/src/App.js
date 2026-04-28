@@ -76,6 +76,15 @@ const initialNucleiConfig = {
   policyAcknowledged: false,
 };
 
+const initialTemplateTrustConfig = {
+  allowed_tags: '',
+  denied_tags: 'bruteforce, destructive, dos',
+  allowed_template_paths: '',
+  denied_template_paths: '',
+  trusted_sources: 'wraith-managed, operator-approved',
+  notes: '',
+};
+
 const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
 
 const hashToPage = {
@@ -191,6 +200,8 @@ function App() {
   const [nucleiResult, setNucleiResult] = useState(null);
   const [nucleiAssetState, setNucleiAssetState] = useState('idle');
   const [nucleiAssetStatus, setNucleiAssetStatus] = useState(null);
+  const [templateTrustState, setTemplateTrustState] = useState('idle');
+  const [templateTrustConfig, setTemplateTrustConfig] = useState(initialTemplateTrustConfig);
   const [cveIntelState, setCveIntelState] = useState('idle');
   const [cveIntelResult, setCveIntelResult] = useState(null);
 
@@ -296,6 +307,10 @@ function App() {
       }
       return next;
     });
+  };
+
+  const updateTemplateTrustConfig = (name, value) => {
+    setTemplateTrustConfig((current) => ({ ...current, [name]: value }));
   };
 
   const submitScan = async (event) => {
@@ -807,9 +822,40 @@ function App() {
     try {
       const response = await axios.get(`${API_URL}/api/integrations/nuclei/status`);
       setNucleiAssetStatus(response.data);
+      if (response.data?.template_trust) {
+        setTemplateTrustConfig(templateTrustToForm(response.data.template_trust));
+      }
       setNucleiAssetState(response.data?.ok ? 'ready' : 'missing');
     } catch (error) {
       setNucleiAssetState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const loadTemplateTrust = async () => {
+    setTemplateTrustState('loading');
+    try {
+      const response = await axios.get(`${API_URL}/api/integrations/nuclei/trust`);
+      setTemplateTrustConfig(templateTrustToForm(response.data?.config || {}));
+      setTemplateTrustState('ready');
+    } catch (error) {
+      setTemplateTrustState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const saveTemplateTrust = async () => {
+    setTemplateTrustState('saving');
+    try {
+      const response = await axios.post(`${API_URL}/api/integrations/nuclei/trust`, {
+        config: templateTrustFromForm(templateTrustConfig),
+      });
+      setTemplateTrustConfig(templateTrustToForm(response.data?.config || {}));
+      setTemplateTrustState('ready');
+      addProgress({ type: 'success', message: 'Nuclei template trust policy saved.' });
+      await loadNucleiStatus();
+    } catch (error) {
+      setTemplateTrustState('error');
       addProgress({ type: 'error', message: apiError(error) });
     }
   };
@@ -922,6 +968,7 @@ function App() {
     if (process.env.NODE_ENV === 'test') return undefined;
     if (!['automated-workspace', 'nuclei'].includes(activePage)) return undefined;
     loadNucleiStatus();
+    if (activePage === 'nuclei') loadTemplateTrust();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage]);
 
@@ -944,11 +991,16 @@ function App() {
             nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
             nucleiAssetState={nucleiAssetState}
             nucleiAssetStatus={nucleiAssetStatus}
+            templateTrustState={templateTrustState}
+            templateTrustConfig={templateTrustConfig}
             cveIntelState={cveIntelState}
             cveIntelResult={cveIntelResult || scanStatus?.cve_intel_summary || null}
             updateNucleiConfig={updateNucleiConfig}
+            updateTemplateTrustConfig={updateTemplateTrustConfig}
             runNucleiIntegration={runNucleiIntegration}
             loadNucleiStatus={loadNucleiStatus}
+            loadTemplateTrust={loadTemplateTrust}
+            saveTemplateTrust={saveTemplateTrust}
             installNucleiEngine={installNucleiEngine}
             updateNucleiTemplates={updateNucleiTemplates}
             enrichCveIntel={enrichCveIntel}
@@ -1215,6 +1267,28 @@ function parseList(value) {
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function templateTrustToForm(config) {
+  return {
+    allowed_tags: (config.allowed_tags || []).join(', '),
+    denied_tags: (config.denied_tags || []).join(', '),
+    allowed_template_paths: (config.allowed_template_paths || []).join('\n'),
+    denied_template_paths: (config.denied_template_paths || []).join('\n'),
+    trusted_sources: (config.trusted_sources || []).join(', '),
+    notes: config.notes || '',
+  };
+}
+
+function templateTrustFromForm(form) {
+  return {
+    allowed_tags: parseList(form.allowed_tags),
+    denied_tags: parseList(form.denied_tags),
+    allowed_template_paths: parseList(form.allowed_template_paths),
+    denied_template_paths: parseList(form.denied_template_paths),
+    trusted_sources: parseList(form.trusted_sources),
+    notes: form.notes || '',
+  };
 }
 
 function parseKeyValueLines(value) {
