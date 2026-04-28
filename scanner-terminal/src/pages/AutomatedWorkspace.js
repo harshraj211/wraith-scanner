@@ -17,8 +17,13 @@ export default function AutomatedWorkspace({
   nucleiConfig,
   nucleiState,
   nucleiResult,
+  nucleiAssetState,
+  nucleiAssetStatus,
   updateNucleiConfig,
   runNucleiIntegration,
+  loadNucleiStatus,
+  installNucleiEngine,
+  updateNucleiTemplates,
   refreshStatus,
   submitScan,
   onNavigate,
@@ -31,6 +36,8 @@ export default function AutomatedWorkspace({
     ? nucleiResult.findings.length
     : Number(nucleiResult?.findings || nucleiResult?.raw_count || 0);
   const nucleiErrors = Array.isArray(nucleiResult?.errors) ? nucleiResult.errors : [];
+  const templateCount = nucleiAssetStatus?.metadata?.template_count || 0;
+  const engineReady = Boolean(nucleiAssetStatus?.ok || nucleiAssetStatus?.binary_path);
   return (
     <div className="page-stack">
       <PageHeader
@@ -82,13 +89,16 @@ export default function AutomatedWorkspace({
           eyebrow="CVE Templates"
           className="dashboard-wide nuclei-card"
           actions={(
-            <Button
-              variant="secondary"
-              onClick={runNucleiIntegration}
-              disabled={!latestScanId || nucleiState === 'running'}
-            >
-              {nucleiState === 'running' ? 'Running...' : 'Run Nuclei'}
-            </Button>
+            <>
+              <Button variant="ghost" onClick={loadNucleiStatus}>Status</Button>
+              <Button
+                variant="secondary"
+                onClick={runNucleiIntegration}
+                disabled={!latestScanId || nucleiState === 'running' || !engineReady}
+              >
+                {nucleiState === 'running' ? 'Running...' : 'Run Nuclei'}
+              </Button>
+            </>
           )}
         >
           <div className="nuclei-layout">
@@ -171,6 +181,34 @@ export default function AutomatedWorkspace({
               </label>
             </div>
             <div className="nuclei-summary">
+              <div className="nuclei-asset-card">
+                <div>
+                  <span>Managed Engine</span>
+                  <strong>{engineReady ? 'Ready' : 'Missing'}</strong>
+                  <code>{nucleiAssetStatus?.binary_path || nucleiAssetStatus?.metadata?.managed_binary || 'Not installed yet'}</code>
+                </div>
+                <div>
+                  <span>Templates</span>
+                  <strong>{templateCount}</strong>
+                  <code>{nucleiAssetStatus?.template_dir || 'Managed template directory pending'}</code>
+                </div>
+                <div className="nuclei-asset-actions">
+                  <Button
+                    variant="secondary"
+                    onClick={installNucleiEngine}
+                    disabled={nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
+                  >
+                    {nucleiAssetState === 'installing' ? 'Installing...' : 'Install / Update Engine'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={updateNucleiTemplates}
+                    disabled={!engineReady || nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
+                  >
+                    {nucleiAssetState === 'updating' ? 'Updating...' : 'Update Templates'}
+                  </Button>
+                </div>
+              </div>
               <div className="nuclei-result-strip">
                 <div>
                   <span>State</span>

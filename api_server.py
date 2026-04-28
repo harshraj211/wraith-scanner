@@ -48,6 +48,7 @@ from scanner.importers.common import (
     save_candidates_to_corpus,
 )
 from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, normalize_targets
+from scanner.integrations.nuclei_manager import NucleiAssetManager
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -1207,6 +1208,30 @@ def list_corpus_findings(scan_id):
         'count': len(findings),
         'findings': findings,
     })
+
+
+@app.route('/api/integrations/nuclei/status', methods=['GET'])
+def nuclei_status_endpoint():
+    return jsonify(NucleiAssetManager().status().to_dict())
+
+
+@app.route('/api/integrations/nuclei/install', methods=['POST'])
+def install_nuclei_endpoint():
+    payload = request.get_json(silent=True) or {}
+    version = str(payload.get('version') or 'latest').strip() or 'latest'
+    result = NucleiAssetManager().install_or_update_engine(version=version)
+    status = 200 if result.ok else 400
+    return jsonify(result.to_dict()), status
+
+
+@app.route('/api/integrations/nuclei/templates/update', methods=['POST'])
+def update_nuclei_templates_endpoint():
+    payload = request.get_json(silent=True) or {}
+    result = NucleiAssetManager().update_templates(
+        process_timeout=int(payload.get('process_timeout') or 180)
+    )
+    status = 200 if result.ok else 400
+    return jsonify(result.to_dict()), status
 
 
 @app.route('/api/integrations/nuclei/run', methods=['POST'])

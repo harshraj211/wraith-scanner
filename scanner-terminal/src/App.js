@@ -182,6 +182,8 @@ function App() {
   const [nucleiConfig, setNucleiConfig] = useState(initialNucleiConfig);
   const [nucleiState, setNucleiState] = useState('idle');
   const [nucleiResult, setNucleiResult] = useState(null);
+  const [nucleiAssetState, setNucleiAssetState] = useState('idle');
+  const [nucleiAssetStatus, setNucleiAssetStatus] = useState(null);
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -782,6 +784,52 @@ function App() {
     }
   };
 
+  const loadNucleiStatus = async () => {
+    setNucleiAssetState((current) => (current === 'installing' || current === 'updating' ? current : 'loading'));
+    try {
+      const response = await axios.get(`${API_URL}/api/integrations/nuclei/status`);
+      setNucleiAssetStatus(response.data);
+      setNucleiAssetState(response.data?.ok ? 'ready' : 'missing');
+    } catch (error) {
+      setNucleiAssetState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const installNucleiEngine = async () => {
+    setNucleiAssetState('installing');
+    try {
+      const response = await axios.post(`${API_URL}/api/integrations/nuclei/install`, { version: 'latest' });
+      setNucleiAssetStatus(response.data);
+      setNucleiAssetState(response.data?.ok ? 'ready' : 'error');
+      addProgress({ type: response.data?.ok ? 'success' : 'error', message: response.data?.ok ? 'Managed Nuclei engine installed.' : (response.data?.error || 'Nuclei install failed.') });
+      await loadNucleiStatus();
+    } catch (error) {
+      setNucleiAssetState('error');
+      const payload = error?.response?.data;
+      if (payload) setNucleiAssetStatus(payload);
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const updateNucleiTemplates = async () => {
+    setNucleiAssetState('updating');
+    try {
+      const response = await axios.post(`${API_URL}/api/integrations/nuclei/templates/update`, {
+        process_timeout: 180,
+      });
+      setNucleiAssetStatus(response.data);
+      setNucleiAssetState(response.data?.ok ? 'ready' : 'error');
+      addProgress({ type: response.data?.ok ? 'success' : 'error', message: response.data?.ok ? 'Nuclei templates updated.' : (response.data?.error || 'Nuclei template update failed.') });
+      await loadNucleiStatus();
+    } catch (error) {
+      setNucleiAssetState('error');
+      const payload = error?.response?.data;
+      if (payload) setNucleiAssetStatus(payload);
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
   const downloadPdf = () => {
     if (latestScanId) window.open(`${API_URL}/api/download/${latestScanId}`, '_blank');
   };
@@ -825,6 +873,13 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage]);
 
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'test') return undefined;
+    if (activePage !== 'automated-workspace') return undefined;
+    loadNucleiStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage]);
+
   const renderPage = () => {
     switch (activePage) {
       case 'mode':
@@ -842,8 +897,13 @@ function App() {
             nucleiConfig={nucleiConfig}
             nucleiState={nucleiState}
             nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
+            nucleiAssetState={nucleiAssetState}
+            nucleiAssetStatus={nucleiAssetStatus}
             updateNucleiConfig={updateNucleiConfig}
             runNucleiIntegration={runNucleiIntegration}
+            loadNucleiStatus={loadNucleiStatus}
+            installNucleiEngine={installNucleiEngine}
+            updateNucleiTemplates={updateNucleiTemplates}
             refreshStatus={() => refreshStatus(latestScanId)}
             submitScan={submitScan}
             onNavigate={navigate}

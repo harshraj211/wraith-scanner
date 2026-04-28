@@ -8,6 +8,7 @@ from unittest.mock import patch
 from api_server import app
 from scanner.core.models import RequestRecord, ScanConfig
 from scanner.integrations.nuclei_adapter import NucleiAdapter, NucleiRunConfig, parse_jsonl
+from scanner.integrations.nuclei_manager import NucleiAssetManager, select_release_asset
 from scanner.storage.repository import StorageRepository
 
 
@@ -69,6 +70,35 @@ class NucleiAdapterTests(unittest.TestCase):
         self.assertIn("-duc", command)
         self.assertIn("-exclude-tags", command)
         self.assertIn("destructive", ",".join(command))
+
+    def test_manager_selects_release_asset_for_platform(self):
+        release = {
+            "assets": [
+                {"name": "nuclei_3.0.0_linux_arm64.zip"},
+                {"name": "nuclei_3.0.0_windows_amd64.zip"},
+                {"name": "checksums.txt"},
+            ]
+        }
+        asset = select_release_asset(release, ["windows", "win"], ["amd64"])
+        self.assertEqual(asset["name"], "nuclei_3.0.0_windows_amd64.zip")
+
+    @patch("scanner.integrations.nuclei_manager.nuclei_version", return_value="nuclei v3")
+    @patch("scanner.integrations.nuclei_manager.find_any_nuclei_binary", return_value="nuclei")
+    @patch("scanner.integrations.nuclei_manager.subprocess.run")
+    def test_template_update_uses_managed_directory(self, run_mock, _binary, _version):
+        run_mock.return_value = subprocess.CompletedProcess(["nuclei"], 0, "updated", "")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = NucleiAssetManager(
+                tool_root=Path(tmpdir) / "tools",
+                template_root=Path(tmpdir) / "templates",
+            )
+            result = manager.update_templates(process_timeout=30)
+
+        self.assertTrue(result.ok)
+        command = run_mock.call_args.args[0]
+        self.assertIn("-update-templates", command)
+        self.assertIn("-update-template-dir", command)
+        self.assertIn("-disable-update-check", command)
 
     @patch("api_server.NucleiAdapter")
     def test_nuclei_api_persists_findings_and_evidence(self, adapter_cls):

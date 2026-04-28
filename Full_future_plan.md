@@ -521,6 +521,7 @@ Add a `NucleiAdapter`:
 
 - Run Nuclei against discovered hosts/endpoints. **Implemented v1:** Wraith can run local Nuclei against explicit targets or persisted corpus URLs.
 - Support template path configuration. **Implemented v1:** API and frontend accept template files/directories.
+- Managed desktop/web asset updates. **Implemented v1:** status, engine install/update, and template update endpoints plus Automated Workspace controls.
 - Support private template repositories.
 - Pin template version/hash in reports.
 - Import Nuclei results into Wraith canonical `Finding`. **Implemented v1:** JSONL matches are converted to canonical findings and evidence artifacts.
@@ -675,7 +676,7 @@ Desktop app starts:
 ## Phase H: CVE and Nuclei
 
 1. Nuclei adapter. **V1 implemented:** backend adapter, API endpoint, frontend Automated Workspace panel, canonical finding import, and evidence persistence.
-2. Template management.
+2. Template management. **V1 implemented:** managed status/install/update endpoints and UI controls for engine and template updates.
 3. CVE enrichment.
 4. EPSS/KEV prioritization.
 

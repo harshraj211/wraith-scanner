@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -17,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 from scanner.core.models import EvidenceArtifact, Finding, stable_hash
+from scanner.integrations.nuclei_manager import find_any_nuclei_binary, managed_template_dir
 from scanner.utils.redaction import redact, redact_text
 
 
@@ -58,6 +58,10 @@ class NucleiRunConfig:
     def __post_init__(self) -> None:
         self.targets = normalize_targets(self.targets)
         self.templates = _clean_list(self.templates)
+        if not self.templates:
+            template_dir = managed_template_dir()
+            if template_dir.exists():
+                self.templates = [str(template_dir)]
         self.severity = [item.lower() for item in _clean_list(self.severity)] or list(DEFAULT_SEVERITIES)
         self.tags = _clean_list(self.tags)
         self.exclude_tags = _clean_list(self.exclude_tags)
@@ -210,10 +214,7 @@ class NucleiAdapter:
 
 
 def find_nuclei_binary() -> str:
-    configured = os.environ.get("WRAITH_NUCLEI_BIN", "").strip()
-    if configured:
-        return configured
-    return shutil.which("nuclei") or shutil.which("nuclei.exe") or ""
+    return find_any_nuclei_binary()
 
 
 def normalize_targets(values: Iterable[Any]) -> List[str]:

@@ -97,10 +97,11 @@ cd ..
 ## Optional Integrations
 
 - `semgrep`: recommended for the full SAST experience. Without it, Wraith still runs taint, secret, and dependency analysis.
-- `nuclei`: optional ProjectDiscovery binary for known CVE/template coverage. Wraith shells out locally, imports JSONL matches, and keeps safe template exclusions enabled by default.
+- `nuclei`: optional ProjectDiscovery engine for known CVE/template coverage. Wraith can now install/update a managed local binary and template directory from the web UI, import JSONL matches, and keep safe template exclusions enabled by default.
 - `OPENAI_API_KEY`: enables optional LLM-assisted payload mutation in the response-intelligence layer. Without it, Wraith uses the built-in heuristic mutator.
 - `WRAITH_DB_PATH`: optional path for the local SQLite corpus database. Defaults to `reports/wraith.sqlite3`.
-- `WRAITH_NUCLEI_BIN`: optional explicit path to the Nuclei executable if it is not on `PATH`.
+- `WRAITH_NUCLEI_BIN`: optional explicit path to the Nuclei executable if you do not want to use the Wraith-managed engine.
+- `WRAITH_HOME`, `WRAITH_TOOLS_DIR`, `WRAITH_NUCLEI_TEMPLATE_DIR`: optional paths for desktop-managed scanner assets.
 
 ## Run
 
@@ -277,12 +278,19 @@ Auth profiles are saved to the local corpus with secrets redacted. Playwright st
 
 ### Nuclei Coverage
 
-Wraith can run a locally installed ProjectDiscovery Nuclei binary against the active scan target and persisted corpus URLs. Results are parsed from JSONL, converted into canonical `Finding` objects, de-duplicated by stable IDs, and linked to sanitized evidence artifacts.
+Wraith can manage ProjectDiscovery Nuclei as a desktop/web app asset instead of requiring terminal setup. The Automated Workspace exposes buttons to:
+
+- Check Nuclei engine/template status.
+- Install or update the managed Nuclei engine under the Wraith tools directory.
+- Update Nuclei templates into the Wraith-managed template directory.
+- Run Nuclei against the active scan target and persisted corpus URLs.
+
+Results are parsed from JSONL, converted into canonical `Finding` objects, de-duplicated by stable IDs, and linked to sanitized evidence artifacts.
 
 The default integration is conservative:
 
 - Uses bounded rate, HTTP timeout, and process timeout settings.
-- Does not run template auto-update from Wraith.
+- Keeps engine/template update as explicit UI/API actions so runs are reproducible.
 - Excludes `bruteforce`, `dos`, `fuzz`, `fuzzing`, `intrusive`, `rce`, and `destructive` template tags unless explicitly allowed.
 - Stores redacted evidence only.
 
@@ -299,6 +307,14 @@ Run from the frontend Automated Workspace using the Nuclei Coverage panel, or ca
   "process_timeout": 120,
   "allow_intrusive": false
 }
+```
+
+Asset management endpoints:
+
+```text
+GET  http://127.0.0.1:5001/api/integrations/nuclei/status
+POST http://127.0.0.1:5001/api/integrations/nuclei/install
+POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 ```
 
 ## Terminal Commands
@@ -327,6 +343,9 @@ GET http://127.0.0.1:5001/api/corpus/<scan-id>/requests
 GET http://127.0.0.1:5001/api/corpus/request/<request-id>
 GET http://127.0.0.1:5001/api/corpus/<scan-id>/findings
 POST http://127.0.0.1:5001/api/authz/matrix/run
+GET  http://127.0.0.1:5001/api/integrations/nuclei/status
+POST http://127.0.0.1:5001/api/integrations/nuclei/install
+POST http://127.0.0.1:5001/api/integrations/nuclei/templates/update
 POST http://127.0.0.1:5001/api/integrations/nuclei/run
 POST http://127.0.0.1:5001/api/manual/replay
 POST http://127.0.0.1:5001/api/manual/proxy/start
