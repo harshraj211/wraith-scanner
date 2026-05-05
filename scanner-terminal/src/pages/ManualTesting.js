@@ -18,7 +18,7 @@ export default function ManualTesting({
       <PageHeader
         eyebrow="Manual"
         title="Manual Testing"
-        description="Proxy capture, Repeater, Intruder, Decoder, and report evidence workflows."
+        description="Proxy capture, Repeater, Intruder, Decoder, Comparer, and report evidence workflows."
         actions={(
           <>
             <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
@@ -32,7 +32,7 @@ export default function ManualTesting({
         <MetricCard label="Proxy" value={proxyStatus?.running ? 'Running' : 'Stopped'} tone={proxyStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Browser" value={browserStatus?.running ? 'Open' : 'Closed'} tone={browserStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Captured" value={corpusRequests.length} tone="cyan" />
-        <MetricCard label="Tools" value="4" detail="proxy/repeater/intruder/decoder" tone="blue" />
+        <MetricCard label="Tools" value="5" detail="proxy/repeater/intruder/decoder/comparer" tone="blue" />
       </div>
       <Card title="Controlled Wraith Browser" eyebrow="Capture">
         <p>
@@ -78,6 +78,7 @@ export default function ManualTesting({
           ['repeater', 'Repeater', 'Edit and replay individual requests with response diffs.'],
           ['intruder', 'Intruder', 'Run capped payload lists with clustering and safe-mode controls.'],
           ['decoder', 'Decoder', 'Chain URL/Base64/JWT/JSON transformations.'],
+          ['comparer', 'Comparer', 'Compare response headers, JSON values, body hashes, size, and timing.'],
         ].map(([id, title, body]) => (
           <Card title={title} eyebrow="Manual Tool" key={id}>
             <p>{body}</p>

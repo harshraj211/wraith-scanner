@@ -4,6 +4,8 @@ Date: 2026-04-27
 
 This file replaces the older long-form benchmark plan. The new direction is more product-specific: Wraith should become a clean professional VA + Proof platform with a web UI, optional desktop `.exe`, controlled browser, request capture, manual testing tools, strong reporting, and deeper scanner coverage.
 
+Enterprise phase tracking is now split into [docs/ENTERPRISE_UPGRADE_PLAN.md](docs/ENTERPRISE_UPGRADE_PLAN.md). That plan organizes the next upgrades into Burp-like manual workbench, vulnerability management, CI/CD, server scale, distributed agents, RBAC, and premium analytics phases.
+
 The product thesis stays:
 
 > Wraith finds modern web vulnerabilities, safely proves high-confidence issues, links runtime evidence to source-code context, and produces report-ready artifacts that a professional can defend.

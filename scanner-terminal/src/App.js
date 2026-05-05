@@ -15,6 +15,7 @@ import ProxyHistory from './pages/ProxyHistory';
 import Repeater from './pages/Repeater';
 import Intruder from './pages/Intruder';
 import Decoder from './pages/Decoder';
+import Comparer from './pages/Comparer';
 import RepositoryScan from './pages/RepositoryScan';
 import NucleiCve from './pages/NucleiCve';
 import ProofMode from './pages/ProofMode';
@@ -122,6 +123,7 @@ const hashToPage = {
   '#repeater': 'repeater',
   '#intruder': 'intruder',
   '#decoder': 'decoder',
+  '#comparer': 'comparer',
   '#repository': 'repository',
   '#repository-scan': 'repository',
   '#nuclei': 'nuclei',
@@ -147,6 +149,7 @@ const pageToHash = {
   repeater: '#replay',
   intruder: '#intruder',
   decoder: '#decoder',
+  comparer: '#comparer',
   repository: '#repository-scan',
   nuclei: '#nuclei-cve',
   proof: '#proof-mode',
@@ -182,6 +185,9 @@ function App() {
   const [intruderState, setIntruderState] = useState('idle');
   const [intruderResults, setIntruderResults] = useState([]);
   const [selectedIntruderResultId, setSelectedIntruderResultId] = useState('');
+  const [comparerSelection, setComparerSelection] = useState({ baselineRequestId: '', candidateRequestId: '' });
+  const [comparerState, setComparerState] = useState('idle');
+  const [comparerResult, setComparerResult] = useState(null);
   const [launchState, setLaunchState] = useState('idle');
   const [latestScanId, setLatestScanId] = useState('');
   const [pollingScanId, setPollingScanId] = useState('');
@@ -311,6 +317,10 @@ function App() {
 
   const updateIntruderConfig = (name, value) => {
     setIntruderConfig((current) => ({ ...current, [name]: value }));
+  };
+
+  const updateComparerSelection = (name, value) => {
+    setComparerSelection((current) => ({ ...current, [name]: value }));
   };
 
   const updateRepoForm = (name, value) => {
@@ -807,6 +817,24 @@ function App() {
     const nextRequest = manualRequestFromRecord(requestRecord, manualRequest, latestScanId);
     setManualRequest(nextRequest);
     navigate('intruder');
+  };
+
+  const runComparer = async () => {
+    if (!comparerSelection.baselineRequestId || !comparerSelection.candidateRequestId) return;
+    setComparerState('running');
+    setComparerResult(null);
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/compare-responses`, {
+        baseline_request_id: comparerSelection.baselineRequestId,
+        candidate_request_id: comparerSelection.candidateRequestId,
+      });
+      setComparerResult(response.data.diff || null);
+      setComparerState('complete');
+      addProgress({ scan_id: latestScanId, type: 'success', message: 'Comparer generated response diff.' });
+    } catch (error) {
+      setComparerState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
+    }
   };
 
   const sendIntruderResultToRepeater = (result) => {
@@ -1309,6 +1337,19 @@ function App() {
         );
       case 'decoder':
         return <Decoder />;
+      case 'comparer':
+        return (
+          <Comparer
+            latestScanId={latestScanId}
+            corpusRequests={corpusRequests}
+            comparerSelection={comparerSelection}
+            comparerState={comparerState}
+            comparerResult={comparerResult}
+            updateComparerSelection={updateComparerSelection}
+            runComparer={runComparer}
+            loadCorpus={loadCorpus}
+          />
+        );
       case 'repository':
         return <RepositoryScan repoForm={repoForm} updateRepoForm={updateRepoForm} submitRepoScan={submitRepoScan} repoState={repoState} progressEvents={progressEvents} />;
       case 'nuclei':

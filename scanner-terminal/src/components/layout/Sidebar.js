@@ -15,7 +15,7 @@ const navItems = [
 
 function isActive(activePage, item) {
   if (item === 'automated-setup') return ['automated-setup', 'automated-workspace'].includes(activePage);
-  if (item === 'manual') return ['manual', 'proxy', 'repeater', 'intruder', 'decoder'].includes(activePage);
+  if (item === 'manual') return ['manual', 'proxy', 'repeater', 'intruder', 'decoder', 'comparer'].includes(activePage);
   return activePage === item;
 }
 

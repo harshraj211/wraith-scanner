@@ -1754,6 +1754,72 @@ def download_evidence_bundle(finding_id):
     )
 
 
+def _compare_headers(baseline_headers, candidate_headers):
+    baseline = {str(key).lower(): str(value) for key, value in (baseline_headers or {}).items()}
+    candidate = {str(key).lower(): str(value) for key, value in (candidate_headers or {}).items()}
+    names = sorted(set(baseline) | set(candidate))
+    rows = []
+    for name in names:
+        previous = baseline.get(name, '')
+        current = candidate.get(name, '')
+        if previous != current:
+            rows.append({
+                'name': name,
+                'previous': previous,
+                'current': current,
+                'change': 'added' if not previous else 'removed' if not current else 'changed',
+            })
+    return rows[:80]
+
+
+def _load_json_excerpt(value):
+    if not value:
+        return None
+    try:
+        return _json.loads(value)
+    except Exception:
+        return None
+
+
+def _json_diff(previous, current, path='$', rows=None):
+    rows = rows if rows is not None else []
+    if len(rows) >= 120:
+        return rows
+    if type(previous) is not type(current):
+        rows.append({'path': path, 'change': 'type_changed', 'previous': type(previous).__name__, 'current': type(current).__name__})
+        return rows
+    if isinstance(previous, dict):
+        keys = sorted(set(previous) | set(current))
+        for key in keys:
+            child_path = f"{path}.{key}"
+            if key not in previous:
+                rows.append({'path': child_path, 'change': 'added', 'previous': None, 'current': _json_preview(current.get(key))})
+            elif key not in current:
+                rows.append({'path': child_path, 'change': 'removed', 'previous': _json_preview(previous.get(key)), 'current': None})
+            else:
+                _json_diff(previous.get(key), current.get(key), child_path, rows)
+            if len(rows) >= 120:
+                break
+        return rows
+    if isinstance(previous, list):
+        if len(previous) != len(current):
+            rows.append({'path': f'{path}.length', 'change': 'changed', 'previous': len(previous), 'current': len(current)})
+        for index, (left, right) in enumerate(zip(previous[:20], current[:20])):
+            _json_diff(left, right, f'{path}[{index}]', rows)
+            if len(rows) >= 120:
+                break
+        return rows
+    if previous != current:
+        rows.append({'path': path, 'change': 'changed', 'previous': _json_preview(previous), 'current': _json_preview(current)})
+    return rows
+
+
+def _json_preview(value):
+    if isinstance(value, (dict, list)):
+        return _json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)[:240]
+    return value
+
+
 @app.route('/api/manual/compare-responses', methods=['POST'])
 def manual_compare_responses():
     repo = _storage_repo()
@@ -1779,6 +1845,16 @@ def manual_compare_responses():
         'baseline_title': baseline_response.get('title') or '',
         'candidate_title': candidate_response.get('title') or '',
     }
+    header_changes = _compare_headers(baseline_response.get('headers'), candidate_response.get('headers'))
+    baseline_json = _load_json_excerpt(baseline_response.get('body_excerpt') or '')
+    candidate_json = _load_json_excerpt(candidate_response.get('body_excerpt') or '')
+    diff['header_changes'] = header_changes
+    diff['header_change_count'] = len(header_changes)
+    diff['json'] = {
+        'comparable': baseline_json is not None and candidate_json is not None,
+        'changes': _json_diff(baseline_json, candidate_json) if baseline_json is not None and candidate_json is not None else [],
+    }
+    diff['json_change_count'] = len(diff['json']['changes'])
     finding_id = str(payload.get('finding_id') or '').strip()
     artifact = None
     if finding_id:

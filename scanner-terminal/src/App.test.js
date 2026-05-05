@@ -84,6 +84,17 @@ test('manual intruder exposes capped payload runner controls', () => {
   expect(screen.getByRole('button', { name: /run attack/i })).toBeInTheDocument();
 });
 
+test('manual workbench opens comparer workflow', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: /manual workbench/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^comparer$/i }));
+
+  expect(screen.getByRole('heading', { name: /^comparer$/i })).toBeInTheDocument();
+  expect(screen.getByLabelText(/baseline request/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/candidate request/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^compare$/i })).toBeInTheDocument();
+});
+
 test('finding drawer shows linked evidence artifacts', () => {
   const exportEvidence = jest.fn();
   render(

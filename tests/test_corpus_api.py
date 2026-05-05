@@ -115,8 +115,8 @@ class CorpusApiTests(unittest.TestCase):
             req_b = RequestRecord.create(scan_id=scan.scan_id, source="manual", method="GET", url="https://app.example.test/b")
             repo.save_request(req_a)
             repo.save_request(req_b)
-            repo.save_response(ResponseRecord.create(request_id=req_a.request_id, status_code=200, headers={"Content-Type": "text/html"}, body="old", response_time_ms=10))
-            repo.save_response(ResponseRecord.create(request_id=req_b.request_id, status_code=500, headers={"Content-Type": "text/html"}, body="new body", response_time_ms=25))
+            repo.save_response(ResponseRecord.create(request_id=req_a.request_id, status_code=200, headers={"Content-Type": "application/json", "X-Trace": "one"}, body=json.dumps({"role": "user", "items": [1]}), response_time_ms=10))
+            repo.save_response(ResponseRecord.create(request_id=req_b.request_id, status_code=500, headers={"Content-Type": "application/json", "X-Trace": "two"}, body=json.dumps({"role": "admin", "items": [1, 2], "debug": True}), response_time_ms=25))
             finding = Finding.from_legacy({"type": "manual", "title": "Manual diff", "url": req_b.url, "confidence": 80}, target_url=scan.target_base_url, scan_id=scan.scan_id)
             repo.save_finding(finding)
 
@@ -131,6 +131,9 @@ class CorpusApiTests(unittest.TestCase):
                 payload = response.get_json()
                 self.assertEqual(payload["diff"]["status_delta"], "200 -> 500")
                 self.assertTrue(payload["diff"]["body_changed"])
+                self.assertGreaterEqual(payload["diff"]["header_change_count"], 1)
+                self.assertGreaterEqual(payload["diff"]["json_change_count"], 2)
+                self.assertTrue(payload["diff"]["json"]["comparable"])
                 self.assertEqual(payload["artifact"]["artifact_type"], "diff")
             repo.close()
 

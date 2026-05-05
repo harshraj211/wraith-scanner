@@ -16,6 +16,7 @@ Phase 2 moves Wraith closer to a Burp-style manual testing workflow while keepin
 - Repeater now supports saving requests into the corpus without sending them.
 - Repeater tracks recent attempts per tab and summarizes response diffs by status, length, time, body hash, and title.
 - Repeater includes side-by-side body and header diff previews for recent attempts.
+- Comparer now has a dedicated manual page for comparing stored corpus responses by status, timing, size, body hash, headers, and JSON semantic changes without resending traffic.
 - Intruder now supports:
   - grep-match text checks
   - regex extraction from response excerpts

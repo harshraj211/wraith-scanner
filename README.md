@@ -153,7 +153,7 @@ cd scanner-terminal
 npm start
 ```
 
-The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, response inspector, Decoder, reporting actions, and terminal panel. The sidebar also includes a dedicated `Nuclei & CVE` page for managed Nuclei engine/template updates, policy selection, template runs, and CVE enrichment.
+The Wraith website opens on `http://127.0.0.1:3000`. It starts with a product home page, then lets you choose Automated Scan or Manual Scan. Automated mode uses a Burp Enterprise-inspired scan workspace with a scan list, status strip, tabs, visual dashboards, corpus, terminal, and PDF/JSON report actions. Manual mode provides HTTP proxy capture, request history, a Repeater-style editor, Intruder, Decoder, Comparer, response inspector, reporting actions, and terminal panel. The sidebar also includes a dedicated `Nuclei & CVE` page for managed Nuclei engine/template updates, policy selection, template runs, and CVE enrichment.
 
 ### Frontend Architecture
 
@@ -162,7 +162,7 @@ The React frontend now uses a reusable enterprise dashboard structure instead of
 - `src/components/layout`: shared `AppShell`, `Sidebar`, `Topbar`, and `PageHeader`
 - `src/components/ui`: buttons, cards, badges, tables, drawers, terminal/code panels, and empty states
 - `src/components/scanner`: scan status, severity summary, evidence, proof, request/response, timeline, and export panels
-- `src/pages`: Overview, Automated Scan Setup, Automated Workspace, Findings, Evidence Corpus, Manual Testing, Proxy History, Repeater, Intruder, Decoder, Repository Scan, Proof Mode, Reports, and Settings
+- `src/pages`: Overview, Automated Scan Setup, Automated Workspace, Findings, Evidence Corpus, Manual Testing, Proxy History, Repeater, Intruder, Decoder, Comparer, Repository Scan, Proof Mode, Reports, and Settings
 
 The visual system uses a dark navy cybersecurity theme, cyan primary actions, severity-aware colors, Inter UI text, and IBM Plex Mono for HTTP, terminal, JSON, and logs.
 
@@ -448,6 +448,7 @@ POST http://127.0.0.1:5001/api/manual/proxy/stop
 POST http://127.0.0.1:5001/api/manual/browser/open
 GET  http://127.0.0.1:5001/api/manual/browser/status
 POST http://127.0.0.1:5001/api/manual/browser/close
+POST http://127.0.0.1:5001/api/manual/compare-responses
 POST http://127.0.0.1:5001/api/proof/<finding-id>/task
 GET  http://127.0.0.1:5001/api/proof/tasks
 POST http://127.0.0.1:5001/api/proof/<task-id>/run
@@ -463,6 +464,8 @@ Manual proxy capture starts a local HTTP proxy, stores captured requests/respons
 Manual findings created from proxy history store linked sanitized evidence artifacts automatically. The selected request, latest response, and operator note are saved as `request`, `response`, and `log` artifacts tied to the finding ID.
 
 Manual mode can also launch a controlled Wraith browser profile through the local HTTP proxy. The browser is headed, operator-controlled, and uses the active proxy for HTTP request capture. HTTPS interception is still not enabled until a future certificate-managed MITM setup is added.
+
+The Comparer page compares two stored corpus responses by status, length, timing, body hash, header changes, and JSON semantic changes. It uses sanitized corpus data and does not resend traffic.
 
 Authorization Matrix / BOLA testing replays object-specific corpus requests under two or more supplied auth profiles. Safe mode only sends read-only methods, refuses out-of-scope requests, does not follow redirects, stores replay traffic as source `authz`, and persists high-confidence role-diff findings plus sanitized diff evidence.
 
