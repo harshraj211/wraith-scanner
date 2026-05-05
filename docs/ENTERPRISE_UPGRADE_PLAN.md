@@ -15,8 +15,8 @@ Goal: make Wraith useful as a daily authorized web testing console.
 Priority upgrades:
 
 1. HTTPS interception architecture
-   - Local CA generation.
-   - Operator-visible certificate install guide.
+   - Local CA generation. Implemented as a prep layer.
+   - Operator-visible certificate install guide. Implemented as a prep layer.
    - Scope allowlist and excluded hosts before interception.
    - HTTPS request/response capture.
    - WebSocket capture.
@@ -42,7 +42,10 @@ Priority upgrades:
    - Timing comparison.
    - Send selected corpus/repeater responses into comparison.
 
-Current start: dedicated Comparer workflow backed by the existing manual response comparison API.
+Current start:
+
+- Dedicated Comparer workflow backed by the existing manual response comparison API.
+- Local CA status/generation/download endpoints and Manual Testing UI prep for future scoped HTTPS interception.
 
 ## Phase 2: Enterprise Vulnerability Management
 

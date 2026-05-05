@@ -58,6 +58,7 @@ from scanner.integrations.template_trust import (
     trust_config_path,
 )
 from scanner.manual.browser_launcher import WraithBrowserController
+from scanner.manual.certificates import WraithCAManager
 from scanner.manual.passive import run_passive_checks
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
@@ -100,6 +101,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 active_scans = {}
 manual_proxy = WraithProxyController()
 wraith_browser = WraithBrowserController()
+manual_ca = WraithCAManager()
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
@@ -2046,7 +2048,54 @@ def manual_proxy_stop():
 
 @app.route('/api/manual/proxy/status', methods=['GET'])
 def manual_proxy_status():
-    return jsonify(manual_proxy.status())
+    status = manual_proxy.status()
+    ca_status = manual_ca.status()
+    status['https_interception'] = {
+        'enabled': False,
+        'ready': ca_status.https_interception_ready,
+        'reason': 'HTTPS interception is certificate-gated and not enabled in this build.',
+        'ca': ca_status.to_dict(),
+    }
+    return jsonify(status)
+
+
+@app.route('/api/manual/proxy/ca/status', methods=['GET'])
+def manual_proxy_ca_status():
+    return jsonify(manual_ca.status().to_dict())
+
+
+@app.route('/api/manual/proxy/ca/generate', methods=['POST'])
+def manual_proxy_ca_generate():
+    payload = request.get_json(silent=True) or {}
+    status = manual_ca.generate(
+        overwrite=bool(payload.get('overwrite')),
+        common_name=str(payload.get('common_name') or '').strip() or 'Wraith Local Manual Proxy CA',
+    )
+    http_status = 200 if status.available else 503
+    return jsonify(status.to_dict()), http_status
+
+
+@app.route('/api/manual/proxy/ca/download', methods=['GET'])
+def manual_proxy_ca_download():
+    status = manual_ca.status()
+    if not status.generated or not manual_ca.cert_path.exists():
+        return jsonify({'error': 'Wraith local CA has not been generated yet'}), 404
+    return send_file(
+        str(manual_ca.cert_path),
+        as_attachment=True,
+        download_name='wraith-local-ca.crt',
+        mimetype='application/x-x509-ca-cert',
+    )
+
+
+@app.route('/api/manual/proxy/ca/guide', methods=['GET'])
+def manual_proxy_ca_guide():
+    status = manual_ca.status()
+    return jsonify({
+        'status': status.to_dict(),
+        'steps': status.install_guidance,
+        'warning': 'Only install this CA for authorized Wraith testing profiles. Remove it after the engagement.',
+    })
 
 
 @app.route('/api/manual/proxy/intercept', methods=['POST'])

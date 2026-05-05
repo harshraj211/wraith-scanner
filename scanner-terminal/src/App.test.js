@@ -66,6 +66,7 @@ test('decoder chains repeated transforms from output', () => {
 test('manual repeater supports multiple request tabs', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /manual workbench/i }));
+  expect(screen.getByRole('heading', { name: /https interception prep/i })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: /^repeater$/i }));
 
   expect(screen.getByRole('button', { name: /manual request/i })).toBeInTheDocument();

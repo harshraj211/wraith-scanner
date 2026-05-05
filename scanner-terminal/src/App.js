@@ -207,6 +207,8 @@ function App() {
   const [proxyStatus, setProxyStatus] = useState({ running: false });
   const [proxyState, setProxyState] = useState('idle');
   const [pendingProxyRequests, setPendingProxyRequests] = useState([]);
+  const [proxyCaStatus, setProxyCaStatus] = useState(null);
+  const [proxyCaState, setProxyCaState] = useState('idle');
   const [browserState, setBrowserState] = useState('idle');
   const [browserStatus, setBrowserStatus] = useState({ running: false });
   const [repoForm, setRepoForm] = useState({ url: '', token: '', branch: 'main' });
@@ -647,6 +649,35 @@ function App() {
     } catch (error) {
       addProgress({ type: 'error', message: apiError(error) });
     }
+  };
+
+  const refreshProxyCaStatus = async () => {
+    setProxyCaState((current) => (current === 'generating' ? current : 'loading'));
+    try {
+      const response = await axios.get(`${API_URL}/api/manual/proxy/ca/status`);
+      setProxyCaStatus(response.data);
+      setProxyCaState('ready');
+    } catch (error) {
+      setProxyCaState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const generateProxyCa = async () => {
+    setProxyCaState('generating');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/proxy/ca/generate`, {});
+      setProxyCaStatus(response.data);
+      setProxyCaState('generated');
+      addProgress({ type: 'success', message: 'Wraith local CA generated for future HTTPS interception setup.' });
+    } catch (error) {
+      setProxyCaState('error');
+      addProgress({ type: 'error', message: apiError(error) });
+    }
+  };
+
+  const downloadProxyCa = () => {
+    window.open(`${API_URL}/api/manual/proxy/ca/download`, '_blank');
   };
 
   const startManualProxy = async () => {
@@ -1169,6 +1200,7 @@ function App() {
     if (process.env.NODE_ENV === 'test') return undefined;
     if (!['manual', 'proxy'].includes(activePage)) return undefined;
     refreshProxyStatus();
+    refreshProxyCaStatus();
     refreshBrowserStatus();
     const timer = window.setInterval(refreshProxyStatus, 5000);
     const browserTimer = window.setInterval(refreshBrowserStatus, 5000);
@@ -1259,6 +1291,11 @@ function App() {
             onNavigate={navigate}
             proxyStatus={proxyStatus}
             corpusRequests={corpusRequests}
+            proxyCaStatus={proxyCaStatus}
+            proxyCaState={proxyCaState}
+            refreshProxyCaStatus={refreshProxyCaStatus}
+            generateProxyCa={generateProxyCa}
+            downloadProxyCa={downloadProxyCa}
             browserState={browserState}
             browserStatus={browserStatus}
             openWraithBrowser={openWraithBrowser}

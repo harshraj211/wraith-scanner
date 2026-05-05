@@ -8,6 +8,11 @@ export default function ManualTesting({
   onNavigate,
   proxyStatus,
   corpusRequests,
+  proxyCaStatus,
+  proxyCaState,
+  refreshProxyCaStatus,
+  generateProxyCa,
+  downloadProxyCa,
   browserState,
   browserStatus,
   openWraithBrowser,
@@ -32,6 +37,7 @@ export default function ManualTesting({
         <MetricCard label="Proxy" value={proxyStatus?.running ? 'Running' : 'Stopped'} tone={proxyStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Browser" value={browserStatus?.running ? 'Open' : 'Closed'} tone={browserStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Captured" value={corpusRequests.length} tone="cyan" />
+        <MetricCard label="Local CA" value={proxyCaStatus?.generated ? 'Ready' : 'Missing'} tone={proxyCaStatus?.generated ? 'emerald' : 'amber'} />
         <MetricCard label="Tools" value="5" detail="proxy/repeater/intruder/decoder/comparer" tone="blue" />
       </div>
       <Card title="Controlled Wraith Browser" eyebrow="Capture">
@@ -70,6 +76,35 @@ export default function ManualTesting({
               <code>{browserStatus.warning}</code>
             </div>
           )}
+        </div>
+      </Card>
+      <Card title="HTTPS Interception Prep" eyebrow="Local CA">
+        <p>
+          Prepare the certificate trust layer for a future scoped HTTPS MITM engine.
+          The current proxy still refuses CONNECT interception until that guarded engine is implemented.
+        </p>
+        <div className="button-row">
+          <Button variant="secondary" onClick={refreshProxyCaStatus} disabled={proxyCaState === 'loading'}>{proxyCaState === 'loading' ? 'Checking' : 'Check CA'}</Button>
+          <Button onClick={generateProxyCa} disabled={proxyCaState === 'generating'}>{proxyCaState === 'generating' ? 'Generating' : 'Generate CA'}</Button>
+          <Button variant="ghost" onClick={downloadProxyCa} disabled={!proxyCaStatus?.generated}>Download CA</Button>
+        </div>
+        <div className="nuclei-asset-card">
+          <div>
+            <span>Status</span>
+            <code>{proxyCaStatus?.generated ? 'generated' : proxyCaStatus?.warning || 'not generated'}</code>
+          </div>
+          <div>
+            <span>HTTPS MITM</span>
+            <code>{proxyCaStatus?.https_interception_enabled ? 'enabled' : 'disabled'}</code>
+          </div>
+          <div>
+            <span>Fingerprint</span>
+            <code>{proxyCaStatus?.fingerprint_sha256 || '-'}</code>
+          </div>
+          <div>
+            <span>Valid until</span>
+            <code>{proxyCaStatus?.valid_until || '-'}</code>
+          </div>
         </div>
       </Card>
       <div className="tool-grid">
