@@ -23,18 +23,22 @@ Phase 2 moves Wraith closer to a Burp-style manual testing workflow while keepin
   - missing HSTS on HTTPS
   - missing X-Content-Type-Options
   - missing frame protection
+  - cookie Secure / HttpOnly / SameSite weaknesses
+  - wildcard and credentialed wildcard CORS
+  - cacheable HTML/JSON responses
 - Proxy UI can trigger passive scanning for the active scan.
+- Selected proxy/corpus exchanges can be promoted into manual findings with request/response evidence linkage.
 
 ## Current limits
 
 - Proxy is still plain HTTP forwarding/capture only; HTTPS MITM certificate flow is not implemented yet.
-- Passive scanner is intentionally low-noise and header-focused; it should expand into cookies, CORS, cache headers, mixed content, reflected parameters, and disclosure checks.
+- Passive scanner is intentionally low-noise; it still needs mixed content, reflected parameters, disclosure checks, and better duplicate grouping.
 - Intruder is capped and safe-mode oriented; it still needs payload-position sets, grep-extract persistence, sorting, and clustering controls.
 
 ## Next recommended Phase 2 work
 
 1. HTTPS MITM setup flow with explicit certificate install guidance.
 2. Proxy interception editor for pending requests, not just forward/drop controls.
-3. Passive scanner expansion for cookies, CORS, cache, and reflected inputs.
-4. Manual finding creation from selected request/response evidence.
-5. Repeater response diff between attempts.
+3. Passive scanner expansion for reflected inputs, disclosure checks, and duplicate grouping.
+4. Repeater response diff between attempts.
+5. Finding-to-evidence artifact export for reports and proof mode.
