@@ -1401,6 +1401,72 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.repeater-diff-view {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #070b12;
+}
+
+.repeater-diff-view summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.diff-table {
+  display: grid;
+  gap: 2px;
+  min-width: 620px;
+}
+
+.diff-head,
+.diff-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+}
+
+.diff-head {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.diff-row {
+  padding: 3px 0;
+  border-radius: 4px;
+}
+
+.diff-row.changed {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.diff-row span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.diff-row code {
+  overflow: hidden;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: #dbeafe;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .code-editor {
   display: flex;
   flex: 1;

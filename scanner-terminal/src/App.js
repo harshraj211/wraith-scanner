@@ -1546,7 +1546,43 @@ function buildRepeaterDiff(tab) {
     bodyChanged: (currentResponse.body_hash || '') !== (previousResponse.body_hash || ''),
     currentTitle: currentResponse.title || '',
     previousTitle: previousResponse.title || '',
+    previousResponse,
+    currentResponse,
+    bodyPreview: buildLineDiff(previousResponse.body_excerpt || '', currentResponse.body_excerpt || ''),
+    headerPreview: buildHeaderDiff(previousResponse.headers || {}, currentResponse.headers || {}),
   };
+}
+
+function buildLineDiff(previousText, currentText) {
+  const previousLines = String(previousText || '').split(/\r?\n/).slice(0, 80);
+  const currentLines = String(currentText || '').split(/\r?\n/).slice(0, 80);
+  const maxLines = Math.max(previousLines.length, currentLines.length);
+  const rows = [];
+  for (let index = 0; index < maxLines; index += 1) {
+    const previous = previousLines[index] || '';
+    const current = currentLines[index] || '';
+    rows.push({ line: index + 1, previous, current, changed: previous !== current });
+  }
+  return rows;
+}
+
+function buildHeaderDiff(previousHeaders, currentHeaders) {
+  const previous = normalizeHeaders(previousHeaders);
+  const current = normalizeHeaders(currentHeaders);
+  const names = Array.from(new Set([...Object.keys(previous), ...Object.keys(current)])).sort();
+  return names.map((name) => ({
+    name,
+    previous: previous[name] || '',
+    current: current[name] || '',
+    changed: (previous[name] || '') !== (current[name] || ''),
+  }));
+}
+
+function normalizeHeaders(headers) {
+  return Object.entries(headers || {}).reduce((acc, [key, value]) => {
+    acc[String(key).toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value || '');
+    return acc;
+  }, {});
 }
 
 function buildIntruderRequest(baseRequest, marker, payload) {

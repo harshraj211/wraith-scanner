@@ -58,6 +58,7 @@ export default function Repeater({
         </Card>
         <Card title="Response" eyebrow="Inspector">
           <RepeaterAttempts tab={activeRepeaterTab} selectedAttemptId={activeRepeaterTab?.activeAttemptId} onSelect={selectRepeaterAttempt} diff={repeaterDiff} />
+          <RepeaterDiffView diff={repeaterDiff} />
           <RequestResponseViewer exchange={selectedExchange} />
         </Card>
       </div>
@@ -88,6 +89,43 @@ function RepeaterAttempts({ tab, selectedAttemptId, onSelect, diff }) {
           {(diff.previousTitle || diff.currentTitle) && <Metric label="Title" value={`${diff.previousTitle || '-'} → ${diff.currentTitle || '-'}`} />}
         </div>
       )}
+    </div>
+  );
+}
+
+function RepeaterDiffView({ diff }) {
+  if (!diff) return null;
+  const bodyRows = diff.bodyPreview || [];
+  const headerRows = diff.headerPreview || [];
+  return (
+    <div className="repeater-diff-view">
+      <details open>
+        <summary>Response body diff preview</summary>
+        <div className="diff-table body-diff">
+          <div className="diff-head"><span>#</span><strong>Previous</strong><strong>Current</strong></div>
+          {bodyRows.length === 0 && <div className="diff-row"><span>-</span><code>No body</code><code>No body</code></div>}
+          {bodyRows.map((row) => (
+            <div className={row.changed ? 'diff-row changed' : 'diff-row'} key={row.line}>
+              <span>{row.line}</span>
+              <code>{row.previous || ' '}</code>
+              <code>{row.current || ' '}</code>
+            </div>
+          ))}
+        </div>
+      </details>
+      <details>
+        <summary>Response header diff</summary>
+        <div className="diff-table header-diff">
+          <div className="diff-head"><span>Header</span><strong>Previous</strong><strong>Current</strong></div>
+          {headerRows.map((row) => (
+            <div className={row.changed ? 'diff-row changed' : 'diff-row'} key={row.name}>
+              <span>{row.name}</span>
+              <code>{row.previous || '-'}</code>
+              <code>{row.current || '-'}</code>
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
