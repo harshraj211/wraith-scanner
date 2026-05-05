@@ -1242,6 +1242,72 @@ def get_corpus_request(request_id):
     })
 
 
+def _manual_artifact_excerpt(kind, record, *, operator_note=''):
+    """Build a compact, already-redacted manual evidence excerpt."""
+    if kind == 'request':
+        payload = {
+            'request_id': record.get('request_id', ''),
+            'source': record.get('source', ''),
+            'method': record.get('method', ''),
+            'url': record.get('url', ''),
+            'headers': record.get('headers') or {},
+            'body': record.get('body', ''),
+            'auth_role': record.get('auth_role', ''),
+            'timestamp': record.get('timestamp', ''),
+        }
+    elif kind == 'response':
+        payload = {
+            'response_id': record.get('response_id', ''),
+            'request_id': record.get('request_id', ''),
+            'status_code': record.get('status_code', 0),
+            'headers': record.get('headers') or {},
+            'body_excerpt': record.get('body_excerpt', ''),
+            'content_type': record.get('content_type', ''),
+            'content_length': record.get('content_length', 0),
+            'response_time_ms': record.get('response_time_ms', 0),
+            'timestamp': record.get('timestamp', ''),
+        }
+    else:
+        payload = {
+            'note': operator_note,
+        }
+    return _json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+
+
+def _store_manual_finding_artifacts(repo, finding, request_record=None, response_record=None, operator_note=''):
+    artifacts = []
+    if request_record:
+        artifacts.append(EvidenceArtifact(
+            artifact_id='',
+            finding_id=finding.finding_id,
+            task_id='',
+            artifact_type='request',
+            inline_excerpt=_manual_artifact_excerpt('request', request_record),
+            redactions_applied=['headers', 'body', 'url_tokens'],
+        ))
+    if response_record:
+        artifacts.append(EvidenceArtifact(
+            artifact_id='',
+            finding_id=finding.finding_id,
+            task_id='',
+            artifact_type='response',
+            inline_excerpt=_manual_artifact_excerpt('response', response_record),
+            redactions_applied=['headers', 'body_excerpt'],
+        ))
+    if operator_note:
+        artifacts.append(EvidenceArtifact(
+            artifact_id='',
+            finding_id=finding.finding_id,
+            task_id='',
+            artifact_type='log',
+            inline_excerpt=_manual_artifact_excerpt('log', {}, operator_note=operator_note),
+            redactions_applied=['operator_note'],
+        ))
+    for artifact in artifacts:
+        repo.save_evidence_artifact(artifact)
+    return artifacts
+
+
 @app.route('/api/corpus/<scan_id>/findings/manual', methods=['POST'])
 def create_manual_finding(scan_id):
     repo = _storage_repo()
@@ -1271,6 +1337,7 @@ def create_manual_finding(scan_id):
     if response_record:
         evidence_parts.append(f"Response evidence: HTTP {response_record.get('status_code')} {response_record.get('content_type') or ''}".strip())
     evidence = '\n'.join(part for part in evidence_parts if part)
+    operator_note = str(payload.get('operator_note') or payload.get('evidence') or '').strip()
 
     finding = Finding.from_legacy(
         {
@@ -1287,7 +1354,7 @@ def create_manual_finding(scan_id):
             'metadata': {
                 'request_id': request_id,
                 'response_id': (response_record or {}).get('response_id', ''),
-                'operator_note': str(payload.get('operator_note') or '').strip(),
+                'operator_note': operator_note,
             },
         },
         target_url=target_url,
@@ -1296,7 +1363,21 @@ def create_manual_finding(scan_id):
         discovery_method='manual',
     )
     repo.save_finding(finding)
-    return jsonify({'scan_id': scan_id, 'finding': finding.to_dict()}), 201
+    artifacts = _store_manual_finding_artifacts(
+        repo,
+        finding,
+        request_record=request_record,
+        response_record=response_record,
+        operator_note=operator_note,
+    )
+    if artifacts:
+        finding.metadata['artifact_ids'] = [artifact.artifact_id for artifact in artifacts]
+        repo.update_finding(finding)
+    return jsonify({
+        'scan_id': scan_id,
+        'finding': finding.to_dict(),
+        'artifacts': [artifact.to_dict() for artifact in artifacts],
+    }), 201
 
 
 @app.route('/api/corpus/<scan_id>/findings', methods=['GET'])

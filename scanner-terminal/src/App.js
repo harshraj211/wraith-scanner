@@ -461,7 +461,13 @@ function App() {
       setManualFindingState('saved');
       setManualFinding(initialManualFinding);
       await loadFindings(scanId);
-      addProgress({ scan_id: scanId, type: 'finding', message: `Manual finding created: ${response.data.finding?.title || manualFinding.title}` });
+      await loadProofData(response.data.finding?.finding_id || '');
+      const artifactCount = response.data.artifacts?.length || 0;
+      addProgress({
+        scan_id: scanId,
+        type: 'finding',
+        message: `Manual finding created: ${response.data.finding?.title || manualFinding.title} (${artifactCount} evidence artifacts)`,
+      });
     } catch (error) {
       setManualFindingState('error');
       addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });

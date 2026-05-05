@@ -84,6 +84,16 @@ class CorpusApiTests(unittest.TestCase):
                 self.assertEqual(manual["discovery_method"], "manual")
                 self.assertIn(request_record.request_id, manual["metadata"]["request_id"])
                 self.assertIn("Request evidence", manual["discovery_evidence"])
+                artifacts = manual_response.get_json()["artifacts"]
+                self.assertEqual({item["artifact_type"] for item in artifacts}, {"request", "response", "log"})
+                self.assertEqual(len(manual["metadata"]["artifact_ids"]), 3)
+                request_artifact = next(item for item in artifacts if item["artifact_type"] == "request")
+                self.assertIn("[REDACTED]", request_artifact["inline_excerpt"])
+                self.assertNotIn("secret-token-value", request_artifact["inline_excerpt"])
+
+                linked_artifacts = client.get(f"/api/evidence/artifacts?finding_id={manual['finding_id']}")
+                self.assertEqual(linked_artifacts.status_code, 200)
+                self.assertEqual(linked_artifacts.get_json()["count"], 3)
             repo.close()
 
     def test_manual_compare_responses_returns_diff_and_artifact(self):

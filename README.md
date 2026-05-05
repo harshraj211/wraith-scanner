@@ -459,6 +459,8 @@ Manual replay sends a bounded operator-specified request, blocks destructive ver
 
 Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
 
+Manual findings created from proxy history store linked sanitized evidence artifacts automatically. The selected request, latest response, and operator note are saved as `request`, `response`, and `log` artifacts tied to the finding ID.
+
 Manual mode can also launch a controlled Wraith browser profile through the local HTTP proxy. The browser is headed, operator-controlled, and uses the active proxy for HTTP request capture. HTTPS interception is still not enabled until a future certificate-managed MITM setup is added.
 
 Authorization Matrix / BOLA testing replays object-specific corpus requests under two or more supplied auth profiles. Safe mode only sends read-only methods, refuses out-of-scope requests, does not follow redirects, stores replay traffic as source `authz`, and persists high-confidence role-diff findings plus sanitized diff evidence.
