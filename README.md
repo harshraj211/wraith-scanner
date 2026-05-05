@@ -94,6 +94,16 @@ npm install
 cd ..
 ```
 
+## Configuration
+
+Copy `.env.example` to `.env` for local overrides and secrets. Keep `.env` private; it is ignored by Git.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Important variables include `SCANNER_HOST`, `SCANNER_PORT`, `WRAITH_DB_PATH`, `OPENAI_API_KEY`, `NVD_API_KEY`, and the optional Nuclei paths documented in `.env.example`.
+
 ## Optional Integrations
 
 - `semgrep`: recommended for the full SAST experience. Without it, Wraith still runs taint, secret, and dependency analysis.
