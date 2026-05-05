@@ -58,6 +58,7 @@ from scanner.integrations.template_trust import (
     trust_config_path,
 )
 from scanner.manual.browser_launcher import WraithBrowserController
+from scanner.manual.passive import run_passive_checks
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
@@ -1620,6 +1621,16 @@ def manual_save_request():
         'request': request_record.to_dict(),
         'saved': True,
     })
+
+
+@app.route('/api/manual/passive/<scan_id>/run', methods=['POST'])
+def manual_passive_run(scan_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    if not repo.get_scan(scan_id):
+        return jsonify({'error': 'Scan not found'}), 404
+    return jsonify(run_passive_checks(repo, scan_id))
 
 
 @app.route('/api/manual/replay', methods=['POST'])
