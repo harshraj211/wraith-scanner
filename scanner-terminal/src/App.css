@@ -1332,6 +1332,75 @@ textarea:focus {
   flex: 1;
 }
 
+.repeater-attempts {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.repeater-attempts.empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.attempt-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.attempt-list button {
+  display: grid;
+  min-width: 118px;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0a101a;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.attempt-list button.active {
+  border-color: rgba(34, 211, 238, 0.68);
+  background: rgba(34, 211, 238, 0.08);
+  color: var(--primary);
+}
+
+.attempt-list small,
+.repeater-diff span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.repeater-diff {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.repeater-diff div {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.repeater-diff strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .code-editor {
   display: flex;
   flex: 1;

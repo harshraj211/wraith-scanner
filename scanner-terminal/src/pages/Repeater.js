@@ -16,6 +16,9 @@ export default function Repeater({
   selectRepeaterTab,
   createRepeaterTab,
   closeRepeaterTab,
+  activeRepeaterTab,
+  selectRepeaterAttempt,
+  repeaterDiff,
   selectedExchange,
   onNavigate,
 }) {
@@ -54,11 +57,43 @@ export default function Repeater({
           <ManualRequestFields request={manualRequest} updateRequest={updateManualRequest} />
         </Card>
         <Card title="Response" eyebrow="Inspector">
+          <RepeaterAttempts tab={activeRepeaterTab} selectedAttemptId={activeRepeaterTab?.activeAttemptId} onSelect={selectRepeaterAttempt} diff={repeaterDiff} />
           <RequestResponseViewer exchange={selectedExchange} />
         </Card>
       </div>
     </div>
   );
+}
+
+function RepeaterAttempts({ tab, selectedAttemptId, onSelect, diff }) {
+  const attempts = tab?.attempts || [];
+  if (!attempts.length) return <div className="repeater-attempts empty">No attempts yet. Send a request to capture a response.</div>;
+  return (
+    <div className="repeater-attempts">
+      <div className="attempt-list">
+        {attempts.map((attempt, index) => (
+          <button key={attempt.attemptId} className={attempt.attemptId === selectedAttemptId ? 'active' : ''} onClick={() => onSelect?.(attempt.attemptId)}>
+            <span>#{attempts.length - index}</span>
+            <strong>{attempt.status}</strong>
+            <small>{attempt.length || 0} B · {attempt.timeMs || 0} ms</small>
+          </button>
+        ))}
+      </div>
+      {diff && (
+        <div className="repeater-diff">
+          <Metric label="Status" value={diff.statusDelta} />
+          <Metric label="Length Δ" value={`${diff.lengthDelta >= 0 ? '+' : ''}${diff.lengthDelta} B`} />
+          <Metric label="Time Δ" value={`${diff.timeDelta >= 0 ? '+' : ''}${diff.timeDelta} ms`} />
+          <Metric label="Body" value={diff.bodyChanged ? 'changed' : 'same'} />
+          {(diff.previousTitle || diff.currentTitle) && <Metric label="Title" value={`${diff.previousTitle || '-'} → ${diff.currentTitle || '-'}`} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 export function ManualRequestFields({ request, updateRequest }) {

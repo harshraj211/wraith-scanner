@@ -280,6 +280,11 @@ function App() {
     () => intruderResults.find((result) => result.resultId === selectedIntruderResultId) || intruderResults[intruderResults.length - 1] || null,
     [intruderResults, selectedIntruderResultId],
   );
+  const activeRepeaterTab = useMemo(
+    () => repeaterTabs.find((tab) => tab.tabId === activeRepeaterTabId) || repeaterTabs[0] || null,
+    [repeaterTabs, activeRepeaterTabId],
+  );
+  const repeaterDiff = useMemo(() => buildRepeaterDiff(activeRepeaterTab), [activeRepeaterTab]);
 
   const updateForm = (name, value) => {
     setForm((current) => ({ ...current, [name]: value }));
@@ -471,6 +476,14 @@ function App() {
     const activeAttempt = selectedRepeaterAttempt(tab);
     setSelectedExchange(activeAttempt?.exchange || null);
     navigate('repeater');
+  };
+
+  const selectRepeaterAttempt = (attemptId) => {
+    setRepeaterTabs((tabs) => tabs.map((tab) => (
+      tab.tabId === activeRepeaterTabId ? { ...tab, activeAttemptId: attemptId } : tab
+    )));
+    const attempt = (activeRepeaterTab?.attempts || []).find((item) => item.attemptId === attemptId);
+    if (attempt?.exchange) setSelectedExchange(attempt.exchange);
   };
 
   const createRepeaterTab = () => {
@@ -1226,6 +1239,9 @@ function App() {
             selectRepeaterTab={selectRepeaterTab}
             createRepeaterTab={createRepeaterTab}
             closeRepeaterTab={closeRepeaterTab}
+            activeRepeaterTab={activeRepeaterTab}
+            selectRepeaterAttempt={selectRepeaterAttempt}
+            repeaterDiff={repeaterDiff}
             selectedExchange={selectedExchange}
             onNavigate={navigate}
           />
@@ -1508,6 +1524,28 @@ function buildRepeaterAttempt(request, response) {
     timestamp: new Date().toISOString(),
     exchange: { request, response },
     status,
+    length: Number(response?.content_length || 0),
+    timeMs: Number(response?.response_time_ms || 0),
+    bodyHash: response?.body_hash || '',
+  };
+}
+
+function buildRepeaterDiff(tab) {
+  const attempts = tab?.attempts || [];
+  if (attempts.length < 2) return null;
+  const current = attempts.find((item) => item.attemptId === tab.activeAttemptId) || attempts[0];
+  const previous = attempts.find((item) => item.attemptId !== current.attemptId) || attempts[1];
+  const currentResponse = current?.exchange?.response || {};
+  const previousResponse = previous?.exchange?.response || {};
+  return {
+    currentId: current.attemptId,
+    previousId: previous.attemptId,
+    statusDelta: `${previousResponse.status_code || '-'} → ${currentResponse.status_code || '-'}`,
+    lengthDelta: Number(currentResponse.content_length || 0) - Number(previousResponse.content_length || 0),
+    timeDelta: Number(currentResponse.response_time_ms || 0) - Number(previousResponse.response_time_ms || 0),
+    bodyChanged: (currentResponse.body_hash || '') !== (previousResponse.body_hash || ''),
+    currentTitle: currentResponse.title || '',
+    previousTitle: previousResponse.title || '',
   };
 }
 
