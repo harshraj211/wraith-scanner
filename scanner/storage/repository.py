@@ -404,10 +404,39 @@ class StorageRepository:
 
         with self._lock:
             rows = self.conn.execute(
-                f"SELECT r.raw_json FROM requests r WHERE {' AND '.join(where)} ORDER BY r.timestamp ASC",
+                f"""
+                SELECT
+                    r.raw_json,
+                    rsp.status_code,
+                    rsp.content_type,
+                    rsp.content_length,
+                    rsp.response_time_ms,
+                    rsp.timestamp AS response_timestamp
+                FROM requests r
+                LEFT JOIN responses rsp ON rsp.response_id = (
+                    SELECT response_id
+                    FROM responses latest_rsp
+                    WHERE latest_rsp.request_id = r.request_id
+                    ORDER BY latest_rsp.timestamp DESC
+                    LIMIT 1
+                )
+                WHERE {' AND '.join(where)}
+                ORDER BY r.timestamp ASC
+                """,
                 params,
             ).fetchall()
-        return [_loads(row["raw_json"], {}) for row in rows]
+        enriched = []
+        for row in rows:
+            item = _loads(row["raw_json"], {})
+            item["response"] = {
+                "status_code": row["status_code"],
+                "content_type": row["content_type"] or "",
+                "content_length": row["content_length"] or 0,
+                "response_time_ms": row["response_time_ms"] or 0,
+                "timestamp": row["response_timestamp"] or "",
+            } if row["status_code"] is not None else None
+            enriched.append(item)
+        return enriched
 
     def get_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:

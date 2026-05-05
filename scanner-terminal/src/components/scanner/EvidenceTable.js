@@ -8,6 +8,8 @@ export default function EvidenceTable({ requests = [], selectedExchange, onSelec
       columns={[
         { key: 'method', label: 'Method', width: '82px', render: (row) => <Badge tone={methodTone(row.method)}>{row.method}</Badge> },
         { key: 'url', label: 'URL', width: 'minmax(260px, 1fr)' },
+        { key: 'status', label: 'Status', width: '90px', render: (row) => <Badge tone={statusTone(row.response?.status_code)}>{row.response?.status_code || '-'}</Badge> },
+        { key: 'time', label: 'Time', width: '90px', render: (row) => row.response?.response_time_ms ? `${row.response.response_time_ms}ms` : '-' },
         { key: 'source', label: 'Source', width: '100px' },
         { key: 'auth_role', label: 'Role', width: '110px' },
         {
@@ -37,4 +39,13 @@ function methodTone(method) {
   if (['PUT', 'PATCH'].includes(value)) return 'amber';
   if (value === 'DELETE') return 'red';
   return 'slate';
+}
+
+function statusTone(statusCode) {
+  const status = Number(statusCode || 0);
+  if (!status) return 'slate';
+  if (status >= 500) return 'red';
+  if (status >= 400) return 'amber';
+  if (status >= 300) return 'blue';
+  return 'emerald';
 }
