@@ -452,6 +452,7 @@ POST http://127.0.0.1:5001/api/proof/<finding-id>/task
 GET  http://127.0.0.1:5001/api/proof/tasks
 POST http://127.0.0.1:5001/api/proof/<task-id>/run
 GET  http://127.0.0.1:5001/api/evidence/artifacts
+GET  http://127.0.0.1:5001/api/evidence/bundle/<finding-id>
 ```
 
 Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
@@ -483,7 +484,7 @@ Proof Mode is a deterministic post-scan verifier. The first executor safely prov
 
 The frontend hydrates Findings, Evidence Corpus, Proof Mode, and Reports from these backend routes. It no longer uses frontend-only mock findings; empty states mean the backend has not produced or persisted that artifact yet.
 
-The Findings drawer loads linked evidence artifacts by finding ID, so manual and proof-backed findings can be reviewed with their sanitized request, response, diff, log, or OOB evidence in the same triage view.
+The Findings drawer loads linked evidence artifacts by finding ID, so manual and proof-backed findings can be reviewed with their sanitized request, response, diff, log, or OOB evidence in the same triage view. Its Export Evidence action downloads a sanitized `wraith.evidence_bundle.v1` JSON package for the selected finding.
 
 ## Canonical Models and Corpus
 

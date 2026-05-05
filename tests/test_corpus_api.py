@@ -94,6 +94,16 @@ class CorpusApiTests(unittest.TestCase):
                 linked_artifacts = client.get(f"/api/evidence/artifacts?finding_id={manual['finding_id']}")
                 self.assertEqual(linked_artifacts.status_code, 200)
                 self.assertEqual(linked_artifacts.get_json()["count"], 3)
+
+                bundle_response = client.get(f"/api/evidence/bundle/{manual['finding_id']}")
+                self.assertEqual(bundle_response.status_code, 200)
+                self.assertIn("attachment", bundle_response.headers.get("Content-Disposition", ""))
+                bundle = json.loads(bundle_response.get_data(as_text=True))
+                self.assertEqual(bundle["schema"], "wraith.evidence_bundle.v1")
+                self.assertEqual(bundle["finding_id"], manual["finding_id"])
+                self.assertEqual(bundle["artifact_count"], 3)
+                self.assertEqual(bundle["linked_exchange"]["request"]["request_id"], request_record.request_id)
+                self.assertNotIn("secret-token-value", bundle_response.get_data(as_text=True))
             repo.close()
 
     def test_manual_compare_responses_returns_diff_and_artifact(self):

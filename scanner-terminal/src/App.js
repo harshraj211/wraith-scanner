@@ -1106,6 +1106,11 @@ function App() {
     if (latestScanId) window.open(`${API_URL}/api/download-json/${latestScanId}`, '_blank');
   };
 
+  const downloadFindingEvidence = (finding) => {
+    const findingId = finding?.finding_id;
+    if (findingId) window.open(`${API_URL}/api/evidence/bundle/${findingId}`, '_blank');
+  };
+
   useEffect(() => {
     if (!pollingScanId) return undefined;
     refreshStatus(pollingScanId);
@@ -1201,6 +1206,7 @@ function App() {
             evidenceState={findingEvidenceState}
             onNavigate={navigate}
             onRunProof={runProofTask}
+            onExportEvidence={downloadFindingEvidence}
             onRefresh={() => loadFindings(latestScanId)}
             onLoadEvidence={loadFindingEvidence}
           />

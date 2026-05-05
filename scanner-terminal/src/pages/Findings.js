@@ -13,6 +13,7 @@ export default function Findings({
   evidenceState = 'idle',
   onNavigate,
   onRunProof,
+  onExportEvidence,
   onRefresh,
   onLoadEvidence,
 }) {
@@ -71,6 +72,7 @@ export default function Findings({
           evidenceState={evidenceState}
           onClose={() => setSelected(null)}
           onRunProof={onRunProof}
+          onExportEvidence={onExportEvidence}
         />
       </div>
     </div>

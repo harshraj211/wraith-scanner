@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import json as _json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 import requests
 
@@ -1710,6 +1710,48 @@ def list_evidence_artifacts_endpoint():
         'count': len(artifacts),
         'artifacts': artifacts,
     })
+
+
+@app.route('/api/evidence/bundle/<finding_id>', methods=['GET'])
+def download_evidence_bundle(finding_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    finding = repo.get_finding(finding_id)
+    if not finding:
+        return jsonify({'error': 'Finding not found'}), 404
+
+    artifacts = repo.list_evidence_artifacts(finding_id=finding_id)
+    metadata = finding.get('metadata') or {}
+    request_id = str(metadata.get('request_id') or '').strip()
+    request_record = repo.get_request(request_id) if request_id else None
+    response_record = repo.get_response_for_request(request_id) if request_id else None
+    scan_id = str(finding.get('scan_id') or '')
+    scan = repo.get_scan(scan_id) if scan_id else None
+
+    bundle = {
+        'schema': 'wraith.evidence_bundle.v1',
+        'exported_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+        'finding_id': finding_id,
+        'scan_id': scan_id,
+        'finding': finding,
+        'scan': scan,
+        'artifacts': artifacts,
+        'artifact_count': len(artifacts),
+        'linked_exchange': {
+            'request': request_record,
+            'response': response_record,
+        } if request_record or response_record else None,
+        'redaction_note': 'Evidence bundle values are sanitized by Wraith before export.',
+    }
+    payload = _json.dumps(bundle, indent=2, ensure_ascii=False, default=str)
+    return app.response_class(
+        payload,
+        mimetype='application/json',
+        headers={
+            'Content-Disposition': f'attachment; filename=wraith_evidence_{finding_id}.json',
+        },
+    )
 
 
 @app.route('/api/manual/compare-responses', methods=['POST'])

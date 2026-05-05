@@ -9,6 +9,7 @@ export default function FindingDetailDrawer({
   evidenceState = 'idle',
   onClose,
   onRunProof,
+  onExportEvidence,
 }) {
   return (
     <Drawer
@@ -18,7 +19,7 @@ export default function FindingDetailDrawer({
       actions={(
         <>
           <Button onClick={() => onRunProof?.(finding)}>Run Proof Task</Button>
-          <Button variant="secondary">Export Evidence</Button>
+          <Button variant="secondary" onClick={() => onExportEvidence?.(finding)}>Export Evidence</Button>
         </>
       )}
     >

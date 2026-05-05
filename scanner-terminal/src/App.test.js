@@ -85,9 +85,11 @@ test('manual intruder exposes capped payload runner controls', () => {
 });
 
 test('finding drawer shows linked evidence artifacts', () => {
+  const exportEvidence = jest.fn();
   render(
     <FindingDetailDrawer
       finding={{
+        finding_id: 'fnd_manual_1',
         title: 'Manual access control note',
         severity: 'high',
         normalized_endpoint: '/api/items/{int}',
@@ -110,6 +112,7 @@ test('finding drawer shows linked evidence artifacts', () => {
           inline_excerpt: 'HTTP 201\n{"id":"item-1"}',
         },
       ]}
+      onExportEvidence={exportEvidence}
     />,
   );
 
@@ -117,4 +120,6 @@ test('finding drawer shows linked evidence artifacts', () => {
   expect(screen.getByRole('heading', { name: /linked evidence/i })).toBeInTheDocument();
   expect(screen.getByText(/art_request/i)).toBeInTheDocument();
   expect(screen.getByText(/authorization: \[redacted\]/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /export evidence/i }));
+  expect(exportEvidence).toHaveBeenCalledWith(expect.objectContaining({ finding_id: 'fnd_manual_1' }));
 });
