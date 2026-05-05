@@ -77,6 +77,12 @@ Flask API Server  --->  PDF Reporting
 - Git
 - Chromium for Playwright
 
+### Fast Windows setup
+
+```powershell
+.\scripts\setup_dev.ps1
+```
+
 ### Python dependencies
 
 ```bash
@@ -92,6 +98,12 @@ playwright install chromium
 cd scanner-terminal
 npm install
 cd ..
+```
+
+### Local quality gate
+
+```powershell
+.\scripts\test_all.ps1
 ```
 
 ## Configuration
@@ -119,6 +131,12 @@ Important variables include `SCANNER_HOST`, `SCANNER_PORT`, `WRAITH_DB_PATH`, `O
 
 ```bash
 python api_server.py
+```
+
+Or start the API and React frontend together on Windows:
+
+```powershell
+.\scripts\run_dev.ps1
 ```
 
 The API listens on `http://127.0.0.1:5001`.
