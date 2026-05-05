@@ -26,6 +26,10 @@ export default function ProxyHistory({
   loadExchange,
   sendRequestToRepeater,
   sendRequestToIntruder,
+  manualFinding,
+  manualFindingState,
+  updateManualFinding,
+  createManualFinding,
   browserState,
   browserStatus,
   openWraithBrowser,
@@ -104,6 +108,26 @@ export default function ProxyHistory({
         </Card>
         <Card title="Selected Exchange" eyebrow="Inspector">
           <RequestResponseViewer exchange={selectedExchange} />
+          <div className="manual-finding-form">
+            <h4>Create manual finding</h4>
+            <input placeholder="Finding title" value={manualFinding?.title || ''} onChange={(event) => updateManualFinding?.('title', event.target.value)} />
+            <div className="filter-bar">
+              <input placeholder="type e.g. idor" value={manualFinding?.vulnType || ''} onChange={(event) => updateManualFinding?.('vulnType', event.target.value)} />
+              <select value={manualFinding?.severity || 'medium'} onChange={(event) => updateManualFinding?.('severity', event.target.value)}>
+                <option>critical</option>
+                <option>high</option>
+                <option>medium</option>
+                <option>low</option>
+                <option>info</option>
+              </select>
+            </div>
+            <input placeholder="parameter / location" value={manualFinding?.parameterName || ''} onChange={(event) => updateManualFinding?.('parameterName', event.target.value)} />
+            <textarea placeholder="Evidence note" rows={4} value={manualFinding?.evidence || ''} onChange={(event) => updateManualFinding?.('evidence', event.target.value)} />
+            <textarea placeholder="Remediation" rows={3} value={manualFinding?.remediation || ''} onChange={(event) => updateManualFinding?.('remediation', event.target.value)} />
+            <Button onClick={createManualFinding} disabled={!latestScanId || !selectedExchange?.request || !manualFinding?.title || manualFindingState === 'saving'}>
+              {manualFindingState === 'saving' ? 'Saving finding' : 'Save manual finding'}
+            </Button>
+          </div>
         </Card>
       </div>
     </div>

@@ -1439,6 +1439,19 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.manual-finding-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.manual-finding-form h4 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
 .decoder-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 190px minmax(0, 1fr);

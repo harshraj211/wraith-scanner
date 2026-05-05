@@ -67,6 +67,23 @@ class CorpusApiTests(unittest.TestCase):
                 findings_response = client.get("/api/corpus/scan-corpus/findings?vuln_type=idor")
                 self.assertEqual(findings_response.status_code, 200)
                 self.assertEqual(findings_response.get_json()["count"], 1)
+
+                manual_response = client.post(
+                    "/api/corpus/scan-corpus/findings/manual",
+                    json={
+                        "request_id": request_record.request_id,
+                        "title": "Manual access control note",
+                        "vuln_type": "idor",
+                        "severity": "high",
+                        "parameter_name": "id",
+                        "evidence": "Observed object swap manually.",
+                    },
+                )
+                self.assertEqual(manual_response.status_code, 201)
+                manual = manual_response.get_json()["finding"]
+                self.assertEqual(manual["discovery_method"], "manual")
+                self.assertIn(request_record.request_id, manual["metadata"]["request_id"])
+                self.assertIn("Request evidence", manual["discovery_evidence"])
             repo.close()
 
     def test_manual_replay_saves_sanitized_exchange(self):

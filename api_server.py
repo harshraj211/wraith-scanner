@@ -1242,6 +1242,63 @@ def get_corpus_request(request_id):
     })
 
 
+@app.route('/api/corpus/<scan_id>/findings/manual', methods=['POST'])
+def create_manual_finding(scan_id):
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    if not repo.get_scan(scan_id):
+        return jsonify({'error': 'Scan not found'}), 404
+
+    payload = request.get_json(silent=True) or {}
+    title = str(payload.get('title') or '').strip()
+    vuln_type = str(payload.get('vuln_type') or payload.get('type') or 'manual').strip().lower()
+    severity = str(payload.get('severity') or 'medium').strip().lower()
+    if not title:
+        return jsonify({'error': 'title is required'}), 400
+    if severity not in {'critical', 'high', 'medium', 'low', 'info'}:
+        return jsonify({'error': 'severity must be critical, high, medium, low, or info'}), 400
+
+    request_id = str(payload.get('request_id') or '').strip()
+    request_record = repo.get_request(request_id) if request_id else None
+    response_record = repo.get_response_for_request(request_id) if request_id else None
+    target_url = str(payload.get('url') or (request_record or {}).get('url') or '')
+    method = str(payload.get('method') or (request_record or {}).get('method') or 'GET').upper()
+    parameter = str(payload.get('parameter_name') or payload.get('parameter') or '').strip()
+    evidence_parts = [str(payload.get('evidence') or '').strip()]
+    if request_record:
+        evidence_parts.append(f"Request evidence: {request_record.get('method')} {request_record.get('url')}")
+    if response_record:
+        evidence_parts.append(f"Response evidence: HTTP {response_record.get('status_code')} {response_record.get('content_type') or ''}".strip())
+    evidence = '\n'.join(part for part in evidence_parts if part)
+
+    finding = Finding.from_legacy(
+        {
+            'title': title,
+            'type': vuln_type or 'manual',
+            'severity': severity,
+            'confidence': int(payload.get('confidence') or 80),
+            'url': target_url,
+            'method': method,
+            'param': parameter,
+            'evidence': evidence,
+            'remediation': str(payload.get('remediation') or 'Validate the issue manually and apply an appropriate fix.').strip(),
+            'source': 'manual',
+            'metadata': {
+                'request_id': request_id,
+                'response_id': (response_record or {}).get('response_id', ''),
+                'operator_note': str(payload.get('operator_note') or '').strip(),
+            },
+        },
+        target_url=target_url,
+        scan_id=scan_id,
+        auth_role=str(payload.get('auth_role') or (request_record or {}).get('auth_role') or 'manual'),
+        discovery_method='manual',
+    )
+    repo.save_finding(finding)
+    return jsonify({'scan_id': scan_id, 'finding': finding.to_dict()}), 201
+
+
 @app.route('/api/corpus/<scan_id>/findings', methods=['GET'])
 def list_corpus_findings(scan_id):
     repo = _storage_repo()

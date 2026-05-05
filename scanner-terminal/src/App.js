@@ -55,6 +55,15 @@ const initialManualRequest = {
   allowStateChange: false,
 };
 
+const initialManualFinding = {
+  title: '',
+  vulnType: 'manual',
+  severity: 'medium',
+  parameterName: '',
+  evidence: '',
+  remediation: '',
+};
+
 const initialIntruderConfig = {
   marker: '{{payload}}',
   payloads: 'wraith-test\nwraith_probe\n%27',
@@ -167,6 +176,8 @@ function App() {
   const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
   const [manualState, setManualState] = useState('idle');
   const [passiveState, setPassiveState] = useState('idle');
+  const [manualFindingState, setManualFindingState] = useState('idle');
+  const [manualFinding, setManualFinding] = useState(initialManualFinding);
   const [intruderConfig, setIntruderConfig] = useState(initialIntruderConfig);
   const [intruderState, setIntruderState] = useState('idle');
   const [intruderResults, setIntruderResults] = useState([]);
@@ -421,6 +432,35 @@ function App() {
 
   const updateCorpusFilter = (name, value) => {
     setCorpusFilters((current) => ({ ...current, [name]: value }));
+  };
+
+  const updateManualFinding = (name, value) => {
+    setManualFinding((current) => ({ ...current, [name]: value }));
+  };
+
+  const createManualFinding = async () => {
+    const scanId = latestScanId || selectedExchange?.request?.scan_id || manualRequest.scanId;
+    const requestId = selectedExchange?.request?.request_id || '';
+    if (!scanId || !manualFinding.title.trim()) return;
+    setManualFindingState('saving');
+    try {
+      const response = await axios.post(`${API_URL}/api/corpus/${scanId}/findings/manual`, {
+        request_id: requestId,
+        title: manualFinding.title.trim(),
+        vuln_type: manualFinding.vulnType.trim() || 'manual',
+        severity: manualFinding.severity || 'medium',
+        parameter_name: manualFinding.parameterName.trim(),
+        evidence: manualFinding.evidence.trim(),
+        remediation: manualFinding.remediation.trim(),
+      });
+      setManualFindingState('saved');
+      setManualFinding(initialManualFinding);
+      await loadFindings(scanId);
+      addProgress({ scan_id: scanId, type: 'finding', message: `Manual finding created: ${response.data.finding?.title || manualFinding.title}` });
+    } catch (error) {
+      setManualFindingState('error');
+      addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
+    }
   };
 
   const selectRepeaterTab = (tabId) => {
@@ -1163,6 +1203,10 @@ function App() {
             loadExchange={loadExchange}
             sendRequestToRepeater={sendRequestToRepeater}
             sendRequestToIntruder={sendRequestToIntruder}
+            manualFinding={manualFinding}
+            manualFindingState={manualFindingState}
+            updateManualFinding={updateManualFinding}
+            createManualFinding={createManualFinding}
             browserState={browserState}
             browserStatus={browserStatus}
             openWraithBrowser={openWraithBrowser}
