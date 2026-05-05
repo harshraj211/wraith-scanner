@@ -2,6 +2,8 @@
 
 Async DAST and SAST scanner for modern web applications, SPAs, and GitHub repositories.
 
+Phase 1 hardening status is tracked in [`docs/PHASE1_HARDENING.md`](docs/PHASE1_HARDENING.md).
+
 Wraith now ships with four major engine upgrades plus the first VA+Proof platform groundwork:
 
 - Intelligent payload mutation for noisy DAST responses like WAF block pages, `403`s, and `5xx` responses.
