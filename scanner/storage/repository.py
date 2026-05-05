@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 import uuid
+from http.cookies import SimpleCookie
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -33,6 +34,29 @@ def _loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except Exception:
         return default
+
+
+def _set_cookie_flags(headers: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    """Extract non-secret Set-Cookie security attributes before redaction."""
+    results: List[Dict[str, Any]] = []
+    for name, value in (headers or {}).items():
+        if str(name).lower() != "set-cookie":
+            continue
+        values = value if isinstance(value, list) else [value]
+        for raw_cookie in values:
+            cookie = SimpleCookie()
+            try:
+                cookie.load(str(raw_cookie))
+            except Exception:
+                continue
+            for cookie_name, morsel in cookie.items():
+                results.append({
+                    "name": str(cookie_name),
+                    "secure": bool(morsel["secure"]),
+                    "httponly": bool(morsel["httponly"]),
+                    "samesite": str(morsel["samesite"] or ""),
+                })
+    return results
 
 
 class StorageRepository:
@@ -138,6 +162,7 @@ class StorageRepository:
 
     def save_response(self, response_record: ResponseRecord) -> str:
         data = response_record.to_dict()
+        data.setdefault("security_metadata", {})["set_cookie_flags"] = _set_cookie_flags(response_record.headers)
         with self._lock:
             self.conn.execute(
                 """

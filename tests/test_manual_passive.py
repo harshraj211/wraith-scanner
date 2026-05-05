@@ -25,18 +25,27 @@ class ManualPassiveTests(unittest.TestCase):
                 repo.save_response(ResponseRecord.create(
                     request_id=request.request_id,
                     status_code=200,
-                    headers={"Content-Type": "text/html"},
+                    headers={
+                        "Content-Type": "text/html",
+                        "Set-Cookie": "session=abc123; Path=/",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Credentials": "true",
+                    },
                     body="<html><title>App</title></html>",
                 ))
 
                 result = run_passive_checks(repo, scan.scan_id)
 
-                self.assertGreaterEqual(result["count"], 3)
+                self.assertGreaterEqual(result["count"], 7)
                 titles = {finding["title"] for finding in result["findings"]}
                 self.assertIn("Missing Content-Security-Policy header", titles)
                 self.assertIn("Missing HSTS header", titles)
-                stored = repo.list_findings(scan.scan_id, {"vuln_type": "header-missing"})
-                self.assertEqual(len(stored), result["count"])
+                self.assertIn("Cookie missing Secure flag", titles)
+                self.assertIn("Cookie missing HttpOnly flag", titles)
+                self.assertIn("Credentialed wildcard CORS", titles)
+                self.assertIn("Sensitive response may be cacheable", titles)
+                stored_headers = repo.list_findings(scan.scan_id, {"vuln_type": "header-missing"})
+                self.assertGreaterEqual(len(stored_headers), 3)
 
 
 if __name__ == "__main__":
