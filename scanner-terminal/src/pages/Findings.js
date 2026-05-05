@@ -9,11 +9,15 @@ export default function Findings({
   findings = [],
   findingsState = 'idle',
   latestScanId,
+  evidenceArtifacts = [],
+  evidenceState = 'idle',
   onNavigate,
   onRunProof,
   onRefresh,
+  onLoadEvidence,
 }) {
   const [selected, setSelected] = useState(findings[0] || null);
+  const selectedFindingId = selected?.finding_id || '';
 
   useEffect(() => {
     if (!findings.length) {
@@ -24,6 +28,10 @@ export default function Findings({
       setSelected(findings[0]);
     }
   }, [findings, selected]);
+
+  useEffect(() => {
+    onLoadEvidence?.(selectedFindingId);
+  }, [onLoadEvidence, selectedFindingId]);
 
   return (
     <div className="page-fill">
@@ -57,7 +65,13 @@ export default function Findings({
           onRowClick={setSelected}
           emptyTitle={latestScanId ? 'No findings returned by backend' : 'No scan selected'}
         />
-        <FindingDetailDrawer finding={selected} onClose={() => setSelected(null)} onRunProof={onRunProof} />
+        <FindingDetailDrawer
+          finding={selected}
+          evidenceArtifacts={evidenceArtifacts}
+          evidenceState={evidenceState}
+          onClose={() => setSelected(null)}
+          onRunProof={onRunProof}
+        />
       </div>
     </div>
   );

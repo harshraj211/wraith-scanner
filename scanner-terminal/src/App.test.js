@@ -27,6 +27,7 @@ jest.mock('socket.io-client', () => jest.fn(() => ({
 
 import { fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
+import FindingDetailDrawer from './components/scanner/FindingDetailDrawer';
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/');
@@ -81,4 +82,39 @@ test('manual intruder exposes capped payload runner controls', () => {
   expect(screen.getByLabelText(/payload marker/i)).toHaveValue('{{payload}}');
   expect(screen.getByLabelText(/max requests/i)).toHaveValue('25');
   expect(screen.getByRole('button', { name: /run attack/i })).toBeInTheDocument();
+});
+
+test('finding drawer shows linked evidence artifacts', () => {
+  render(
+    <FindingDetailDrawer
+      finding={{
+        title: 'Manual access control note',
+        severity: 'high',
+        normalized_endpoint: '/api/items/{int}',
+        parameter_name: 'id',
+        cwe: 'CWE-639',
+        proof_status: 'not_attempted',
+        discovery_evidence: 'Request evidence: POST https://app.example.test/api/items',
+        remediation: 'Enforce object-level authorization.',
+      }}
+      evidenceState="loaded"
+      evidenceArtifacts={[
+        {
+          artifact_id: 'art_request',
+          artifact_type: 'request',
+          inline_excerpt: 'POST /api/items HTTP/1.1\nAuthorization: [REDACTED]',
+        },
+        {
+          artifact_id: 'art_response',
+          artifact_type: 'response',
+          inline_excerpt: 'HTTP 201\n{"id":"item-1"}',
+        },
+      ]}
+    />,
+  );
+
+  expect(screen.getByRole('heading', { name: /manual access control note/i })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /linked evidence/i })).toBeInTheDocument();
+  expect(screen.getByText(/art_request/i)).toBeInTheDocument();
+  expect(screen.getByText(/authorization: \[redacted\]/i)).toBeInTheDocument();
 });

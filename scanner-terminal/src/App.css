@@ -1682,6 +1682,53 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.artifact-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.artifact-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0b111d;
+}
+
+.artifact-card header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.artifact-card strong {
+  color: var(--primary);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.artifact-card code,
+.artifact-meta {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-card pre {
+  max-height: 180px;
+}
+
+.muted-text {
+  margin: 0;
+  color: var(--text-muted);
+}
+
 .proof-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;

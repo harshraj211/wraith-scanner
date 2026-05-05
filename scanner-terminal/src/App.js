@@ -208,6 +208,8 @@ function App() {
   const [proofState, setProofState] = useState('safe mode');
   const [proofTasks, setProofTasks] = useState([]);
   const [evidenceArtifacts, setEvidenceArtifacts] = useState([]);
+  const [findingEvidenceArtifacts, setFindingEvidenceArtifacts] = useState([]);
+  const [findingEvidenceState, setFindingEvidenceState] = useState('idle');
   const [authzProfilesText, setAuthzProfilesText] = useState('');
   const [authzMatrixState, setAuthzMatrixState] = useState('idle');
   const [authzMatrixResult, setAuthzMatrixResult] = useState(null);
@@ -424,6 +426,24 @@ function App() {
       addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
     }
   };
+
+  const loadFindingEvidence = useCallback(async (findingId = '') => {
+    if (!findingId) {
+      setFindingEvidenceArtifacts([]);
+      setFindingEvidenceState('idle');
+      return;
+    }
+    setFindingEvidenceState('loading');
+    try {
+      const response = await axios.get(`${API_URL}/api/evidence/artifacts`, { params: { finding_id: findingId } });
+      setFindingEvidenceArtifacts(response.data.artifacts || []);
+      setFindingEvidenceState('loaded');
+    } catch (error) {
+      setFindingEvidenceArtifacts([]);
+      setFindingEvidenceState('error');
+      addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
+    }
+  }, [addProgress, latestScanId]);
 
   const loadExchange = async (requestId) => {
     if (!requestId) return;
@@ -1172,7 +1192,19 @@ function App() {
           />
         );
       case 'findings':
-        return <Findings findings={findings} findingsState={findingsState} latestScanId={latestScanId} onNavigate={navigate} onRunProof={runProofTask} onRefresh={() => loadFindings(latestScanId)} />;
+        return (
+          <Findings
+            findings={findings}
+            findingsState={findingsState}
+            latestScanId={latestScanId}
+            evidenceArtifacts={findingEvidenceArtifacts}
+            evidenceState={findingEvidenceState}
+            onNavigate={navigate}
+            onRunProof={runProofTask}
+            onRefresh={() => loadFindings(latestScanId)}
+            onLoadEvidence={loadFindingEvidence}
+          />
+        );
       case 'evidence':
         return (
           <EvidenceCorpus
