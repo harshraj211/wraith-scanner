@@ -3,6 +3,7 @@ import PageHeader from '../components/layout/PageHeader';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
 import EvidenceTable from '../components/scanner/EvidenceTable';
+import RequestResponseViewer from '../components/scanner/RequestResponseViewer';
 
 export default function ProxyHistory({
   latestScanId,
@@ -17,6 +18,9 @@ export default function ProxyHistory({
   decideProxyRequest,
   corpusRequests,
   selectedExchange,
+  corpusFilters,
+  updateCorpusFilter,
+  loadCorpus,
   loadExchange,
   sendRequestToRepeater,
   sendRequestToIntruder,
@@ -68,6 +72,25 @@ export default function ProxyHistory({
           </div>
         </Card>
         <Card title="Captured Requests" eyebrow={latestScanId || 'Corpus'}>
+          <div className="filter-bar">
+            <input placeholder="path contains" value={corpusFilters?.pathContains || ''} onChange={(event) => updateCorpusFilter?.('pathContains', event.target.value)} />
+            <select value={corpusFilters?.method || ''} onChange={(event) => updateCorpusFilter?.('method', event.target.value)}>
+              <option value="">Any method</option>
+              <option>GET</option>
+              <option>POST</option>
+              <option>PUT</option>
+              <option>PATCH</option>
+              <option>DELETE</option>
+            </select>
+            <select value={corpusFilters?.statusCode || ''} onChange={(event) => updateCorpusFilter?.('statusCode', event.target.value)}>
+              <option value="">Any status</option>
+              <option value="200">200</option>
+              <option value="300">300</option>
+              <option value="400">400</option>
+              <option value="500">500</option>
+            </select>
+            <Button variant="secondary" onClick={() => loadCorpus?.(latestScanId)} disabled={!latestScanId}>Refresh</Button>
+          </div>
           <EvidenceTable
             requests={corpusRequests}
             selectedExchange={selectedExchange}
@@ -75,6 +98,9 @@ export default function ProxyHistory({
             onSendToRepeater={sendRequestToRepeater}
             onSendToIntruder={sendRequestToIntruder}
           />
+        </Card>
+        <Card title="Selected Exchange" eyebrow="Inspector">
+          <RequestResponseViewer exchange={selectedExchange} />
         </Card>
       </div>
     </div>

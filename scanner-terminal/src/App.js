@@ -1113,6 +1113,9 @@ function App() {
             decideProxyRequest={decideProxyRequest}
             corpusRequests={corpusRequests}
             selectedExchange={selectedExchange}
+            corpusFilters={corpusFilters}
+            updateCorpusFilter={updateCorpusFilter}
+            loadCorpus={loadCorpus}
             loadExchange={loadExchange}
             sendRequestToRepeater={sendRequestToRepeater}
             sendRequestToIntruder={sendRequestToIntruder}
