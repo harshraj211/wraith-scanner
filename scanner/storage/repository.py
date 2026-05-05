@@ -44,8 +44,25 @@ class StorageRepository:
         self._lock = threading.RLock()
 
     def close(self) -> None:
+        """Close the SQLite connection and release Windows file handles promptly."""
         with self._lock:
-            self.conn.close()
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            try:
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+                self.conn = None
+
+    def __enter__(self) -> "StorageRepository":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def create_scan(self, scan_config: ScanConfig) -> None:
         data = scan_config.to_dict()

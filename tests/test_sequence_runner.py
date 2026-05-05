@@ -109,32 +109,31 @@ steps:
                 encoding="utf-8",
             )
 
-            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
-            scan = ScanConfig(scan_id="seq-scan", target_base_url=base_url)
-            repo.create_scan(scan)
+            with StorageRepository(str(Path(tmpdir) / "wraith.sqlite3")) as repo:
+                scan = ScanConfig(scan_id="seq-scan", target_base_url=base_url)
+                repo.create_scan(scan)
 
-            results = run_sequence_workflows(
-                str(workflow_path),
-                base_url=base_url,
-                storage_repo=repo,
-                scan_id=scan.scan_id,
-                auth_role="user_a",
-                safety_mode="safe",
-                timeout=5,
-            )
+                results = run_sequence_workflows(
+                    str(workflow_path),
+                    base_url=base_url,
+                    storage_repo=repo,
+                    scan_id=scan.scan_id,
+                    auth_role="user_a",
+                    safety_mode="safe",
+                    timeout=5,
+                )
 
-            self.assertEqual(len(results), 1)
-            result = results[0]
-            self.assertEqual(result.status, "succeeded")
-            self.assertEqual(result.variables["token"], "token-123")
-            self.assertEqual(result.variables["item_id"], "item-1")
-            self.assertEqual([step.status for step in result.steps], ["executed", "executed", "executed", "skipped"])
-            self.assertIn("safe mode", result.steps[-1].reason)
+                self.assertEqual(len(results), 1)
+                result = results[0]
+                self.assertEqual(result.status, "succeeded")
+                self.assertEqual(result.variables["token"], "token-123")
+                self.assertEqual(result.variables["item_id"], "item-1")
+                self.assertEqual([step.status for step in result.steps], ["executed", "executed", "executed", "skipped"])
+                self.assertIn("safe mode", result.steps[-1].reason)
 
-            saved_requests = repo.list_requests(scan.scan_id, {"source": "replay", "auth_role": "user_a"})
-            self.assertEqual(len(saved_requests), 3)
-            self.assertTrue(all(repo.get_response_for_request(item["request_id"]) for item in saved_requests))
-            repo.close()
+                saved_requests = repo.list_requests(scan.scan_id, {"source": "replay", "auth_role": "user_a"})
+                self.assertEqual(len(saved_requests), 3)
+                self.assertTrue(all(repo.get_response_for_request(item["request_id"]) for item in saved_requests))
 
     def test_failed_assertion_marks_workflow_failed(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_sequence_app()) as base_url:
@@ -149,22 +148,21 @@ steps:
                     }
                 ],
             }
-            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
-            repo.create_scan(ScanConfig(scan_id="seq-fail", target_base_url=base_url))
+            with StorageRepository(str(Path(tmpdir) / "wraith.sqlite3")) as repo:
+                repo.create_scan(ScanConfig(scan_id="seq-fail", target_base_url=base_url))
 
-            result = run_sequence_workflows(
-                workflow,
-                base_url=base_url,
-                storage_repo=repo,
-                scan_id="seq-fail",
-                safety_mode="safe",
-                timeout=5,
-            )[0]
+                result = run_sequence_workflows(
+                    workflow,
+                    base_url=base_url,
+                    storage_repo=repo,
+                    scan_id="seq-fail",
+                    safety_mode="safe",
+                    timeout=5,
+                )[0]
 
-            self.assertEqual(result.status, "failed")
-            self.assertEqual(result.failed_step, "login")
-            self.assertIn("expected status", result.steps[0].reason)
-            repo.close()
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.failed_step, "login")
+                self.assertIn("expected status", result.steps[0].reason)
 
     def test_loader_accepts_yaml_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
