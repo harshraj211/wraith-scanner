@@ -166,6 +166,7 @@ function App() {
   }]);
   const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
   const [manualState, setManualState] = useState('idle');
+  const [passiveState, setPassiveState] = useState('idle');
   const [intruderConfig, setIntruderConfig] = useState(initialIntruderConfig);
   const [intruderState, setIntruderState] = useState('idle');
   const [intruderResults, setIntruderResults] = useState([]);
@@ -707,6 +708,21 @@ function App() {
     navigate('repeater');
   };
 
+  const runPassiveScan = async () => {
+    const scanId = latestScanId || manualRequest.scanId;
+    if (!scanId) return;
+    setPassiveState('running');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/passive/${scanId}/run`);
+      setPassiveState('complete');
+      await loadFindings(scanId);
+      addProgress({ scan_id: scanId, type: 'success', message: `Passive scan created ${response.data.count || 0} findings.` });
+    } catch (error) {
+      setPassiveState('error');
+      addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
+    }
+  };
+
   const sendRequestToIntruder = (requestRecord) => {
     if (!requestRecord) return;
     const nextRequest = manualRequestFromRecord(requestRecord, manualRequest, latestScanId);
@@ -1137,6 +1153,8 @@ function App() {
             toggleManualProxyIntercept={toggleManualProxyIntercept}
             loadProxyPending={loadProxyPending}
             decideProxyRequest={decideProxyRequest}
+            runPassiveScan={runPassiveScan}
+            passiveState={passiveState}
             corpusRequests={corpusRequests}
             selectedExchange={selectedExchange}
             corpusFilters={corpusFilters}

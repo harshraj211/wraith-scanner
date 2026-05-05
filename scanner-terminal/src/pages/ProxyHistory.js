@@ -16,6 +16,8 @@ export default function ProxyHistory({
   toggleManualProxyIntercept,
   loadProxyPending,
   decideProxyRequest,
+  runPassiveScan,
+  passiveState,
   corpusRequests,
   selectedExchange,
   corpusFilters,
@@ -38,6 +40,7 @@ export default function ProxyHistory({
         actions={(
           <>
             <Button variant="secondary" onClick={refreshProxyStatus}>Status</Button>
+            <Button variant="secondary" onClick={runPassiveScan} disabled={!latestScanId || passiveState === 'running'}>{passiveState === 'running' ? 'Passive scanning' : 'Run passive scan'}</Button>
             <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
               {browserState === 'opening' ? 'Opening...' : 'Open browser'}
             </Button>
