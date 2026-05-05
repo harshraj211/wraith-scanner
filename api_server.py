@@ -2098,6 +2098,26 @@ def manual_proxy_ca_guide():
     })
 
 
+@app.route('/api/manual/proxy/ca/leaf/status', methods=['GET'])
+def manual_proxy_ca_leaf_status():
+    hostname = str(request.args.get('host') or request.args.get('hostname') or '').strip()
+    status = manual_ca.leaf_status(hostname)
+    http_status = 200 if status.available and (status.generated or status.can_generate) else 400
+    return jsonify(status.to_dict()), http_status
+
+
+@app.route('/api/manual/proxy/ca/leaf/generate', methods=['POST'])
+def manual_proxy_ca_leaf_generate():
+    payload = request.get_json(silent=True) or {}
+    hostname = str(payload.get('host') or payload.get('hostname') or '').strip()
+    try:
+        status = manual_ca.generate_leaf_certificate(hostname, overwrite=bool(payload.get('overwrite')))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    http_status = 200 if status.available and status.generated else 409
+    return jsonify(status.to_dict()), http_status
+
+
 @app.route('/api/manual/proxy/intercept', methods=['POST'])
 def manual_proxy_intercept():
     payload = request.get_json(silent=True) or {}

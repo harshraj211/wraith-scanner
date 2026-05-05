@@ -449,6 +449,8 @@ GET  http://127.0.0.1:5001/api/manual/proxy/ca/status
 POST http://127.0.0.1:5001/api/manual/proxy/ca/generate
 GET  http://127.0.0.1:5001/api/manual/proxy/ca/download
 GET  http://127.0.0.1:5001/api/manual/proxy/ca/guide
+GET  http://127.0.0.1:5001/api/manual/proxy/ca/leaf/status?host=<hostname>
+POST http://127.0.0.1:5001/api/manual/proxy/ca/leaf/generate
 POST http://127.0.0.1:5001/api/manual/browser/open
 GET  http://127.0.0.1:5001/api/manual/browser/status
 POST http://127.0.0.1:5001/api/manual/browser/close
@@ -463,9 +465,9 @@ GET  http://127.0.0.1:5001/api/evidence/bundle/<finding-id>
 Request filters include `method`, `host`, `path_contains`, `status_code`, `content_type`, `source`, `auth_role`, `parameter_name`, and `has_finding`.
 Manual replay sends a bounded operator-specified request, blocks destructive verbs in safe mode unless explicitly allowed, and stores the sanitized exchange as source `manual`.
 
-Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT returns a clear unsupported response until certificate-managed interception is added.
+Manual proxy capture starts a local HTTP proxy, stores captured requests/responses in the SQLite corpus as source `proxy`, and can optionally pause requests for explicit `forward`, `drop`, or edit-before-forward. This first proxy slice intentionally does not MITM HTTPS traffic; HTTPS CONNECT is scope-checked and then returns a clear unsupported response until certificate-managed interception is added.
 
-Manual mode includes a local CA setup surface for future HTTPS interception. Wraith can generate and download a public local CA certificate plus installation guidance, but HTTPS CONNECT interception remains disabled until the scoped MITM engine is implemented.
+Manual mode includes a local CA setup surface for future HTTPS interception. Wraith can generate and download a public local CA certificate plus installation guidance, generate scoped per-host leaf certificates, and report CONNECT guard activity, but HTTPS CONNECT interception remains disabled until the scoped MITM engine is implemented.
 
 Manual findings created from proxy history store linked sanitized evidence artifacts automatically. The selected request, latest response, and operator note are saved as `request`, `response`, and `log` artifacts tied to the finding ID.
 

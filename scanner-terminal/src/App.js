@@ -680,6 +680,12 @@ function App() {
     window.open(`${API_URL}/api/manual/proxy/ca/download`, '_blank');
   };
 
+  const generateProxyLeafCertificate = async (host) => {
+    const response = await axios.post(`${API_URL}/api/manual/proxy/ca/leaf/generate`, { host });
+    addProgress({ type: 'success', message: `Generated scoped HTTPS leaf certificate for ${response.data.hostname || host}.` });
+    return response.data;
+  };
+
   const startManualProxy = async () => {
     setProxyState('starting');
     try {
@@ -1296,6 +1302,7 @@ function App() {
             refreshProxyCaStatus={refreshProxyCaStatus}
             generateProxyCa={generateProxyCa}
             downloadProxyCa={downloadProxyCa}
+            generateProxyLeafCertificate={generateProxyLeafCertificate}
             browserState={browserState}
             browserStatus={browserStatus}
             openWraithBrowser={openWraithBrowser}

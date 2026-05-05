@@ -13,11 +13,31 @@ export default function ManualTesting({
   refreshProxyCaStatus,
   generateProxyCa,
   downloadProxyCa,
+  generateProxyLeafCertificate,
   browserState,
   browserStatus,
   openWraithBrowser,
   closeWraithBrowser,
 }) {
+  const [leafHost, setLeafHost] = React.useState('');
+  const [leafStatus, setLeafStatus] = React.useState(null);
+  const [leafState, setLeafState] = React.useState('idle');
+
+  const handleGenerateLeaf = async () => {
+    if (!leafHost.trim() || !generateProxyLeafCertificate) {
+      return;
+    }
+    setLeafState('generating');
+    try {
+      const status = await generateProxyLeafCertificate(leafHost.trim());
+      setLeafStatus(status);
+      setLeafState('ready');
+    } catch (error) {
+      setLeafStatus({ warning: error?.response?.data?.error || error?.response?.data?.warning || error.message });
+      setLeafState('error');
+    }
+  };
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -98,6 +118,10 @@ export default function ManualTesting({
             <code>{proxyCaStatus?.https_interception_enabled ? 'enabled' : 'disabled'}</code>
           </div>
           <div>
+            <span>CONNECT guard</span>
+            <code>{proxyStatus?.https_connect_blocked_count || 0} blocked / scope checked</code>
+          </div>
+          <div>
             <span>Fingerprint</span>
             <code>{proxyCaStatus?.fingerprint_sha256 || '-'}</code>
           </div>
@@ -106,6 +130,37 @@ export default function ManualTesting({
             <code>{proxyCaStatus?.valid_until || '-'}</code>
           </div>
         </div>
+        <div className="form-grid compact">
+          <label className="field wide">
+            <span>Generate scoped host leaf</span>
+            <input
+              value={leafHost}
+              onChange={(event) => setLeafHost(event.target.value)}
+              placeholder="api.example.test or https://api.example.test:443"
+            />
+          </label>
+        </div>
+        <div className="button-row">
+          <Button
+            variant="secondary"
+            onClick={handleGenerateLeaf}
+            disabled={!proxyCaStatus?.generated || !leafHost.trim() || leafState === 'generating'}
+          >
+            {leafState === 'generating' ? 'Generating Host Cert' : 'Generate Host Cert'}
+          </Button>
+        </div>
+        {leafStatus && (
+          <div className="nuclei-asset-card">
+            <div>
+              <span>Host certificate</span>
+              <code>{leafStatus.generated ? leafStatus.hostname : leafStatus.warning || 'not generated'}</code>
+            </div>
+            <div>
+              <span>Fingerprint</span>
+              <code>{leafStatus.fingerprint_sha256 || '-'}</code>
+            </div>
+          </div>
+        )}
       </Card>
       <div className="tool-grid">
         {[

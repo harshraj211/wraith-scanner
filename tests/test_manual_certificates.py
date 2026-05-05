@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cryptography import x509
+
 from api_server import app
 from scanner.manual.certificates import WraithCAManager
 
@@ -24,6 +26,26 @@ class ManualCertificateTests(unittest.TestCase):
             self.assertTrue(manager.key_path.exists())
             self.assertNotIn(str(manager.key_path), json.dumps(payload))
             self.assertEqual(len(after.fingerprint_sha256), 64)
+
+    def test_ca_manager_generates_scoped_leaf_certificate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = WraithCAManager(Path(tmpdir) / "certs")
+            missing = manager.leaf_status("https://app.example.test:8443/login")
+            self.assertFalse(missing.generated)
+            self.assertFalse(missing.can_generate)
+
+            manager.generate()
+            leaf = manager.generate_leaf_certificate("https://app.example.test:8443/login")
+            payload = leaf.to_dict()
+            self.assertTrue(leaf.generated)
+            self.assertEqual(leaf.hostname, "app.example.test")
+            self.assertTrue(Path(leaf.certificate_path).exists())
+            self.assertNotIn(".key", json.dumps(payload))
+            self.assertEqual(len(leaf.fingerprint_sha256), 64)
+
+            cert = x509.load_pem_x509_certificate(Path(leaf.certificate_path).read_bytes())
+            names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            self.assertIn("app.example.test", names.get_values_for_type(x509.DNSName))
 
     def test_ca_api_status_generate_download_and_guide(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -46,6 +68,25 @@ class ManualCertificateTests(unittest.TestCase):
                 self.assertEqual(download_response.status_code, 200)
                 self.assertIn("BEGIN CERTIFICATE", download_response.get_data(as_text=True))
                 download_response.close()
+
+    def test_ca_api_generates_leaf_certificate_after_ca_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = WraithCAManager(Path(tmpdir) / "certs")
+            client = app.test_client()
+            with patch("api_server.manual_ca", manager):
+                blocked = client.post("/api/manual/proxy/ca/leaf/generate", json={"host": "api.example.test"})
+                self.assertEqual(blocked.status_code, 409)
+                self.assertFalse(blocked.get_json()["generated"])
+
+                client.post("/api/manual/proxy/ca/generate", json={})
+                generated = client.post("/api/manual/proxy/ca/leaf/generate", json={"host": "api.example.test"})
+                self.assertEqual(generated.status_code, 200)
+                self.assertTrue(generated.get_json()["generated"])
+                self.assertEqual(generated.get_json()["hostname"], "api.example.test")
+
+                status = client.get("/api/manual/proxy/ca/leaf/status?host=api.example.test")
+                self.assertEqual(status.status_code, 200)
+                self.assertTrue(status.get_json()["generated"])
 
 
 if __name__ == "__main__":

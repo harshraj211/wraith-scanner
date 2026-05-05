@@ -1,10 +1,12 @@
 import tempfile
+import socket
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, request
@@ -43,6 +45,25 @@ def proxied_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+def send_connect(proxy_status, target: str) -> str:
+    with socket.create_connection((proxy_status["host"], proxy_status["port"]), timeout=5) as sock:
+        payload = (
+            f"CONNECT {target} HTTP/1.1\r\n"
+            f"Host: {target}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        sock.sendall(payload)
+        sock.settimeout(5)
+        chunks = []
+        while True:
+            chunk = sock.recv(2048)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 class ManualProxyTests(unittest.TestCase):
@@ -101,6 +122,51 @@ class ManualProxyTests(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 403)
                 self.assertEqual(repo.list_requests("proxy-scope", {"source": "proxy"}), [])
+            finally:
+                proxy.stop()
+                repo.close()
+
+    def test_https_connect_is_scope_checked_before_mitm_rejection(self):
+        with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            proxy = WraithProxyController()
+            try:
+                status = proxy.start(
+                    repo,
+                    ProxyConfig(
+                        scan_id="proxy-connect",
+                        target_base_url=base_url,
+                        scope=[base_url],
+                    ),
+                )
+                parsed = urlparse(base_url)
+                response = send_connect(status, f"{parsed.hostname}:{parsed.port}")
+
+                self.assertIn("501", response)
+                self.assertIn("TLS MITM forwarding is not enabled", response)
+                self.assertEqual(proxy.status()["https_connect_blocked_count"], 1)
+            finally:
+                proxy.stop()
+                repo.close()
+
+    def test_https_connect_blocks_out_of_scope_hosts(self):
+        with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            proxy = WraithProxyController()
+            try:
+                status = proxy.start(
+                    repo,
+                    ProxyConfig(
+                        scan_id="proxy-connect-scope",
+                        target_base_url=base_url,
+                        scope=[base_url],
+                    ),
+                )
+                response = send_connect(status, "example.test:443")
+
+                self.assertIn("403", response)
+                self.assertIn("outside Wraith HTTPS proxy scope", response)
+                self.assertEqual(proxy.status()["https_connect_blocked_count"], 1)
             finally:
                 proxy.stop()
                 repo.close()

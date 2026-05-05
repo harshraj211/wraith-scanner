@@ -17,7 +17,8 @@ Priority upgrades:
 1. HTTPS interception architecture
    - Local CA generation. Implemented as a prep layer.
    - Operator-visible certificate install guide. Implemented as a prep layer.
-   - Scope allowlist and excluded hosts before interception.
+   - Scope allowlist and excluded hosts before interception. CONNECT gate implemented.
+   - Scoped per-host leaf certificate generation. Implemented as a prep layer.
    - HTTPS request/response capture.
    - WebSocket capture.
    - HAR export.
@@ -45,7 +46,7 @@ Priority upgrades:
 Current start:
 
 - Dedicated Comparer workflow backed by the existing manual response comparison API.
-- Local CA status/generation/download endpoints and Manual Testing UI prep for future scoped HTTPS interception.
+- Local CA status/generation/download endpoints, per-host leaf certificate prep, CONNECT scope checks, and Manual Testing UI prep for future scoped HTTPS interception.
 
 ## Phase 2: Enterprise Vulnerability Management
 

@@ -201,6 +201,40 @@ paths:
       responses:
         '200':
           description: Proxy status
+  /api/manual/proxy/ca/status:
+    get:
+      tags: [Manual]
+      summary: Get Wraith local CA status
+      responses:
+        '200':
+          description: CA status
+  /api/manual/proxy/ca/generate:
+    post:
+      tags: [Manual]
+      summary: Generate Wraith local CA for future scoped HTTPS interception
+      responses:
+        '200':
+          description: CA status
+  /api/manual/proxy/ca/leaf/status:
+    get:
+      tags: [Manual]
+      summary: Get scoped host leaf certificate status
+      parameters:
+        - in: query
+          name: host
+          schema:
+            type: string
+          required: true
+      responses:
+        '200':
+          description: Leaf certificate status
+  /api/manual/proxy/ca/leaf/generate:
+    post:
+      tags: [Manual]
+      summary: Generate scoped host leaf certificate for future HTTPS interception
+      responses:
+        '200':
+          description: Leaf certificate status
   /api/manual/browser/open:
     post:
       tags: [Manual]

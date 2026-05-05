@@ -87,6 +87,7 @@ class WraithProxyController:
         self._captured_count = 0
         self._dropped_count = 0
         self._modified_count = 0
+        self._https_connect_blocked_count = 0
 
     def start(self, repo: StorageRepository, config: Optional[ProxyConfig] = None) -> Dict[str, Any]:
         with self._lock:
@@ -154,6 +155,8 @@ class WraithProxyController:
                 "captured_count": self._captured_count,
                 "dropped_count": self._dropped_count,
                 "modified_count": self._modified_count,
+                "https_interception_enabled": False,
+                "https_connect_blocked_count": self._https_connect_blocked_count,
             }
 
     def set_intercept(self, enabled: bool) -> Dict[str, Any]:
@@ -191,7 +194,7 @@ class WraithProxyController:
                 return None
 
             def do_CONNECT(self) -> None:
-                self.send_error(501, "HTTPS CONNECT interception is not enabled in this build")
+                controller._handle_connect(self)
 
             def do_GET(self) -> None:
                 self._handle_proxy()
@@ -218,6 +221,30 @@ class WraithProxyController:
                 controller._handle_request(self)
 
         return WraithProxyHandler
+
+    def _handle_connect(self, handler: BaseHTTPRequestHandler) -> None:
+        try:
+            host, port = self._connect_target(str(handler.path or ""))
+        except ValueError as exc:
+            self._write_text(handler, 400, str(exc))
+            return
+
+        scope_error = self._connect_scope_error(host, port)
+        if scope_error:
+            with self._lock:
+                self._https_connect_blocked_count += 1
+            self._write_text(handler, 403, scope_error)
+            return
+
+        with self._lock:
+            self._https_connect_blocked_count += 1
+        self._write_text(
+            handler,
+            501,
+            "HTTPS CONNECT is scoped, but TLS MITM forwarding is not enabled in this build. "
+            "Generate and install the Wraith CA first; future HTTPS capture will remain limited "
+            "to explicitly authorized hosts.",
+        )
 
     def _handle_request(self, handler: BaseHTTPRequestHandler) -> None:
         started = time.time()
@@ -387,6 +414,49 @@ class WraithProxyController:
             return "URL is outside Wraith proxy scope"
         return ""
 
+    def _connect_scope_error(self, host: str, port: int) -> str:
+        normalized_host = host.lower().strip("[]")
+        netloc = f"{normalized_host}:{port}"
+        excluded = {item.lower().strip("[]") for item in self._config.excluded_hosts}
+        if normalized_host in excluded or netloc in excluded:
+            return "Host is excluded from Wraith HTTPS proxy scope"
+        if not self._config.scope:
+            return ""
+        for scope in self._config.scope:
+            scope_value = str(scope or "")
+            parsed = urlparse(scope_value if "://" in scope_value else f"//{scope_value}")
+            scope_host = (parsed.hostname or "").lower().strip("[]")
+            if not scope_host:
+                continue
+            if scope_host != normalized_host:
+                continue
+            if parsed.port is not None and int(parsed.port) != int(port):
+                continue
+            return ""
+        return "Host is outside Wraith HTTPS proxy scope"
+
+    def _connect_target(self, raw_target: str) -> tuple[str, int]:
+        target = raw_target.strip()
+        if not target:
+            raise ValueError("CONNECT requires host:port")
+        if target.startswith("[") and "]" in target:
+            host, _, rest = target[1:].partition("]")
+            port_text = rest[1:] if rest.startswith(":") else "443"
+        else:
+            host, separator, port_text = target.rpartition(":")
+            if not separator:
+                host, port_text = target, "443"
+        host = host.strip()
+        if not host:
+            raise ValueError("CONNECT requires a host")
+        try:
+            port = int(port_text or "443")
+        except ValueError as exc:
+            raise ValueError("CONNECT requires a numeric port") from exc
+        if port <= 0 or port > 65535:
+            raise ValueError("CONNECT port is outside valid range")
+        return host, port
+
     def _read_body(self, handler: BaseHTTPRequestHandler) -> bytes:
         try:
             length = int(handler.headers.get("Content-Length") or "0")
@@ -423,6 +493,8 @@ class WraithProxyController:
         handler.send_response(status_code)
         handler.send_header("Content-Type", "text/plain; charset=utf-8")
         handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Connection", "close")
         handler.end_headers()
         if handler.command != "HEAD":
             handler.wfile.write(payload)
+        handler.close_connection = True
