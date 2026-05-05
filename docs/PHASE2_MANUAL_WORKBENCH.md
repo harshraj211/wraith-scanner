@@ -14,6 +14,7 @@ Phase 2 moves Wraith closer to a Burp-style manual testing workflow while keepin
   - refresh action
   - selected request/response inspector
 - Repeater now supports saving requests into the corpus without sending them.
+- Repeater tracks recent attempts per tab and summarizes response diffs by status, length, time, body hash, and title.
 - Intruder now supports:
   - grep-match text checks
   - regex extraction from response excerpts
@@ -28,6 +29,7 @@ Phase 2 moves Wraith closer to a Burp-style manual testing workflow while keepin
   - cacheable HTML/JSON responses
 - Proxy UI can trigger passive scanning for the active scan.
 - Selected proxy/corpus exchanges can be promoted into manual findings with request/response evidence linkage.
+- Manual response comparison endpoint can produce response diffs and persist them as evidence artifacts when linked to a finding.
 
 ## Current limits
 
@@ -40,5 +42,5 @@ Phase 2 moves Wraith closer to a Burp-style manual testing workflow while keepin
 1. HTTPS MITM setup flow with explicit certificate install guidance.
 2. Proxy interception editor for pending requests, not just forward/drop controls.
 3. Passive scanner expansion for reflected inputs, disclosure checks, and duplicate grouping.
-4. Repeater response diff between attempts.
+4. Full side-by-side Repeater body/header diff view.
 5. Finding-to-evidence artifact export for reports and proof mode.
