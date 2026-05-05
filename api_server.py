@@ -34,7 +34,7 @@ from scanner.utils.auth_manager import get_auth_manager
 from scanner.utils.mode_manager import get_mode_manager
 from scanner.reporting.pdf_generator import generate_pdf_report
 from scanner.reporting.json_export import write_scan_json
-from scanner.core.models import Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
+from scanner.core.models import EvidenceArtifact, Finding, ProofTask, RequestRecord, ScanConfig, findings_from_legacy
 from scanner.core.models import ResponseRecord
 from scanner.exploitation.evidence import persist_proof_result
 from scanner.exploitation.models import ProofContext
@@ -1629,6 +1629,45 @@ def list_evidence_artifacts_endpoint():
         'count': len(artifacts),
         'artifacts': artifacts,
     })
+
+
+@app.route('/api/manual/compare-responses', methods=['POST'])
+def manual_compare_responses():
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+    payload = request.get_json(silent=True) or {}
+    baseline_id = str(payload.get('baseline_request_id') or '').strip()
+    candidate_id = str(payload.get('candidate_request_id') or '').strip()
+    if not baseline_id or not candidate_id:
+        return jsonify({'error': 'baseline_request_id and candidate_request_id are required'}), 400
+    baseline_response = repo.get_response_for_request(baseline_id)
+    candidate_response = repo.get_response_for_request(candidate_id)
+    if not baseline_response or not candidate_response:
+        return jsonify({'error': 'Both requests must have captured responses'}), 404
+
+    diff = {
+        'baseline_request_id': baseline_id,
+        'candidate_request_id': candidate_id,
+        'status_delta': f"{baseline_response.get('status_code') or '-'} -> {candidate_response.get('status_code') or '-'}",
+        'length_delta': int(candidate_response.get('content_length') or 0) - int(baseline_response.get('content_length') or 0),
+        'time_delta_ms': int(candidate_response.get('response_time_ms') or 0) - int(baseline_response.get('response_time_ms') or 0),
+        'body_changed': (baseline_response.get('body_hash') or '') != (candidate_response.get('body_hash') or ''),
+        'baseline_title': baseline_response.get('title') or '',
+        'candidate_title': candidate_response.get('title') or '',
+    }
+    finding_id = str(payload.get('finding_id') or '').strip()
+    artifact = None
+    if finding_id:
+        artifact = EvidenceArtifact(
+            artifact_id='',
+            finding_id=finding_id,
+            task_id='',
+            artifact_type='diff',
+            inline_excerpt=_json.dumps(diff, indent=2),
+        )
+        repo.save_evidence_artifact(artifact)
+    return jsonify({'diff': diff, 'artifact': artifact.to_dict() if artifact else None})
 
 
 @app.route('/api/manual/save-request', methods=['POST'])

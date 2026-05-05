@@ -86,6 +86,34 @@ class CorpusApiTests(unittest.TestCase):
                 self.assertIn("Request evidence", manual["discovery_evidence"])
             repo.close()
 
+    def test_manual_compare_responses_returns_diff_and_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            scan = ScanConfig(scan_id="scan-diff", target_base_url="https://app.example.test")
+            repo.create_scan(scan)
+            req_a = RequestRecord.create(scan_id=scan.scan_id, source="manual", method="GET", url="https://app.example.test/a")
+            req_b = RequestRecord.create(scan_id=scan.scan_id, source="manual", method="GET", url="https://app.example.test/b")
+            repo.save_request(req_a)
+            repo.save_request(req_b)
+            repo.save_response(ResponseRecord.create(request_id=req_a.request_id, status_code=200, headers={"Content-Type": "text/html"}, body="old", response_time_ms=10))
+            repo.save_response(ResponseRecord.create(request_id=req_b.request_id, status_code=500, headers={"Content-Type": "text/html"}, body="new body", response_time_ms=25))
+            finding = Finding.from_legacy({"type": "manual", "title": "Manual diff", "url": req_b.url, "confidence": 80}, target_url=scan.target_base_url, scan_id=scan.scan_id)
+            repo.save_finding(finding)
+
+            with patch("api_server._storage_repo", return_value=repo):
+                client = app.test_client()
+                response = client.post("/api/manual/compare-responses", json={
+                    "baseline_request_id": req_a.request_id,
+                    "candidate_request_id": req_b.request_id,
+                    "finding_id": finding.finding_id,
+                })
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["diff"]["status_delta"], "200 -> 500")
+                self.assertTrue(payload["diff"]["body_changed"])
+                self.assertEqual(payload["artifact"]["artifact_type"], "diff")
+            repo.close()
+
     def test_manual_replay_saves_sanitized_exchange(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
