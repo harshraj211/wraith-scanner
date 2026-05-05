@@ -3,6 +3,7 @@
 Async DAST and SAST scanner for modern web applications, SPAs, and GitHub repositories.
 
 Phase 1 hardening status is tracked in [`docs/PHASE1_HARDENING.md`](docs/PHASE1_HARDENING.md).
+Phase 2 manual workbench status is tracked in [`docs/PHASE2_MANUAL_WORKBENCH.md`](docs/PHASE2_MANUAL_WORKBENCH.md).
 
 Wraith now ships with four major engine upgrades plus the first VA+Proof platform groundwork:
 
