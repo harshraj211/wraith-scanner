@@ -60,6 +60,8 @@ const initialIntruderConfig = {
   payloads: 'wraith-test\nwraith_probe\n%27',
   delayMs: '150',
   maxRequests: '25',
+  matchText: '',
+  extractRegex: '',
 };
 
 const initialNucleiConfig = {
@@ -755,7 +757,7 @@ function App() {
           source: 'fuzzer',
         });
         scanId = response.data.scan_id || scanId;
-        const result = buildIntruderResult(payload, response.data.request, response.data.response);
+        const result = buildIntruderResult(payload, response.data.request, response.data.response, intruderConfig);
         setLatestScanId(scanId);
         lastExchange = result.exchange;
         setSelectedIntruderResultId(result.resultId);
@@ -1474,19 +1476,36 @@ function appendPayloadParam(url, payload) {
   }
 }
 
-function buildIntruderResult(payload, request, response) {
+function buildIntruderResult(payload, request, response, config = {}) {
   const status = response?.status_code || 'error';
   const length = Number(response?.content_length || 0);
   const timeMs = Number(response?.response_time_ms || 0);
+  const body = String(response?.body_excerpt || response?.body || '');
+  const matchText = String(config.matchText || '').trim();
+  const matched = matchText ? body.toLowerCase().includes(matchText.toLowerCase()) : false;
+  const extract = extractIntruderValue(body, config.extractRegex);
   return {
     resultId: `intr_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`,
     payload,
     status,
     length,
     timeMs,
+    matched,
+    extract,
     cluster: `${status}:${length}:${response?.body_hash || ''}`.slice(0, 80),
     exchange: { request, response },
   };
+}
+
+function extractIntruderValue(body, pattern) {
+  const source = String(pattern || '').trim();
+  if (!source) return '';
+  try {
+    const match = String(body || '').match(new RegExp(source, 'i'));
+    return match ? String(match[1] || match[0] || '').slice(0, 120) : '';
+  } catch (_error) {
+    return 'invalid regex';
+  }
 }
 
 function buildIntruderError(payload, error) {

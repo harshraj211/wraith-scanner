@@ -41,6 +41,8 @@ export default function Intruder({
             <label className="field"><span>Payload marker</span><input value={intruderConfig.marker} onChange={(event) => updateIntruderConfig('marker', event.target.value)} /></label>
             <label className="field"><span>Delay ms</span><input value={intruderConfig.delayMs} onChange={(event) => updateIntruderConfig('delayMs', event.target.value)} /></label>
             <label className="field"><span>Max requests</span><input value={intruderConfig.maxRequests} onChange={(event) => updateIntruderConfig('maxRequests', event.target.value)} /></label>
+            <label className="field"><span>Grep match</span><input placeholder="text expected in response" value={intruderConfig.matchText} onChange={(event) => updateIntruderConfig('matchText', event.target.value)} /></label>
+            <label className="field wide"><span>Extract regex</span><input placeholder="e.g. token=([A-Za-z0-9._-]+)" value={intruderConfig.extractRegex} onChange={(event) => updateIntruderConfig('extractRegex', event.target.value)} /></label>
             <label className="field wide"><span>Payloads</span><textarea value={intruderConfig.payloads} onChange={(event) => updateIntruderConfig('payloads', event.target.value)} /></label>
           </div>
         </Card>
@@ -55,6 +57,8 @@ export default function Intruder({
               { key: 'status', label: 'Status', width: '82px' },
               { key: 'length', label: 'Length', width: '82px' },
               { key: 'timeMs', label: 'Time', width: '82px' },
+              { key: 'matched', label: 'Match', width: '82px', render: (row) => row.matched ? 'yes' : '-' },
+              { key: 'extract', label: 'Extract', width: 'minmax(120px, 180px)' },
               { key: 'cluster', label: 'Cluster', width: 'minmax(160px, 1fr)' },
             ]}
             rows={intruderResults}
