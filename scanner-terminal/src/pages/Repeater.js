@@ -9,6 +9,7 @@ export default function Repeater({
   manualRequest,
   updateManualRequest,
   sendManualReplay,
+  saveManualRequest,
   manualState,
   repeaterTabs,
   activeRepeaterTabId,
@@ -27,6 +28,7 @@ export default function Repeater({
         actions={(
           <>
             <Button variant="secondary" onClick={() => onNavigate('intruder')}>Send to Intruder</Button>
+            <Button variant="secondary" onClick={saveManualRequest} disabled={manualState === 'saving'}>{manualState === 'saving' ? 'Saving' : 'Save'}</Button>
             <Button onClick={sendManualReplay} disabled={manualState === 'sending'}>{manualState === 'sending' ? 'Sending' : 'Send'}</Button>
           </>
         )}

@@ -481,6 +481,30 @@ function App() {
     }
   };
 
+  const saveManualRequest = async () => {
+    if (!manualRequest.url.trim()) return;
+    setManualState('saving');
+    try {
+      const response = await axios.post(`${API_URL}/api/manual/save-request`, {
+        scan_id: manualRequest.scanId || latestScanId,
+        method: manualRequest.method,
+        url: manualRequest.url.trim(),
+        headers: parseKeyValueLines(manualRequest.headers),
+        body: manualRequest.body,
+        auth_role: 'manual',
+      });
+      const scanId = response.data.scan_id;
+      setManualState('saved');
+      setLatestScanId(scanId);
+      applyManualRequestUpdate((current) => ({ ...current, scanId }));
+      await loadCorpus(scanId);
+      addProgress({ scan_id: scanId, type: 'success', message: `Manual request saved: ${response.data.request?.method || ''} ${response.data.request?.url || ''}` });
+    } catch (error) {
+      setManualState('error');
+      addProgress({ scan_id: manualRequest.scanId || latestScanId, type: 'error', message: apiError(error) });
+    }
+  };
+
   const sendManualReplay = async () => {
     if (!manualRequest.url.trim()) return;
     setManualState('sending');
@@ -1131,6 +1155,7 @@ function App() {
             manualRequest={manualRequest}
             updateManualRequest={updateManualRequest}
             sendManualReplay={sendManualReplay}
+            saveManualRequest={saveManualRequest}
             manualState={manualState}
             repeaterTabs={repeaterTabs}
             activeRepeaterTabId={activeRepeaterTabId}

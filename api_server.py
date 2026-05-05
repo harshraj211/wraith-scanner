@@ -1573,6 +1573,55 @@ def list_evidence_artifacts_endpoint():
     })
 
 
+@app.route('/api/manual/save-request', methods=['POST'])
+def manual_save_request():
+    payload = request.get_json(silent=True) or {}
+    method = str(payload.get('method') or 'GET').upper()
+    url = str(payload.get('url') or '').strip()
+    headers = payload.get('headers') or {}
+    body = payload.get('body') or ''
+    scan_id = str(payload.get('scan_id') or '').strip()
+    auth_role = str(payload.get('auth_role') or 'manual')
+
+    if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
+        return jsonify({'error': 'Unsupported HTTP method'}), 400
+    parsed = urlparse(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        return jsonify({'error': 'Manual save requires an absolute http(s) URL'}), 400
+    if not isinstance(headers, dict):
+        return jsonify({'error': 'headers must be an object'}), 400
+
+    repo = _storage_repo()
+    if repo is None:
+        return jsonify({'error': 'Corpus storage unavailable'}), 503
+
+    if not scan_id:
+        scan_id = f"manual_{uuid.uuid4().hex[:10]}"
+        repo.create_scan(ScanConfig(
+            scan_id=scan_id,
+            target_base_url=f"{parsed.scheme}://{parsed.netloc}",
+            scope=[f"{parsed.scheme}://{parsed.netloc}"],
+            safety_mode='safe',
+            output_dir=REPORTS_DIR,
+        ))
+
+    request_record = RequestRecord.create(
+        scan_id=scan_id,
+        source='manual',
+        method=method,
+        url=url,
+        headers=headers,
+        body=body,
+        auth_role=auth_role,
+    )
+    repo.save_request(request_record)
+    return jsonify({
+        'scan_id': scan_id,
+        'request': request_record.to_dict(),
+        'saved': True,
+    })
+
+
 @app.route('/api/manual/replay', methods=['POST'])
 def manual_replay_request():
     payload = request.get_json(silent=True) or {}
