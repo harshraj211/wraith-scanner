@@ -1,0 +1,336 @@
+openapi: 3.0.3
+info:
+  title: Wraith Scanner API
+  version: 4.0.0
+  description: Local API for automated scans, repository SAST, corpus evidence, manual testing, integrations, and proof workflows.
+servers:
+  - url: http://127.0.0.1:5001
+    description: Local development server
+tags:
+  - name: Scans
+  - name: Corpus
+  - name: Manual
+  - name: Integrations
+  - name: Proof
+paths:
+  /api/scan:
+    post:
+      tags: [Scans]
+      summary: Start an automated DAST scan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanRequest'
+      responses:
+        '200':
+          description: Scan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanAccepted'
+  /api/scan/repo:
+    post:
+      tags: [Scans]
+      summary: Start repository SAST scan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo_url]
+              properties:
+                repo_url:
+                  type: string
+                  example: https://github.com/example/app
+                token:
+                  type: string
+                  description: Optional private repository token. Never log this value.
+                branch:
+                  type: string
+                  default: main
+      responses:
+        '200':
+          description: Scan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanAccepted'
+  /api/scan/{scan_id}:
+    get:
+      tags: [Scans]
+      summary: Get scan status and summary
+      parameters:
+        - $ref: '#/components/parameters/ScanId'
+      responses:
+        '200':
+          description: Scan status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/download/{scan_id}:
+    get:
+      tags: [Scans]
+      summary: Download PDF report
+      parameters:
+        - $ref: '#/components/parameters/ScanId'
+      responses:
+        '200':
+          description: PDF report
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+  /api/download-json/{scan_id}:
+    get:
+      tags: [Scans]
+      summary: Download canonical JSON report
+      parameters:
+        - $ref: '#/components/parameters/ScanId'
+      responses:
+        '200':
+          description: JSON report
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/corpus/{scan_id}/requests:
+    get:
+      tags: [Corpus]
+      summary: List captured requests for a scan
+      parameters:
+        - $ref: '#/components/parameters/ScanId'
+        - name: method
+          in: query
+          schema: { type: string }
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: status_code
+          in: query
+          schema: { type: integer }
+        - name: path_contains
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Request corpus rows
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/corpus/request/{request_id}:
+    get:
+      tags: [Corpus]
+      summary: Fetch a captured request/response exchange
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Request/response exchange
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/corpus/{scan_id}/findings:
+    get:
+      tags: [Corpus]
+      summary: List findings for a scan
+      parameters:
+        - $ref: '#/components/parameters/ScanId'
+      responses:
+        '200':
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/manual/replay:
+    post:
+      tags: [Manual]
+      summary: Replay a manually crafted HTTP request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualReplayRequest'
+      responses:
+        '200':
+          description: Replay result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/manual/proxy/start:
+    post:
+      tags: [Manual]
+      summary: Start local manual proxy
+      responses:
+        '200':
+          description: Proxy status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/manual/proxy/stop:
+    post:
+      tags: [Manual]
+      summary: Stop local manual proxy
+      responses:
+        '200':
+          description: Proxy status
+  /api/manual/proxy/status:
+    get:
+      tags: [Manual]
+      summary: Get local proxy status
+      responses:
+        '200':
+          description: Proxy status
+  /api/manual/browser/open:
+    post:
+      tags: [Manual]
+      summary: Open controlled Wraith browser through proxy
+      responses:
+        '200':
+          description: Browser status
+  /api/integrations/nuclei/status:
+    get:
+      tags: [Integrations]
+      summary: Get Nuclei binary/template status
+      responses:
+        '200':
+          description: Nuclei status
+  /api/integrations/nuclei/run:
+    post:
+      tags: [Integrations]
+      summary: Run managed Nuclei templates against selected targets
+      responses:
+        '200':
+          description: Nuclei run result
+  /api/intel/cve/enrich:
+    post:
+      tags: [Integrations]
+      summary: Enrich findings with CVE/NVD intelligence
+      responses:
+        '200':
+          description: Enrichment result
+  /api/authz/matrix/run:
+    post:
+      tags: [Proof]
+      summary: Run role-diff authorization matrix checks from the corpus
+      responses:
+        '200':
+          description: Authorization matrix result
+  /api/proof/{finding_id}/task:
+    post:
+      tags: [Proof]
+      summary: Create a bounded proof task for a finding
+      parameters:
+        - name: finding_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Proof task created
+  /api/proof/{task_id}/run:
+    post:
+      tags: [Proof]
+      summary: Run an approved proof task
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Proof result
+components:
+  parameters:
+    ScanId:
+      name: scan_id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    ScanRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: https://app.example.test
+        depth:
+          type: integer
+          default: 3
+        timeout:
+          type: integer
+          default: 10
+        safety_mode:
+          type: string
+          enum: [safe, intrusive, lab]
+          default: safe
+        enabled_modules:
+          type: array
+          items: { type: string }
+        auth:
+          type: object
+          additionalProperties: true
+        imports:
+          type: object
+          additionalProperties: true
+        sequence_workflows:
+          type: array
+          items: { type: string }
+    ScanAccepted:
+      type: object
+      properties:
+        scan_id:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+    ManualReplayRequest:
+      type: object
+      required: [method, url]
+      properties:
+        scan_id:
+          type: string
+        method:
+          type: string
+          example: GET
+        url:
+          type: string
+          format: uri
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        body:
+          type: string
+        timeout:
+          type: integer
+          default: 10
+        safety_mode:
+          type: string
+          enum: [safe, intrusive, lab]
+        allow_state_change:
+          type: boolean
+          default: false

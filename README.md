@@ -123,6 +123,8 @@ python api_server.py
 
 The API listens on `http://127.0.0.1:5001`.
 
+API documentation is tracked in [`docs/api/openapi.yaml`](docs/api/openapi.yaml).
+
 ### Frontend terminal
 
 ```bash
