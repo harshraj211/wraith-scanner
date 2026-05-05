@@ -6,14 +6,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="vulnscanner",
+    name="wraith-scanner",
     version="4.0.0",
     author="Harsh Raj",
     author_email="harshraj84068@gmail.com",
     description="Async DAST and SAST scanner with deep-state SPA discovery and taint analysis",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/harshraj211/vulnerability-scanner.git",
+    url="https://github.com/harshraj211/wraith-scanner.git",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -43,7 +43,8 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "vulnscan=main:main",
+            "wraith=main:main",
+            "wraith-scan=main:main",
         ],
     },
     include_package_data=True,
