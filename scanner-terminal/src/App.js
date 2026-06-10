@@ -230,6 +230,8 @@ function App() {
   const [templateTrustConfig, setTemplateTrustConfig] = useState(initialTemplateTrustConfig);
   const [cveIntelState, setCveIntelState] = useState('idle');
   const [cveIntelResult, setCveIntelResult] = useState(null);
+  const [overview, setOverview] = useState(null);
+  const [overviewState, setOverviewState] = useState('idle');
 
   const addProgress = useCallback((event) => {
     const item = {
@@ -250,11 +252,29 @@ function App() {
     }
   }, []);
 
+  const loadOverview = useCallback(async () => {
+    setOverviewState('loading');
+    try {
+      const response = await axios.get(`${API_URL}/api/overview`);
+      setOverview(response.data);
+      setOverviewState('ready');
+    } catch (_error) {
+      setOverviewState('offline');
+    }
+  }, []);
+
   useEffect(() => {
     const onHashChange = () => setActivePage(pageFromLocation());
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'test') return undefined;
+    loadOverview();
+    const timer = window.setInterval(loadOverview, 15000);
+    return () => window.clearInterval(timer);
+  }, [loadOverview]);
 
   useEffect(() => {
     const socket = typeof io === 'function' ? io(API_URL, { transports: ['websocket', 'polling'] }) : null;
@@ -362,6 +382,7 @@ function App() {
       applyManualRequestUpdate((current) => ({ ...current, scanId }));
       addProgress({ scan_id: scanId, type: 'success', message: `Scan started: ${scanId}` });
       setLaunchState('started');
+      loadOverview();
       setTimeout(() => refreshStatus(scanId), 700);
     } catch (error) {
       setLaunchState('error');
@@ -380,6 +401,7 @@ function App() {
         loadCorpus(scanId);
         loadFindings(scanId);
         loadProofData();
+        loadOverview();
       }
     } catch (error) {
       addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
@@ -568,6 +590,7 @@ function App() {
       setLatestScanId(scanId);
       setPollingScanId(scanId);
       setRepoState('started');
+      loadOverview();
       addProgress({ scan_id: scanId, type: 'success', message: `Repository scan started: ${scanId}` });
     } catch (error) {
       setRepoState('error');
@@ -1446,7 +1469,14 @@ function App() {
         return <Settings />;
       case 'overview':
       default:
-        return <Overview onNavigate={navigate} stats={{ scanId: latestScanId, requests: corpusRequests.length }} />;
+        return (
+          <Overview
+            onNavigate={navigate}
+            stats={{ scanId: latestScanId, requests: corpusRequests.length, findings: findings.length }}
+            overview={overview}
+            overviewState={overviewState}
+          />
+        );
     }
   };
 

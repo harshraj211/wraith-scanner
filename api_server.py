@@ -127,6 +127,10 @@ DAST_MODULES = [
 ]
 
 
+def _utc_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _storage_repo():
     try:
         return StorageRepository()
@@ -293,6 +297,74 @@ def deduplicate_findings(findings):
             seen.add(key)
             unique.append(finding)
     return unique
+
+
+def _severity_counts(findings):
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for finding in findings or []:
+        severity = str(
+            finding.get("severity")
+            or finding.get("risk")
+            or finding.get("level")
+            or "info"
+        ).strip().lower()
+        counts[severity if severity in counts else "info"] += 1
+    return counts
+
+
+def _summarize_scan(scan_id, scan):
+    findings = scan.get("canonical_findings") or scan.get("findings") or []
+    return {
+        "scan_id": scan_id,
+        "status": scan.get("status", "unknown"),
+        "target": scan.get("target", ""),
+        "mode": scan.get("mode", "dast"),
+        "scan_type": scan.get("scan_type", "DAST"),
+        "started_at": scan.get("started_at", ""),
+        "completed_at": scan.get("completed_at", ""),
+        "total_vulnerabilities": scan.get("total_vulnerabilities", len(findings)),
+        "severity": _severity_counts(findings),
+        "report_ready": bool(scan.get("report_path") or scan.get("json_report_path")),
+        "error": scan.get("error", ""),
+    }
+
+
+def _storage_overview(repo):
+    if repo is None:
+        return {
+            "status": "unavailable",
+            "path": "",
+            "scan_count": 0,
+            "request_count": 0,
+            "finding_count": 0,
+            "evidence_count": 0,
+        }
+
+    try:
+        conn = repo.conn
+        counts = {}
+        for table, key in (
+            ("scans", "scan_count"),
+            ("requests", "request_count"),
+            ("findings", "finding_count"),
+            ("evidence_artifacts", "evidence_count"),
+        ):
+            counts[key] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        return {
+            "status": "ready",
+            "path": getattr(repo, "path", ""),
+            **counts,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "path": getattr(repo, "path", ""),
+            "error": str(exc),
+            "scan_count": 0,
+            "request_count": 0,
+            "finding_count": 0,
+            "evidence_count": 0,
+        }
 
 
 def run_scan(
@@ -678,6 +750,8 @@ def run_scan(
             'status': 'completed',
             'target': target_url,
             'mode': 'dast',
+            'started_at': active_scans.get(scan_id, {}).get('started_at', ''),
+            'completed_at': _utc_timestamp(),
             'urls': urls,
             'forms': forms,
             'websockets': websockets,
@@ -706,7 +780,12 @@ def run_scan(
 
     except Exception as e:
         emit_progress(scan_id, f"Error: {str(e)}", "error")
-        active_scans[scan_id] = {'status': 'failed', 'error': str(e)}
+        active_scans[scan_id] = {
+            **active_scans.get(scan_id, {}),
+            'status': 'failed',
+            'error': str(e),
+            'completed_at': _utc_timestamp(),
+        }
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -730,7 +809,13 @@ def start_scan():
         return jsonify({'error': 'URL is required'}), 400
 
     scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {'status': 'running', 'target': target_url, 'mode': 'dast', 'scan_type': 'DAST'}
+    active_scans[scan_id] = {
+        'status': 'running',
+        'target': target_url,
+        'mode': 'dast',
+        'scan_type': 'DAST',
+        'started_at': _utc_timestamp(),
+    }
 
     thread = threading.Thread(
         target=run_scan,
@@ -758,7 +843,13 @@ def scan_repo():
         return jsonify({'error': 'url is required'}), 400
 
     scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {'status': 'running', 'target': repo_url, 'mode': 'sast', 'scan_type': 'SAST'}
+    active_scans[scan_id] = {
+        'status': 'running',
+        'target': repo_url,
+        'mode': 'sast',
+        'scan_type': 'SAST',
+        'started_at': _utc_timestamp(),
+    }
 
     def run_sast(scan_id, repo_url, token, branch):
         """
@@ -791,7 +882,12 @@ def scan_repo():
             repo_path = github_mgr.clone_repo(repo_url, branch=branch)
             if not repo_path:
                 emit_progress(scan_id, "Failed to clone repository", "error")
-                active_scans[scan_id] = {"status": "failed", "error": "Clone failed"}
+                active_scans[scan_id] = {
+                    **active_scans.get(scan_id, {}),
+                    "status": "failed",
+                    "error": "Clone failed",
+                    "completed_at": _utc_timestamp(),
+                }
                 return
 
             # ── Tech stack ─────────────────────────────────────────────────
@@ -809,7 +905,12 @@ def scan_repo():
 
             if total_files == 0:
                 emit_progress(scan_id, "No scannable files found", "error")
-                active_scans[scan_id] = {"status": "failed", "error": "No files"}
+                active_scans[scan_id] = {
+                    **active_scans.get(scan_id, {}),
+                    "status": "failed",
+                    "error": "No files",
+                    "completed_at": _utc_timestamp(),
+                }
                 return
 
             findings = []
@@ -1067,6 +1168,8 @@ def scan_repo():
                 "status":                "completed",
                 "target":                repo_url,
                 "mode":                  "sast",
+                "started_at":            active_scans.get(scan_id, {}).get("started_at", ""),
+                "completed_at":          _utc_timestamp(),
                 "scan_type":             "SAST (Semgrep AST + Cross-File Taint + Secrets/Deps)",
                 "findings":              findings,
                 "report_path":           report_path,
@@ -1084,7 +1187,12 @@ def scan_repo():
             import traceback
             emit_progress(scan_id, f"SAST error: {str(e)}", "error")
             emit_progress(scan_id, traceback.format_exc()[:400], "error")
-            active_scans[scan_id] = {"status": "failed", "error": str(e)}
+            active_scans[scan_id] = {
+                **active_scans.get(scan_id, {}),
+                "status": "failed",
+                "error": str(e),
+                "completed_at": _utc_timestamp(),
+            }
 
     thread = threading.Thread(target=run_sast, args=(scan_id, repo_url, token, branch))
     thread.daemon = True
@@ -1133,6 +1241,60 @@ def _generate_sast_pdf(repo_url: str, findings: list, stack: dict, output_path: 
         story += _render_sast_finding(f, styles, normal, heading, None)
 
     doc.build(story)
+
+
+@app.route('/api/overview', methods=['GET'])
+def get_overview():
+    """Return a fast operator snapshot for the React command center."""
+    repo = _storage_repo()
+    storage = _storage_overview(repo)
+    scan_summaries = [_summarize_scan(scan_id, scan) for scan_id, scan in active_scans.items()]
+    scan_summaries.sort(
+        key=lambda item: item.get("completed_at") or item.get("started_at") or "",
+        reverse=True,
+    )
+
+    status_counts = {}
+    severity_totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for scan in scan_summaries:
+        status = str(scan.get("status") or "unknown").lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        for severity, count in (scan.get("severity") or {}).items():
+            if severity in severity_totals:
+                severity_totals[severity] += int(count or 0)
+
+    semgrep_path = _find_semgrep() or ""
+    return jsonify({
+        "service": {
+            "name": "Wraith API",
+            "status": "online",
+            "generated_at": _utc_timestamp(),
+        },
+        "storage": storage,
+        "active_scans": {
+            "total": len(scan_summaries),
+            "status_counts": status_counts,
+            "running": status_counts.get("running", 0),
+            "completed": status_counts.get("completed", 0),
+            "failed": status_counts.get("failed", 0),
+            "recent": scan_summaries[:8],
+        },
+        "risk": {
+            "total_findings": sum(scan.get("total_vulnerabilities", 0) for scan in scan_summaries),
+            "severity": severity_totals,
+        },
+        "capabilities": {
+            "dast_modules": DAST_MODULES,
+            "dast_module_count": len(DAST_MODULES),
+            "sast_engines": ["semgrep", "taint-analyzer", "secrets", "dependencies"],
+            "api_importers": ["openapi", "postman", "har", "graphql"],
+            "proof_modes": ["safe", "professional", "lab"],
+            "semgrep": {
+                "ready": bool(semgrep_path),
+                "path": semgrep_path,
+            },
+        },
+    })
 
 
 @app.route('/api/scan/<scan_id>', methods=['GET'])
