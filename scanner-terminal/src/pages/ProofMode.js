@@ -32,7 +32,7 @@ export default function ProofMode({
   const authzRequests = corpusRequests.filter((item) => item.source === 'authz');
   const authzFindings = authzMatrixResult?.findings || [];
   return (
-    <div className="page-stack">
+    <div className="page-stack lab-page proof-page">
       <PageHeader
         eyebrow="Proof Mode"
         title="Safe Proof Mode"

@@ -1,302 +1,654 @@
 import React from 'react';
-import PageHeader from '../components/layout/PageHeader';
+import WorkflowHero from '../components/layout/WorkflowHero';
 import Button from '../components/ui/Button';
-import Card from '../components/ui/Card';
-import MetricCard from '../components/ui/MetricCard';
-import TerminalPanel from '../components/ui/TerminalPanel';
-import ScanStatusStrip from '../components/scanner/ScanStatusStrip';
-import ScanTimeline from '../components/scanner/ScanTimeline';
-import SeveritySummary from '../components/scanner/SeveritySummary';
+import EmptyState from '../components/ui/EmptyState';
+
+const zeroSeverity = {
+  critical: 0,
+  high: 0,
+  medium: 0,
+  low: 0,
+  info: 0,
+};
+
+function hostFromTarget(value) {
+  try {
+    return new URL(String(value || '')).hostname || String(value || '');
+  } catch (_error) {
+    return String(value || '').replace(/^https?:\/\//, '').split('/')[0];
+  }
+}
+
+function numberOr(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function calculateRiskScore(counts, totalFindings) {
+  if (!totalFindings) return 0;
+  const weighted = (counts.critical || 0) * 16
+    + (counts.high || 0) * 8
+    + (counts.medium || 0) * 3
+    + (counts.low || 0);
+  return Math.max(1, Math.min(99, Math.round((weighted / Math.max(1, totalFindings)) * 100)));
+}
+
+function severityLabel(severity) {
+  const value = String(severity || 'info').toLowerCase();
+  return zeroSeverity[value] !== undefined ? value : 'info';
+}
+
+function severityCountsFromFindings(findings) {
+  return (findings || []).reduce((out, finding) => {
+    const severity = severityLabel(finding.severity);
+    out[severity] += 1;
+    return out;
+  }, { ...zeroSeverity });
+}
+
+function shortElapsed(scanStatus) {
+  if (scanStatus?.elapsed) return scanStatus.elapsed;
+  const started = scanStatus?.started_at || scanStatus?.created_at;
+  if (!started) return '--:--:--';
+  const delta = Math.max(0, Date.now() - new Date(started).getTime());
+  const totalSeconds = Math.floor(delta / 1000);
+  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function findingRows(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) return [];
+  return findings.slice(0, 8).map((finding, index) => [
+    severityLabel(finding.severity),
+    finding.title || finding.name || 'Finding',
+    finding.target_url || finding.normalized_endpoint || finding.endpoint || '-',
+    finding.age || finding.discovered_at || finding.created_at || '-',
+  ]);
+}
+
+function eventRows(progressEvents) {
+  if (!Array.isArray(progressEvents) || progressEvents.length === 0) return [];
+  return progressEvents.slice(0, 7).map((event) => {
+    const date = event.timestamp ? new Date(event.timestamp) : null;
+    const time = date && !Number.isNaN(date.getTime())
+      ? date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : 'now';
+    return [
+      time,
+      severityLabel(event.type || event.status || 'info'),
+      event.message || event.detail || 'Scan event',
+      event.phase || event.scan_id || '',
+      event.target || '',
+    ];
+  });
+}
+
+function buildModuleRows(scanStatus) {
+  if (!scanStatus) return [];
+  const moduleSource = scanStatus.module_status || scanStatus.modules || scanStatus.module_progress || [];
+  const rows = Array.isArray(moduleSource)
+    ? moduleSource
+    : Object.entries(moduleSource).map(([name, value]) => ({ name, ...(typeof value === 'object' ? value : { status: value }) }));
+
+  const mappedRows = rows.map((module) => {
+    const name = module.name || module.label || module.module || module.id || 'Module';
+    const moduleStatus = String(module.status || module.state || '-').toLowerCase();
+    const progress = Math.round(percent(module.progress ?? module.percent ?? module.progress_percent ?? 0));
+    return [name, moduleStatus, progress, module.icon || moduleIcon(name)];
+  });
+
+  if (mappedRows.length) return mappedRows;
+
+  const overall = scanProgress(scanStatus);
+  const phaseModules = [
+    ['Crawler', 'travel_explore'],
+    ['Discovery', 'radar'],
+    ['Active Scanner', 'my_location'],
+    ['Verification', 'verified_user'],
+    ['Reporting', 'article'],
+  ];
+
+  return phaseModules.map(([name, icon], index) => {
+    const start = index * 20;
+    const value = Math.round(percent(((overall - start) / 20) * 100));
+    const status = value >= 100
+      ? 'completed'
+      : value > 0 || (overall > 0 && index === 0)
+        ? 'running'
+        : 'queued';
+    return [name, status, value, icon];
+  });
+}
+
+function healthRows(scanStatus) {
+  if (!scanStatus) return [];
+  const authHealth = scanStatus.auth_health || {};
+  const imports = scanStatus.api_imports || {};
+  const deepState = scanStatus.deep_state_summary || {};
+  const nuclei = scanStatus.nuclei_summary || {};
+  const rows = [
+    ['Scan Status', scanStatus.status === 'failed' ? 'fail' : scanStatus.status === 'completed' ? 'pass' : 'warn', scanStatus.error || scanStatus.status || 'idle'],
+  ];
+  if (Object.keys(authHealth).length) {
+    rows.push(['Auth Health', authHealth.status === 'passed' ? 'pass' : authHealth.status === 'failed' ? 'fail' : 'warn', authHealth.reason || authHealth.status || '-']);
+  }
+  if (Object.keys(imports).length) {
+    rows.push(['API Imports', Object.values(imports).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value)) ? 'pass' : 'warn', JSON.stringify(imports)]);
+  }
+  if (Array.isArray(scanStatus.sequence_workflows) && scanStatus.sequence_workflows.length > 0) {
+    rows.push(['Sequence Workflows', 'pass', `${scanStatus.sequence_workflows.length} loaded`]);
+  }
+  if (Object.keys(deepState).length) {
+    rows.push(['Deep State', 'pass', 'available']);
+  }
+  if (Object.keys(nuclei).length) {
+    rows.push(['Nuclei Coverage', nuclei.raw_count ? 'pass' : 'warn', `${nuclei.raw_count || 0} matches`]);
+  }
+  if (scanStatus.report_path) rows.push(['Report Artifact', 'pass', 'PDF ready']);
+  if (scanStatus.json_report_path) rows.push(['JSON Artifact', 'pass', 'JSON ready']);
+  return rows;
+}
+
+function moduleIcon(name) {
+  const value = String(name || '').toLowerCase();
+  if (value.includes('crawl')) return 'travel_explore';
+  if (value.includes('passive') || value.includes('policy')) return 'policy';
+  if (value.includes('nuclei') || value.includes('template')) return 'hub';
+  if (value.includes('evidence') || value.includes('corpus')) return 'storage';
+  if (value.includes('api')) return 'api';
+  return 'settings_input_component';
+}
+
+function percent(value) {
+  const parsed = numberOr(value, 0);
+  return Math.max(0, Math.min(100, parsed));
+}
+
+function progressFromEvents(progressEvents = []) {
+  const events = Array.isArray(progressEvents) ? progressEvents : [];
+  let score = 0;
+  events.forEach((event) => {
+    const text = `${event?.message || ''} ${event?.detail || ''} ${event?.phase || ''} ${event?.status || ''}`.toLowerCase();
+    const explicit = text.match(/(\d{1,3})\s*%/);
+    if (explicit) score = Math.max(score, percent(explicit[1]));
+    if (/scan complete|completed|json report ready|pdf report ready|report saved/.test(text)) score = Math.max(score, 100);
+    else if (/phase 3|generating report|report/.test(text)) score = Math.max(score, 88);
+    else if (/phase 2|testing|active scan|vulnerabil/.test(text)) score = Math.max(score, 62);
+    else if (/crawl complete|discovery|discovered|corpus/.test(text)) score = Math.max(score, 38);
+    else if (/starting|started|launch|crawl/.test(text)) score = Math.max(score, 12);
+  });
+  if (events.length) score = Math.max(score, Math.min(92, 10 + events.length * 4));
+  return score;
+}
+
+function scanProgress(scanStatus, progressEvents = []) {
+  const direct = scanStatus?.progress_percent ?? scanStatus?.progress ?? scanStatus?.percent_complete;
+  if (direct !== undefined && direct !== null && direct !== '') return percent(direct);
+  const status = String(scanStatus?.status || '').toLowerCase();
+  if (status === 'completed') return 100;
+  if (status === 'failed') return Math.max(1, progressFromEvents(progressEvents));
+  if (status === 'running' || status === 'active' || scanStatus?.scan_id) {
+    return Math.max(8, progressFromEvents(progressEvents));
+  }
+  return progressFromEvents(progressEvents);
+}
+
+function buildSurfaceNodes(requests, target, findings) {
+  const records = Array.isArray(requests) ? requests : [];
+  const hosts = new Set();
+  const methods = new Set();
+  const paths = new Set();
+  let apiCount = 0;
+  let formCount = 0;
+  let authCount = 0;
+  const rootHost = hostFromTarget(target).toLowerCase();
+  records.forEach((request) => {
+    try {
+      const parsed = new URL(request.url || '');
+      if (parsed.hostname) hosts.add(parsed.hostname);
+      if (parsed.pathname) paths.add(parsed.pathname);
+      if (parsed.pathname.includes('/api')) apiCount += 1;
+      if (/login|auth|session|token/i.test(parsed.pathname)) authCount += 1;
+    } catch (_error) {
+      // Ignore malformed URLs from incomplete corpus records.
+    }
+    if (request.method) methods.add(String(request.method).toUpperCase());
+    if (request.body && String(request.body).trim()) formCount += 1;
+  });
+  const subdomains = Array.from(hosts).filter((host) => host.toLowerCase() !== rootHost);
+  const findingCount = Array.isArray(findings) ? findings.length : 0;
+  return [
+    { label: 'Hosts', count: hosts.size, icon: 'developer_board', angle: -35, distance: 156, tone: 'blue' },
+    { label: 'Subdomains', count: subdomains.length, icon: 'lan', angle: -68, distance: 150, tone: 'blue', showZero: true },
+    { label: 'Requests', count: records.length, icon: 'dns', angle: -104, distance: 142, tone: 'blue' },
+    { label: 'Paths', count: paths.size, icon: 'route', angle: 172, distance: 152, tone: 'blue' },
+    { label: 'Methods', count: methods.size, icon: 'http', angle: 126, distance: 152, tone: 'blue', showZero: true },
+    { label: 'APIs', count: apiCount, icon: 'api', angle: 72, distance: 150, tone: 'blue' },
+    { label: 'Stateful', count: formCount, icon: 'inventory_2', angle: 35, distance: 148, tone: 'blue' },
+    { label: 'Auth Paths', count: authCount, icon: 'key', angle: 0, distance: 156, tone: authCount ? 'red' : 'blue' },
+    { label: 'Findings', count: findingCount, icon: 'shield', angle: -150, distance: 150, tone: findingCount ? 'red' : 'blue' },
+  ].filter((node) => node.showZero || node.count > 0);
+}
+
+function buildRiskDots(findings) {
+  return (findings || []).slice(0, 24).map((finding, index) => ({
+    severity: severityLabel(finding.severity),
+    x: 16 + ((index * 37) % 68),
+    y: 18 + ((index * 23) % 62),
+  }));
+}
+
+function AttackSurfaceMap({ target, nodes, dots }) {
+  return (
+    <div className="attack-map" aria-label="Attack surface map">
+      <div className="attack-map-grid" />
+      <div className="attack-map-rings">
+        <i />
+        <i />
+        <i />
+      </div>
+      <div className="attack-map-axis attack-map-axis-x" />
+      <div className="attack-map-axis attack-map-axis-y" />
+      <div className="attack-map-core">
+        <span className="material-symbols-outlined">language</span>
+        <strong>{target || 'No target'}</strong>
+      </div>
+      {nodes.map((node) => (
+        <div
+          className={`attack-node attack-node-${node.tone}`}
+          key={node.label}
+          style={{
+            '--angle': `${node.angle}deg`,
+            '--distance': `${node.distance}px`,
+          }}
+        >
+          <span className="attack-node-line" />
+          <span className="attack-node-icon material-symbols-outlined">{node.icon}</span>
+          <strong>{node.count}</strong>
+          <em>{node.label}</em>
+        </div>
+      ))}
+      <div className="attack-map-dots">
+        {dots.map((dot, index) => (
+          <span
+            key={index}
+            className={`risk-dot risk-dot-${dot.severity}`}
+            style={{
+              '--x': `${dot.x}%`,
+              '--y': `${dot.y}%`,
+            }}
+          />
+        ))}
+      </div>
+      {!nodes.length && !dots.length && (
+        <div className="attack-map-empty">
+          <strong>No attack surface data yet</strong>
+          <span>Run a scan to populate discovered hosts, requests, and findings.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ icon, label, value, detail, tone = 'cyan' }) {
+  return (
+    <div className={`cockpit-stat cockpit-stat-${tone}`}>
+      <span className="material-symbols-outlined">{icon}</span>
+      <div>
+        <em>{label}</em>
+        <strong>{value}</strong>
+        {detail && <small>{detail}</small>}
+      </div>
+    </div>
+  );
+}
+
+function Panel({ title, eyebrow, actions, className = '', children }) {
+  return (
+    <section className={`cockpit-panel ${className}`.trim()}>
+      <header>
+        <div>
+          {eyebrow && <span>{eyebrow}</span>}
+          <h2>{title}</h2>
+        </div>
+        {actions && <div className="cockpit-panel-actions">{actions}</div>}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function ScanWorkspacePanel({ scanStatus, scanId, target, requestCount, totalFindings, modules, progressEvents, onNavigate }) {
+  const progress = scanProgress(scanStatus, progressEvents);
+  const status = scanStatus?.status || 'idle';
+  const phases = ['Crawl', 'Discovery', 'Active Scan', 'Verify', 'Report'];
+  return (
+    <section className="workflow-card workflow-workspace-card">
+      <header>
+        <h2>2. Scan Workspace</h2>
+        <p>Live scan progress from backend state.</p>
+      </header>
+
+      <div className="workflow-workspace-grid">
+        <div className="workflow-progress-block">
+          <div className="workflow-donut" style={{ '--value': `${progress}%` }}>
+            <strong>{progress}%</strong>
+          </div>
+          <div className="workflow-scan-meta">
+            <div className="workflow-meta"><span>Scan ID</span><strong>{scanId || 'none'}</strong></div>
+            <div className="workflow-meta"><span>Target</span><strong>{target || '-'}</strong></div>
+            <div className="workflow-meta"><span>Status</span><strong>{status}</strong></div>
+            <div className="workflow-meta"><span>Requests</span><strong>{requestCount || '-'}</strong></div>
+            <div className="workflow-meta"><span>Findings</span><strong>{totalFindings || '-'}</strong></div>
+          </div>
+        </div>
+
+        <div className="workflow-phase" style={{ '--progress-width': `${progress * 0.82}%` }}>
+          {phases.map((phase, index) => (
+            <span className={progress >= index * 25 || (progress === 0 && index === 0 && scanStatus) ? 'active' : ''} key={phase}>
+              <i />
+              {phase}
+            </span>
+          ))}
+        </div>
+
+        <div className="workflow-table">
+          <header>
+            <span>Module</span>
+            <span>Status</span>
+            <span>Progress</span>
+          </header>
+          {modules.length ? modules.slice(0, 6).map(([name, moduleStatus, moduleProgress, icon]) => (
+            <div key={name}>
+              <span><i className="material-symbols-outlined">{icon}</i>{name}</span>
+              <strong>{moduleStatus}</strong>
+              <em><i style={{ width: `${percent(moduleProgress)}%` }} /></em>
+            </div>
+          )) : (
+            <EmptyState title="No module progress yet" body="The backend has not reported per-module progress for this scan." />
+          )}
+        </div>
+
+        <div className="workflow-events">
+          {eventRows(progressEvents).map(([time, tone, message], index) => (
+            <code key={`${time}-${message}-${index}`}>
+              <span>{time}</span>
+              {message || tone}
+            </code>
+          ))}
+          {!eventRows(progressEvents).length && (
+            <EmptyState title="No scan events yet" body="Socket events appear here as the backend emits progress." />
+          )}
+        </div>
+
+        <Button variant="secondary" onClick={() => onNavigate('findings')} disabled={!totalFindings}>
+          Open Findings
+        </Button>
+      </div>
+    </section>
+  );
+}
 
 export default function AutomatedWorkspace({
   scanStatus,
   latestScanId,
+  scanPayload,
   dashboard,
   progressEvents,
   corpusRequests,
-  nucleiConfig,
-  nucleiState,
-  nucleiResult,
-  nucleiAssetState,
-  nucleiAssetStatus,
-  cveIntelState,
-  cveIntelResult,
-  updateNucleiConfig,
-  runNucleiIntegration,
-  loadNucleiStatus,
-  installNucleiEngine,
-  updateNucleiTemplates,
-  enrichCveIntel,
+  findings = [],
   refreshStatus,
-  submitScan,
   onNavigate,
 }) {
-  const counts = dashboard?.severityCounts || {};
-  const nucleiTargets = Array.isArray(nucleiResult?.targets)
-    ? nucleiResult.targets.length
-    : Number(nucleiResult?.targets || 0);
-  const nucleiFindings = Array.isArray(nucleiResult?.findings)
-    ? nucleiResult.findings.length
-    : Number(nucleiResult?.findings || nucleiResult?.raw_count || 0);
-  const nucleiErrors = Array.isArray(nucleiResult?.errors) ? nucleiResult.errors : [];
-  const templateCount = nucleiAssetStatus?.metadata?.template_count || 0;
-  const engineReady = Boolean(nucleiAssetStatus?.ok || nucleiAssetStatus?.binary_path);
-  const cveCount = cveIntelResult?.cve_count || 0;
-  const kevCount = cveIntelResult?.kev_count || 0;
-  const policyOptions = Array.isArray(nucleiAssetStatus?.policy_options)
-    ? nucleiAssetStatus.policy_options
-    : [
-        { profile: 'safe', label: 'Safe', description: 'Non-intrusive default mode.' },
-        { profile: 'professional', label: 'Professional', description: 'Broader authorized assessment mode.' },
-        { profile: 'lab', label: 'Lab', description: 'Local labs and CTF targets only.' },
-      ];
-  const activePolicy = policyOptions.find((option) => option.profile === nucleiConfig?.policyProfile) || policyOptions[0];
+  const hasLiveScan = Boolean(latestScanId || scanStatus?.scan_id || scanStatus?.target || scanStatus?.url);
+  const counts = { ...severityCountsFromFindings(findings), ...(dashboard?.severityCounts || {}) };
+  const totalFindings = numberOr(dashboard?.totalFindings, findings.length);
+  const requestCount = numberOr(corpusRequests?.length, 0);
+  const activeTargetValue = scanStatus?.url || scanStatus?.target || '';
+  const displayTarget = hostFromTarget(activeTargetValue);
+  const scanId = latestScanId || scanStatus?.scan_id || '';
+  const status = scanStatus?.status || (hasLiveScan ? 'active' : 'idle');
+  const riskScore = calculateRiskScore(counts, totalFindings);
+  const modules = buildModuleRows(scanStatus);
+  const currentHealthRows = healthRows(scanStatus);
+  const confirmedFindings = numberOr(dashboard?.confirmedFindings || dashboard?.confirmed, 0);
+  const surfaceNodes = buildSurfaceNodes(corpusRequests, activeTargetValue, findings);
+  const riskDots = buildRiskDots(findings);
+  const timeline = Array.isArray(dashboard?.timeline) ? dashboard.timeline.slice(-14) : [];
+  const healthFailures = currentHealthRows.filter(([, state]) => state === 'fail').length;
+  const healthWarnings = currentHealthRows.filter(([, state]) => state === 'warn').length;
+  const artifactCount = Number(Boolean(scanStatus?.report_path)) + Number(Boolean(scanStatus?.json_report_path));
+  const workerCount = scanStatus?.workers || scanStatus?.threads;
+
   return (
-    <div className="page-stack">
-      <PageHeader
-        eyebrow="Automated Workspace"
-        title={scanStatus?.url || scanStatus?.target || 'Risk Dashboard'}
-        description="Live scan status, attack surface, findings, evidence, and report actions."
-        actions={(
-          <>
-            <Button variant="secondary" onClick={refreshStatus} disabled={!latestScanId}>Refresh</Button>
-            <Button onClick={submitScan}>Scan again</Button>
-          </>
-        )}
+    <div className="cockpit-page workflow-page">
+      <WorkflowHero
+        icon="space_dashboard"
+        eyebrow="Automated"
+        title="Cockpit"
+        description="Inspect the active scan, attack surface, findings, health checks, and backend events."
+        active="automated-workspace"
+        onNavigate={onNavigate}
+        actions={<Button variant="secondary" onClick={refreshStatus} disabled={!latestScanId}>Refresh</Button>}
       />
-      <ScanStatusStrip
-        scanId={latestScanId}
-        status={scanStatus?.status || 'idle'}
-        requests={corpusRequests.length}
-        findings={dashboard?.totalFindings || 0}
-        imports={dashboard?.importCount || 0}
+
+      <ScanWorkspacePanel
+        scanStatus={scanStatus}
+        scanId={scanId}
+        target={displayTarget}
+        requestCount={requestCount}
+        totalFindings={totalFindings}
+        modules={modules}
+        progressEvents={progressEvents}
+        onNavigate={onNavigate}
       />
-      <div className="workspace-tabs">
-        <button onClick={() => onNavigate('automated-workspace')}>Overview</button>
-        <button onClick={() => onNavigate('findings')}>Findings</button>
-        <button onClick={() => onNavigate('evidence')}>Scanned URLs</button>
-        <button onClick={() => onNavigate('automated-setup')}>Scan details</button>
-        <button onClick={() => onNavigate('reports')}>Reporting & logs</button>
-      </div>
-      <div className="metric-grid">
-        <MetricCard label="Total Findings" value={dashboard?.totalFindings || 0} tone="red" />
-        <MetricCard label="Confirmed" value={dashboard?.confirmed || 0} tone="emerald" />
-        <MetricCard label="Requests" value={corpusRequests.length} tone="cyan" />
-        <MetricCard label="Imports" value={dashboard?.importCount || 0} tone="amber" />
-      </div>
-      <div className="dashboard-grid">
-        <Card title="Severity Summary" eyebrow="Risk">
-          <SeveritySummary counts={counts} />
-        </Card>
-        <Card title="Execution Pipeline" eyebrow="Run State">
-          <div className="pipeline">
-            <span className="complete">Discovery</span>
-            <span className="active">Fuzzing</span>
-            <span>Proofing</span>
-            <span>Reporting</span>
-          </div>
-        </Card>
-        <ScanTimeline events={progressEvents} />
-        <Card
-          title="Nuclei Coverage"
-          eyebrow="CVE Templates"
-          className="dashboard-wide nuclei-card"
-          actions={(
-            <>
-              <Button variant="ghost" onClick={loadNucleiStatus}>Status</Button>
-              <Button
-                variant="secondary"
-                onClick={runNucleiIntegration}
-                disabled={!latestScanId || nucleiState === 'running' || !engineReady}
-              >
-                {nucleiState === 'running' ? 'Running...' : 'Run Nuclei'}
-              </Button>
-            </>
-          )}
-        >
-          <div className="nuclei-layout">
-            <div className="nuclei-form">
-              <label className="field wide">
-                <span>Targets</span>
-                <textarea
-                  value={nucleiConfig?.targets || ''}
-                  onChange={(event) => updateNucleiConfig('targets', event.target.value)}
-                  placeholder="Optional. Leave empty to use scanned URLs from the corpus."
-                />
-              </label>
-              <label className="field wide">
-                <span>Template Paths</span>
-                <textarea
-                  value={nucleiConfig?.templates || ''}
-                  onChange={(event) => updateNucleiConfig('templates', event.target.value)}
-                  placeholder="Optional local template directories or files, separated by commas or new lines."
-                />
-              </label>
-              <div className="form-grid compact">
-                <label className="field">
-                  <span>Severity</span>
-                  <input
-                    value={nucleiConfig?.severity || ''}
-                    onChange={(event) => updateNucleiConfig('severity', event.target.value)}
-                  />
-                </label>
-                <label className="field">
-                  <span>Tags</span>
-                  <input
-                    value={nucleiConfig?.tags || ''}
-                    onChange={(event) => updateNucleiConfig('tags', event.target.value)}
-                    placeholder="Optional"
-                  />
-                </label>
-                <label className="field">
-                  <span>Exclude Tags</span>
-                  <input
-                    value={nucleiConfig?.excludeTags || ''}
-                    onChange={(event) => updateNucleiConfig('excludeTags', event.target.value)}
-                    placeholder="Extra exclusions"
-                  />
-                </label>
-                <label className="field">
-                  <span>Rate Limit</span>
-                  <input
-                    value={nucleiConfig?.rateLimit || ''}
-                    onChange={(event) => updateNucleiConfig('rateLimit', event.target.value)}
-                    type="number"
-                    min="1"
-                  />
-                </label>
-                <label className="field">
-                  <span>HTTP Timeout</span>
-                  <input
-                    value={nucleiConfig?.timeout || ''}
-                    onChange={(event) => updateNucleiConfig('timeout', event.target.value)}
-                    type="number"
-                    min="1"
-                  />
-                </label>
-                <label className="field">
-                  <span>Process Timeout</span>
-                  <input
-                    value={nucleiConfig?.processTimeout || ''}
-                    onChange={(event) => updateNucleiConfig('processTimeout', event.target.value)}
-                    type="number"
-                    min="10"
-                  />
-                </label>
-              </div>
-              <label className="check-row nuclei-safety">
-                <span>Policy Profile</span>
-                <select
-                  value={nucleiConfig?.policyProfile || 'safe'}
-                  onChange={(event) => updateNucleiConfig('policyProfile', event.target.value)}
-                >
-                  {policyOptions.map((option) => (
-                    <option key={option.profile} value={option.profile}>
-                      {option.label || option.profile}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="nuclei-policy-note">
-                <strong>{activePolicy?.label || 'Safe'} mode</strong>
-                <p>{activePolicy?.description || 'Nuclei policy controls template tag exclusions.'}</p>
-                {activePolicy?.default_exclude_tags?.length > 0 && (
-                  <code>Excludes: {activePolicy.default_exclude_tags.join(', ')}</code>
-                )}
-              </div>
-              {nucleiConfig?.policyProfile !== 'safe' && (
-                <label className="check-row nuclei-safety nuclei-ack">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(nucleiConfig?.policyAcknowledged)}
-                    onChange={(event) => updateNucleiConfig('policyAcknowledged', event.target.checked)}
-                  />
-                  <span>I confirm this is an authorized professional test scope.</span>
-                </label>
-              )}
+
+      <section className="cockpit-stage">
+        <div className="cockpit-topline">
+          <div className="cockpit-active-scan">
+            <span className={hasLiveScan ? 'cockpit-live-dot' : 'cockpit-idle-dot'} />
+            <div>
+              <em>Active Scan</em>
+              <strong>{displayTarget || 'No active scan'}</strong>
+              <code>{scanId || 'Run a scan from Scan Setup'}</code>
             </div>
-            <div className="nuclei-summary">
-              <div className="nuclei-asset-card">
-                <div>
-                  <span>Managed Engine</span>
-                  <strong>{engineReady ? 'Ready' : 'Missing'}</strong>
-                  <code>{nucleiAssetStatus?.binary_path || nucleiAssetStatus?.metadata?.managed_binary || 'Not installed yet'}</code>
+          </div>
+          <div className="cockpit-top-metric">
+            <em>Elapsed</em>
+            <strong>{shortElapsed(scanStatus)}</strong>
+            <span className="material-symbols-outlined">timer</span>
+          </div>
+          <div className="cockpit-top-metric">
+            <em>Status</em>
+            <strong className="text-cyan">{status}</strong>
+            {hasLiveScan && <span className="scan-pulse" />}
+          </div>
+          <div className="cockpit-top-metric">
+            <em>Engine</em>
+            <strong>{scanStatus?.engine || 'WRAITH'}</strong>
+            <span className="material-symbols-outlined">shield</span>
+          </div>
+          <div className="cockpit-top-metric">
+            <em>Workers</em>
+            <strong>{workerCount || '-'}</strong>
+            {workerCount ? <span className="thread-bars"><i /><i /><i /><i /><i /></span> : <span className="thread-bars-empty">idle</span>}
+          </div>
+          <div className="cockpit-risk">
+            <div>
+              <em>Risk Score</em>
+              <strong>{riskScore}</strong>
+              <span>/100</span>
+            </div>
+            <div className="risk-sparkline">
+              {timeline.length ? timeline.map((value, index) => (
+                <i key={index} style={{ height: `${Math.max(4, percent(value))}%` }} />
+              )) : <span>No trend yet</span>}
+            </div>
+          </div>
+        </div>
+
+        <div className="cockpit-stat-grid">
+          <StatCard icon="monitor_heart" label="Target Health" value={hasLiveScan ? `${healthFailures} fail / ${healthWarnings} warn` : 'Idle'} detail={hasLiveScan ? 'Backend health checks' : 'No scan selected'} tone={healthFailures ? 'red' : healthWarnings ? 'amber' : 'green'} />
+          <StatCard icon="my_location" label="Requests Captured" value={requestCount} detail="Corpus records" tone="cyan" />
+          <StatCard icon="shield" label="Findings" value={totalFindings} detail={`${confirmedFindings} verified / ${counts.critical} critical / ${counts.high} high`} tone={counts.critical || counts.high ? 'red' : 'blue'} />
+          <StatCard icon="radar" label="Events" value={progressEvents?.length || 0} detail="Socket/backend events" tone="green" />
+          <StatCard icon="article" label="Artifacts" value={artifactCount} detail="PDF / JSON reports" tone="amber" />
+        </div>
+
+        <div className="cockpit-main-grid">
+          <Panel
+            title="Attack Surface Map"
+            className="attack-surface-panel"
+            actions={(
+              <button type="button" aria-label="Refresh attack surface" onClick={refreshStatus} disabled={!latestScanId}>
+                <span className="material-symbols-outlined">sync</span>
+              </button>
+            )}
+          >
+            <AttackSurfaceMap target={displayTarget} nodes={surfaceNodes} dots={riskDots} />
+            <footer className="map-legend">
+              <span><i className="risk-dot-low" />Low Risk</span>
+              <span><i className="risk-dot-medium" />Medium Risk</span>
+              <span><i className="risk-dot-high" />High Risk</span>
+              <span><i className="risk-dot-critical" />Critical</span>
+            </footer>
+          </Panel>
+
+          <Panel
+            title={`Scan Modules (${modules.length})`}
+            className="scan-modules-panel"
+            actions={<button type="button" aria-label="Open modules" onClick={() => onNavigate('nuclei')}><span className="material-symbols-outlined">open_in_new</span></button>}
+          >
+            {modules.length ? (
+              <div className="module-table">
+                <div className="module-row module-head">
+                  <span>Module</span>
+                  <span>Status</span>
+                  <span>Progress</span>
                 </div>
-                <div>
-                  <span>Templates</span>
-                  <strong>{templateCount}</strong>
-                  <code>{nucleiAssetStatus?.template_dir || 'Managed template directory pending'}</code>
-                </div>
-                <div className="nuclei-asset-actions">
-                  <Button
-                    variant="secondary"
-                    onClick={installNucleiEngine}
-                    disabled={nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
-                  >
-                    {nucleiAssetState === 'installing' ? 'Installing...' : 'Install / Update Engine'}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={updateNucleiTemplates}
-                    disabled={!engineReady || nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
-                  >
-                    {nucleiAssetState === 'updating' ? 'Updating...' : 'Update Templates'}
-                  </Button>
-                </div>
+                {modules.map(([name, moduleStatus, progress, icon]) => (
+                  <div className="module-row" key={name}>
+                    <span><i className="material-symbols-outlined">{icon}</i>{name}</span>
+                    <strong className={`module-status-${moduleStatus}`}>{moduleStatus}</strong>
+                    <span className="module-progress">
+                      <em>{progress ? `${progress}%` : '-'}</em>
+                      <i><b style={{ width: `${percent(progress)}%` }} /></i>
+                    </span>
+                  </div>
+                ))}
               </div>
-              <div className="nuclei-result-strip">
-                <div>
-                  <span>State</span>
-                  <strong>{nucleiState}</strong>
+            ) : (
+              <EmptyState title="No modules running" body="Start a scan to see backend module progress." />
+            )}
+            <button className="cockpit-link" type="button" onClick={() => onNavigate('nuclei')}>Open Nuclei & CVE</button>
+          </Panel>
+
+          <Panel title="Live Event Stream" className="event-stream-panel">
+            <div className="event-stream">
+              {eventRows(progressEvents).map(([time, tone, message, path, host], index) => (
+                <div className="event-row" key={`${time}-${message}-${index}`}>
+                  <time>{time}</time>
+                  <strong className={`severity-text-${tone}`}>[{tone}]</strong>
+                  <span>{message}</span>
+                  <code>{path}</code>
+                  <code>{host}</code>
                 </div>
-                <div>
-                  <span>Targets</span>
-                  <strong>{nucleiTargets}</strong>
-                </div>
-                <div>
-                  <span>Matches</span>
-                  <strong>{nucleiResult?.raw_count || 0}</strong>
-                </div>
-                <div>
-                  <span>Imported</span>
-                  <strong>{nucleiFindings}</strong>
-                </div>
-              </div>
-              <div className="nuclei-note">
-                <span className="material-symbols-outlined">shield_lock</span>
-                <p>
-                  Safe mode excludes brute force, DoS, fuzzing, RCE, intrusive,
-                  and destructive template tags unless explicitly enabled.
-                </p>
-              </div>
-              <div className="nuclei-asset-card">
-                <div>
-                  <span>CVE Intelligence</span>
-                  <strong>{cveIntelState}</strong>
-                  <code>{cveCount} CVEs enriched, {kevCount} CISA KEV matches</code>
-                </div>
-                <div className="nuclei-asset-actions">
-                  <Button
-                    variant="secondary"
-                    onClick={enrichCveIntel}
-                    disabled={!latestScanId || cveIntelState === 'running'}
-                  >
-                    {cveIntelState === 'running' ? 'Enriching...' : 'Enrich CVEs'}
-                  </Button>
-                </div>
-              </div>
-              {nucleiErrors.length > 0 && (
-                <div className="nuclei-errors">
-                  {nucleiErrors.map((error, index) => (
-                    <code key={`${error}-${index}`}>{error}</code>
-                  ))}
+              ))}
+              {eventRows(progressEvents).length === 0 && (
+                <div className="event-row event-row-empty">
+                  <span>No live events yet</span>
+                  <code>Start or refresh a scan to stream backend progress.</code>
                 </div>
               )}
             </div>
-          </div>
-        </Card>
-        <TerminalPanel events={progressEvents} />
-      </div>
+            <footer><span className={hasLiveScan ? 'cockpit-live-dot' : 'cockpit-idle-dot'} />{hasLiveScan ? 'Connected to scan state' : 'Waiting for scan'}</footer>
+          </Panel>
+
+          <Panel
+            title="Target Health Checks"
+            className="health-panel"
+            actions={<button className="cockpit-link" type="button" onClick={() => onNavigate('evidence')}>View All</button>}
+          >
+            <div className="health-list">
+              {currentHealthRows.map(([label, state, detail]) => (
+                <div className="health-row" key={label}>
+                  <span className={`health-icon health-${state} material-symbols-outlined`}>
+                    {state === 'pass' ? 'check_circle' : state === 'warn' ? 'warning' : 'cancel'}
+                  </span>
+                  <strong>{label}</strong>
+                  <em className={`health-state-${state}`}>{state}</em>
+                  <code>{detail}</code>
+                </div>
+              ))}
+              {!currentHealthRows.length && <EmptyState title="No health checks yet" body="Health rows appear after the backend returns scan status." />}
+            </div>
+          </Panel>
+
+          <Panel
+            title={`Findings Triage (${totalFindings})`}
+            className="findings-panel"
+            actions={(
+              <div className="triage-tabs">
+                {['All', 'Critical', 'High', 'Medium', 'Low'].map((item) => <button type="button" key={item}>{item}</button>)}
+              </div>
+            )}
+          >
+            <div className="triage-table">
+              <div className="triage-row triage-head">
+                <span>Severity</span>
+                <span>Title</span>
+                <span>Asset</span>
+                <span>Age</span>
+              </div>
+              {findingRows(findings).map(([severity, title, asset, age], index) => (
+                <button className="triage-row" type="button" key={`${title}-${index}`} onClick={() => onNavigate('findings')}>
+                  <span className={`severity-chip severity-chip-${severity}`}>{severity}</span>
+                  <strong>{title}</strong>
+                  <code>{asset}</code>
+                  <em>{age}</em>
+                </button>
+              ))}
+              {findingRows(findings).length === 0 && (
+                <div className="triage-row triage-empty">
+                  <span>No findings</span>
+                  <strong>Backend has not returned findings for this scan.</strong>
+                  <code>{displayTarget || '-'}</code>
+                  <em>-</em>
+                </div>
+              )}
+            </div>
+            <button className="cockpit-link" type="button" onClick={() => onNavigate('findings')}>View all findings</button>
+          </Panel>
+        </div>
+      </section>
+
+      <section className="cockpit-controlbar">
+        <div>
+          <span>Scan Control</span>
+          <button type="button" disabled><span className="material-symbols-outlined">pause</span>Pause</button>
+          <button type="button" disabled><span className="material-symbols-outlined">stop</span>Stop</button>
+          <button type="button" onClick={() => onNavigate('reports')}><span className="material-symbols-outlined">assessment</span>Open Reports</button>
+        </div>
+        <div>
+          <span>Scan Profile</span>
+          <strong>{scanStatus?.scan_type || scanStatus?.mode || '-'}</strong>
+        </div>
+        <div>
+          <span>Target</span>
+          <strong><span className="material-symbols-outlined">language</span>{displayTarget || '-'}</strong>
+        </div>
+        <div>
+          <span>Scope</span>
+          <strong>{scanStatus?.scope || '-'}</strong>
+        </div>
+        <div>
+          <span>Output</span>
+          <strong>{hasLiveScan ? 'Backend state' : 'Idle'}</strong>
+        </div>
+        <Button variant="secondary" onClick={refreshStatus} disabled={!latestScanId}>Refresh</Button>
+      </section>
     </div>
   );
 }

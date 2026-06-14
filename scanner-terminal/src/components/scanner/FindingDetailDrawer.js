@@ -10,6 +10,9 @@ export default function FindingDetailDrawer({
   onClose,
   onRunProof,
   onExportEvidence,
+  onViewRequest,
+  onSendToRepeater,
+  hasLinkedRequest,
 }) {
   return (
     <Drawer
@@ -19,6 +22,12 @@ export default function FindingDetailDrawer({
       actions={(
         <>
           <Button onClick={() => onRunProof?.(finding)}>Run Proof Task</Button>
+          <Button variant="secondary" onClick={() => onViewRequest?.(finding)} disabled={!hasLinkedRequest}>
+            View Request
+          </Button>
+          <Button variant="secondary" onClick={() => onSendToRepeater?.(finding)} disabled={!hasLinkedRequest}>
+            Send to Repeater
+          </Button>
           <Button variant="secondary" onClick={() => onExportEvidence?.(finding)}>Export Evidence</Button>
         </>
       )}

@@ -23,7 +23,7 @@ def validate_sqli(finding: dict) -> bool:
     try:
         resp = requests.get(base_url, params=params, timeout=10)
         if any(err in resp.text.lower() for err in ['sql', 'mysql', 'syntax', 'error']):
-            print(f"[✓] SQLi confirmed (error-based): {param}")
+            print(f"[OK] SQLi confirmed (error-based): {param}")
             return True
     except:
         pass
@@ -36,7 +36,7 @@ def validate_sqli(finding: dict) -> bool:
         requests.get(base_url, params=params, timeout=15)
         elapsed = time.time() - start
         if elapsed >= 4.5:
-            print(f"[✓] SQLi confirmed (time-based): {param}")
+            print(f"[OK] SQLi confirmed (time-based): {param}")
             return True
     except:
         pass

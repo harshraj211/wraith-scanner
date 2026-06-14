@@ -30,7 +30,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest
+          python -m pip install -r requirements-dev.txt
+
+      - name: Lint high-signal Python errors
+        run: python -m ruff check main.py api_server.py scanner desktop
 
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium

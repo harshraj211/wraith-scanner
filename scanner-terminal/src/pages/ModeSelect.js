@@ -5,7 +5,7 @@ import Card from '../components/ui/Card';
 
 export default function ModeSelect({ onNavigate }) {
   return (
-    <div className="page-stack">
+    <div className="page-stack lab-page launch-page">
       <PageHeader
         eyebrow="Launch"
         title="Start Wraith"
@@ -14,7 +14,7 @@ export default function ModeSelect({ onNavigate }) {
       <div className="mode-grid">
         <Card title="Automated Scan" eyebrow="VA Pipeline">
           <p>Run DAST, API imports, SAST correlation, corpus capture, and reporting.</p>
-          <Button onClick={() => onNavigate('automated-workspace')}>Open Automated</Button>
+          <Button onClick={() => onNavigate('automated-setup')}>Configure Automated Scan</Button>
         </Card>
         <Card title="Manual Testing" eyebrow="Workbench">
           <p>Capture traffic, replay requests, fuzz payload positions, decode values, and collect evidence.</p>

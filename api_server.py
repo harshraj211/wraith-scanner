@@ -6,10 +6,12 @@ from flask_socketio import SocketIO, emit
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
+import sys
 import uuid
 import shutil
 import subprocess
 import json as _json
+import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -61,6 +63,7 @@ from scanner.manual.browser_launcher import WraithBrowserController
 from scanner.manual.certificates import WraithCAManager
 from scanner.manual.passive import run_passive_checks
 from scanner.manual.proxy import ProxyConfig, WraithProxyController
+from scanner.security.target_policy import TargetPolicyError, validate_http_target
 from scanner.storage.repository import StorageRepository
 from scanner.utils.auth_profiles import build_auth_profile_from_config, check_session
 from scanner.modules.crypto_scanner import CryptoScanner
@@ -83,6 +86,13 @@ from scanner.reporting.pdf_generator_sast_patch import (
     SAST_VULN_DESCRIPTIONS, SAST_OWASP_MAPPING, SAST_CWE_MAPPING
 )
 
+for _stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+    try:
+        if _stream and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def _check_semgrep():
     if _find_semgrep():
@@ -95,15 +105,30 @@ def _check_semgrep():
 _check_semgrep()
 
 app = Flask(__name__)
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "WRAITH_ALLOWED_ORIGINS",
+        "http://127.0.0.1:3000,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS,
+    async_mode="threading",
+    manage_session=False,
+)
 
 active_scans = {}
+_scan_lock = threading.RLock()
 manual_proxy = WraithProxyController()
 wraith_browser = WraithBrowserController()
 manual_ca = WraithCAManager()
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
+VERIFY_TLS = os.environ.get("WRAITH_VERIFY_TLS", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 DAST_MODULES = [
@@ -137,6 +162,103 @@ def _storage_repo():
     except Exception as exc:
         print(f"[storage] disabled: {exc}")
         return None
+
+
+def _persist_scan_state(scan_id, state):
+    try:
+        repo = _storage_repo()
+        if repo is not None and hasattr(repo, "save_scan_state"):
+            repo.save_scan_state(scan_id, state)
+    except Exception as exc:
+        print(f"[storage] scan state persist failed for {scan_id}: {exc}")
+
+
+def _set_scan_state(scan_id, state, *, persist=True):
+    snapshot = dict(state or {})
+    with _scan_lock:
+        active_scans[scan_id] = snapshot
+    if persist:
+        _persist_scan_state(scan_id, snapshot)
+    return snapshot
+
+
+def _update_scan_state(scan_id, updates, *, persist=True):
+    with _scan_lock:
+        snapshot = {**active_scans.get(scan_id, {}), **dict(updates or {})}
+        active_scans[scan_id] = snapshot
+    if persist:
+        _persist_scan_state(scan_id, snapshot)
+    return snapshot
+
+
+def _get_scan_state(scan_id):
+    with _scan_lock:
+        scan = active_scans.get(scan_id)
+        return dict(scan) if scan else None
+
+
+def _active_scan_items():
+    with _scan_lock:
+        return [(scan_id, dict(scan)) for scan_id, scan in active_scans.items()]
+
+
+def _restore_scan_states(repo=None):
+    repo = repo or _storage_repo()
+    if repo is None or not hasattr(repo, "list_scan_states"):
+        return
+    try:
+        states = repo.list_scan_states()
+    except Exception as exc:
+        print(f"[storage] scan state restore failed: {exc}")
+        return
+    if not states:
+        return
+    with _scan_lock:
+        for scan_id, state in states.items():
+            active_scans.setdefault(scan_id, state)
+
+
+def _validated_report_path(path):
+    if not path:
+        return ""
+    reports_root = os.path.abspath(REPORTS_DIR)
+    candidate = os.path.abspath(path)
+    try:
+        common = os.path.commonpath([reports_root, candidate])
+    except ValueError:
+        return ""
+    if common != reports_root:
+        return ""
+    return candidate if os.path.exists(candidate) else ""
+
+
+def _artifact_target_slug(value):
+    parsed = urlparse(str(value or "").strip())
+    source = parsed.netloc or parsed.path or str(value or "target")
+    if parsed.path and parsed.netloc and parsed.path not in {"", "/"}:
+        path_part = parsed.path.strip("/").replace(".git", "")
+        if path_part:
+            source = f"{parsed.netloc}_{path_part}"
+    source = source.replace(".git", "")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", source).strip("._-").lower()
+    return slug[:80] or "target"
+
+
+def _artifact_download_name(scan, scan_id, extension):
+    target = (scan or {}).get("target") or (scan or {}).get("repo_url") or ""
+    return f"wraith_scan_{scan_id}_{_artifact_target_slug(target)}.{extension}"
+
+
+def _validate_outbound_target(url, *, safety_mode="", allow_private_targets=False):
+    try:
+        validate_http_target(
+            url,
+            safety_mode=safety_mode,
+            allow_private_targets=allow_private_targets,
+        )
+    except TargetPolicyError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def _scan_config(scan_id, target_url, depth, auth_config, enabled_modules, auth_profile=None):
@@ -217,7 +339,7 @@ def _persist_findings(repo, canonical_findings):
 
 def _refresh_scan_artifacts(scan_id):
     """Regenerate downloadable artifacts after post-scan enrichment."""
-    scan = active_scans.get(scan_id) or {}
+    scan = _get_scan_state(scan_id) or {}
     if scan.get("status") != "completed":
         return
 
@@ -229,7 +351,16 @@ def _refresh_scan_artifacts(scan_id):
     report_path = scan.get("report_path")
     if report_path:
         try:
-            generate_pdf_report(target, urls, forms, findings, report_path)
+            scan_kind = f"{scan.get('mode', '')} {scan.get('scan_type', '')}".lower()
+            if "sast" in scan_kind:
+                _generate_sast_pdf(
+                    target,
+                    scan.get("findings") or findings,
+                    scan.get("tech_stack") or {},
+                    report_path,
+                )
+            else:
+                generate_pdf_report(target, urls, forms, findings, report_path)
         except Exception as exc:
             print(f"[report] PDF refresh failed for {scan_id}: {exc}")
 
@@ -350,9 +481,41 @@ def _storage_overview(repo):
             ("evidence_artifacts", "evidence_count"),
         ):
             counts[key] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        state_rows = conn.execute(
+            "SELECT scan_id, status, mode, raw_json FROM scan_states"
+        ).fetchall()
+        state_status_counts = {}
+        mode_counts = {}
+        report_count = 0
+        artifact_count = 0
+        for row in state_rows:
+            try:
+                state = _json.loads(row["raw_json"] or "{}")
+                if not isinstance(state, dict):
+                    state = {}
+            except (TypeError, ValueError):
+                state = {}
+            status = str(state.get("status") or row["status"] or "unknown").lower()
+            mode = str(state.get("mode") or row["mode"] or state.get("scan_type") or "unknown").lower()
+            if "sast" in mode:
+                mode = "sast"
+            elif "dast" in mode or "scan" in mode:
+                mode = "dast"
+            state_status_counts[status] = state_status_counts.get(status, 0) + 1
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            has_pdf = bool(state.get("report_path"))
+            has_json = bool(state.get("json_report_path"))
+            if has_pdf or has_json:
+                report_count += 1
+            artifact_count += int(has_pdf) + int(has_json)
         return {
             "status": "ready",
             "path": getattr(repo, "path", ""),
+            "scan_state_count": len(state_rows),
+            "scan_status_counts": state_status_counts,
+            "scan_mode_counts": mode_counts,
+            "report_count": report_count,
+            "artifact_count": artifact_count,
             **counts,
         }
     except Exception as exc:
@@ -364,6 +527,11 @@ def _storage_overview(repo):
             "request_count": 0,
             "finding_count": 0,
             "evidence_count": 0,
+            "scan_state_count": 0,
+            "scan_status_counts": {},
+            "scan_mode_counts": {},
+            "report_count": 0,
+            "artifact_count": 0,
         }
 
 
@@ -709,7 +877,7 @@ def run_scan(
 
         scan_duration = round(time.time() - scan_start_time, 1)
 
-        report_filename = f"scan_{scan_id}.pdf"
+        report_filename = f"wraith_scan_{scan_id}_{_artifact_target_slug(target_url)}.pdf"
         report_path = os.path.join(REPORTS_DIR, report_filename)
         unique_findings = deduplicate_and_group(all_findings)
         canonical_findings = findings_from_legacy(
@@ -723,7 +891,7 @@ def run_scan(
 
         generate_pdf_report(target_url, urls, forms, unique_findings, report_path,
                             scan_duration=scan_duration)
-        json_report_filename = f"scan_{scan_id}.json"
+        json_report_filename = f"wraith_scan_{scan_id}_{_artifact_target_slug(target_url)}.json"
         json_report_path = os.path.join(REPORTS_DIR, json_report_filename)
         write_scan_json(
             json_report_path,
@@ -745,12 +913,19 @@ def run_scan(
                 "sequence_workflows": [workflow.to_dict() for workflow in sequence_results],
             },
         )
+        try:
+            pdf_kb = max(1, round(os.path.getsize(report_path) / 1024))
+            json_kb = max(1, round(os.path.getsize(json_report_path) / 1024))
+            emit_progress(scan_id, f"PDF report ready: {report_filename} ({pdf_kb} KB)", "success")
+            emit_progress(scan_id, f"JSON report ready: {json_report_filename} ({json_kb} KB)", "success")
+        except OSError as exc:
+            emit_progress(scan_id, f"Report artifact size check failed: {exc}", "warning")
 
-        active_scans[scan_id] = {
+        _set_scan_state(scan_id, {
             'status': 'completed',
             'target': target_url,
             'mode': 'dast',
-            'started_at': active_scans.get(scan_id, {}).get('started_at', ''),
+            'started_at': (_get_scan_state(scan_id) or {}).get('started_at', ''),
             'completed_at': _utc_timestamp(),
             'urls': urls,
             'forms': forms,
@@ -773,25 +948,24 @@ def run_scan(
             'auth_health': auth_health,
             'scan_type': 'DAST',
             'canonical_findings': [finding.to_dict() for finding in canonical_findings],
-        }
+        })
 
         emit_progress(scan_id, f"Scan complete! Found {len(unique_findings)} vulnerabilities", "success")
         emit_progress(scan_id, f"Report saved: {report_filename}", "success")
 
     except Exception as e:
         emit_progress(scan_id, f"Error: {str(e)}", "error")
-        active_scans[scan_id] = {
-            **active_scans.get(scan_id, {}),
+        _update_scan_state(scan_id, {
             'status': 'failed',
             'error': str(e),
             'completed_at': _utc_timestamp(),
-        }
+        })
 
 
 @app.route('/api/scan', methods=['POST'])
 def start_scan():
     """Start scan with optional authentication and mode."""
-    data = request.json
+    data = request.get_json(silent=True) or {}
     target_url = data.get('url')
     depth = data.get('depth')
     timeout = data.get('timeout')
@@ -808,14 +982,27 @@ def start_scan():
     if not target_url:
         return jsonify({'error': 'URL is required'}), 400
 
-    scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {
+    safety_mode = (
+        (auth_config or {}).get("safety_mode")
+        or data.get("safety_mode")
+        or "safe"
+    )
+    valid, reason = _validate_outbound_target(
+        target_url,
+        safety_mode=safety_mode,
+        allow_private_targets=bool(data.get("allow_private_targets")),
+    )
+    if not valid:
+        return jsonify({'error': reason}), 400
+
+    scan_id = str(uuid.uuid4())
+    _set_scan_state(scan_id, {
         'status': 'running',
         'target': target_url,
         'mode': 'dast',
         'scan_type': 'DAST',
         'started_at': _utc_timestamp(),
-    }
+    })
 
     thread = threading.Thread(
         target=run_scan,
@@ -834,22 +1021,26 @@ def start_scan():
 @app.route('/api/scan/repo', methods=['POST'])
 def scan_repo():
     """SAST scan of a GitHub repository."""
-    data = request.json
-    repo_url = data.get('url')
+    data = request.get_json(silent=True) or {}
+    repo_url = data.get('repo_url') or data.get('url')
     token = data.get('token')
     branch = data.get('branch')
 
     if not repo_url:
-        return jsonify({'error': 'url is required'}), 400
+        return jsonify({'error': 'url or repo_url is required'}), 400
 
-    scan_id = str(uuid.uuid4())[:8]
-    active_scans[scan_id] = {
+    parsed_repo = urlparse(repo_url)
+    if parsed_repo.scheme not in {'http', 'https'} or not parsed_repo.netloc:
+        return jsonify({'error': 'Repository URL must be an absolute http(s) URL'}), 400
+
+    scan_id = str(uuid.uuid4())
+    _set_scan_state(scan_id, {
         'status': 'running',
         'target': repo_url,
         'mode': 'sast',
         'scan_type': 'SAST',
         'started_at': _utc_timestamp(),
-    }
+    })
 
     def run_sast(scan_id, repo_url, token, branch):
         """
@@ -882,12 +1073,11 @@ def scan_repo():
             repo_path = github_mgr.clone_repo(repo_url, branch=branch)
             if not repo_path:
                 emit_progress(scan_id, "Failed to clone repository", "error")
-                active_scans[scan_id] = {
-                    **active_scans.get(scan_id, {}),
+                _update_scan_state(scan_id, {
                     "status": "failed",
                     "error": "Clone failed",
                     "completed_at": _utc_timestamp(),
-                }
+                })
                 return
 
             # ── Tech stack ─────────────────────────────────────────────────
@@ -896,26 +1086,52 @@ def scan_repo():
             lang  = stack.get("primary_language", "unknown")
             fws   = ", ".join(stack.get("frameworks", [])) or "none"
             emit_progress(scan_id, f"Stack: {lang} | frameworks: {fws}", "success")
+            language_summary = ", ".join(
+                f"{name} {percent}%"
+                for name, percent in list((stack.get("languages") or {}).items())[:4]
+            )
+            if language_summary:
+                emit_progress(scan_id, f"Languages: {language_summary}", "info")
+            _update_scan_state(scan_id, {"status": "running", "tech_stack": stack})
 
             # ── File tree (for SASTScanner secrets/deps) ───────────────────
             emit_progress(scan_id, "Indexing repository files...", "info")
             file_tree   = github_mgr.get_file_tree(repo_path)
             total_files = len(file_tree.get("all", []))
+            stack["scannable_files"] = total_files
             emit_progress(scan_id, f"Indexed {total_files} files", "success")
+            _update_scan_state(scan_id, {"status": "running", "tech_stack": stack})
 
             if total_files == 0:
                 emit_progress(scan_id, "No scannable files found", "error")
-                active_scans[scan_id] = {
-                    **active_scans.get(scan_id, {}),
+                _update_scan_state(scan_id, {
                     "status": "failed",
                     "error": "No files",
                     "completed_at": _utc_timestamp(),
-                }
+                })
                 return
 
             findings = []
             semgrep_count = 0
             semgrep_bin = _find_semgrep()
+
+            def _run_taint_analysis():
+                emit_progress(scan_id, "Running cross-file taint analysis...", "phase")
+                scanner = TaintAnalyzer()
+                results = scanner.scan_repo(repo_path, file_tree, stack)
+                emit_progress(scan_id, f"Taint analysis: {len(results)} findings", "info")
+                return results
+
+            def _run_regex_scan():
+                emit_progress(scan_id, "Running secrets/dependency scanner...", "phase")
+                scanner = SASTScanner()
+                results = scanner.scan_repo(repo_path, file_tree)
+                emit_progress(scan_id, f"Secrets/deps: {len(results)} findings", "info")
+                return results
+
+            analysis_executor = ThreadPoolExecutor(max_workers=2)
+            taint_future = analysis_executor.submit(_run_taint_analysis)
+            regex_future = analysis_executor.submit(_run_regex_scan)
 
             # ── PHASE 1: Semgrep via subprocess — MANDATORY ────────────────
             if not semgrep_bin:
@@ -937,7 +1153,11 @@ def scan_repo():
                     try:
                         r = _sp.run(
                             [semgrep_bin, "show", "identity"],
-                            capture_output=True, text=True, timeout=15,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=15,
                             env=_utf8_env,
                         )
                         # identity info is printed to stderr
@@ -1000,6 +1220,8 @@ def scan_repo():
                         semgrep_cmd,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=300,
                         env=_utf8_env,
                     )
@@ -1088,17 +1310,19 @@ def scan_repo():
                 except Exception:
                     pass
 
-            # ── PHASE 2: SASTScanner — secrets + deps ONLY ─────────────────
-            emit_progress(scan_id, "Running cross-file taint analysis...", "phase")
-            taint_scanner = TaintAnalyzer()
-            taint_findings = taint_scanner.scan_repo(repo_path, file_tree, stack)
-            emit_progress(scan_id, f"Taint analysis: {len(taint_findings)} findings", "info")
-
-            emit_progress(scan_id, "Running secrets/dependency scanner...", "phase")
-            regex_scanner  = SASTScanner()
-            regex_findings = regex_scanner.scan_repo(repo_path, file_tree)
-            emit_progress(scan_id,
-                f"Secrets/deps: {len(regex_findings)} findings", "info")
+            # ── PHASE 2: repo analyzers complete in parallel with Semgrep ──
+            emit_progress(scan_id, "Collecting parallel analyzer results...", "phase")
+            try:
+                taint_findings = taint_future.result()
+            except Exception as exc:
+                taint_findings = []
+                emit_progress(scan_id, f"Taint analysis failed: {exc}", "error")
+            try:
+                regex_findings = regex_future.result()
+            except Exception as exc:
+                regex_findings = []
+                emit_progress(scan_id, f"Secrets/deps scan failed: {exc}", "error")
+            analysis_executor.shutdown(wait=False)
 
             # Merge + deduplicate on (file, line, type)
             existing_keys = {
@@ -1140,7 +1364,7 @@ def scan_repo():
 
             # ── PDF ────────────────────────────────────────────────────────
             emit_progress(scan_id, "Generating PDF report...", "phase")
-            report_filename = f"sast_{scan_id}.pdf"
+            report_filename = f"wraith_sast_{scan_id}_{_artifact_target_slug(repo_url)}.pdf"
             report_path     = os.path.join(REPORTS_DIR, report_filename)
             _generate_sast_pdf(repo_url, findings, stack, report_path)
             canonical_findings = findings_from_legacy(
@@ -1151,7 +1375,7 @@ def scan_repo():
                 discovery_method="sast",
             )
             _persist_findings(storage_repo, canonical_findings)
-            json_report_path = os.path.join(REPORTS_DIR, f"sast_{scan_id}.json")
+            json_report_path = os.path.join(REPORTS_DIR, f"wraith_sast_{scan_id}_{_artifact_target_slug(repo_url)}.json")
             write_scan_json(
                 json_report_path,
                 scan_config=scan_config,
@@ -1161,14 +1385,21 @@ def scan_repo():
                 legacy_findings=findings,
                 metadata={"tech_stack": stack, "summary": cats},
             )
+            try:
+                pdf_kb = max(1, round(os.path.getsize(report_path) / 1024))
+                json_kb = max(1, round(os.path.getsize(json_report_path) / 1024))
+                emit_progress(scan_id, f"PDF report ready: {report_filename} ({pdf_kb} KB)", "success")
+                emit_progress(scan_id, f"JSON report ready: {os.path.basename(json_report_path)} ({json_kb} KB)", "success")
+            except OSError as exc:
+                emit_progress(scan_id, f"Report artifact size check failed: {exc}", "warning")
 
             github_mgr.cleanup()
 
-            active_scans[scan_id] = {
+            _set_scan_state(scan_id, {
                 "status":                "completed",
                 "target":                repo_url,
                 "mode":                  "sast",
-                "started_at":            active_scans.get(scan_id, {}).get("started_at", ""),
+                "started_at":            (_get_scan_state(scan_id) or {}).get("started_at", ""),
                 "completed_at":          _utc_timestamp(),
                 "scan_type":             "SAST (Semgrep AST + Cross-File Taint + Secrets/Deps)",
                 "findings":              findings,
@@ -1178,7 +1409,7 @@ def scan_repo():
                 "tech_stack":            stack,
                 "summary":               cats,
                 "canonical_findings":    [finding.to_dict() for finding in canonical_findings],
-            }
+            })
 
             emit_progress(scan_id,
                 f"SAST complete — {len(findings)} findings", "success")
@@ -1187,12 +1418,11 @@ def scan_repo():
             import traceback
             emit_progress(scan_id, f"SAST error: {str(e)}", "error")
             emit_progress(scan_id, traceback.format_exc()[:400], "error")
-            active_scans[scan_id] = {
-                **active_scans.get(scan_id, {}),
+            _update_scan_state(scan_id, {
                 "status": "failed",
                 "error": str(e),
                 "completed_at": _utc_timestamp(),
-            }
+            })
 
     thread = threading.Thread(target=run_sast, args=(scan_id, repo_url, token, branch))
     thread.daemon = True
@@ -1247,8 +1477,9 @@ def _generate_sast_pdf(repo_url: str, findings: list, stack: dict, output_path: 
 def get_overview():
     """Return a fast operator snapshot for the React command center."""
     repo = _storage_repo()
+    _restore_scan_states(repo)
     storage = _storage_overview(repo)
-    scan_summaries = [_summarize_scan(scan_id, scan) for scan_id, scan in active_scans.items()]
+    scan_summaries = [_summarize_scan(scan_id, scan) for scan_id, scan in _active_scan_items()]
     scan_summaries.sort(
         key=lambda item: item.get("completed_at") or item.get("started_at") or "",
         reverse=True,
@@ -1264,6 +1495,29 @@ def get_overview():
                 severity_totals[severity] += int(count or 0)
 
     semgrep_path = _find_semgrep() or ""
+    storage_status_counts = storage.get("scan_status_counts") or {}
+    storage_mode_counts = storage.get("scan_mode_counts") or {}
+    total_scans = max(
+        int(storage.get("scan_state_count") or 0),
+        int(storage.get("scan_count") or 0),
+        len(scan_summaries),
+    )
+    completed_scans = max(
+        int(storage_status_counts.get("completed") or 0),
+        status_counts.get("completed", 0),
+    )
+    failed_scans = max(
+        int(storage_status_counts.get("failed") or 0),
+        status_counts.get("failed", 0),
+    )
+    running_scans = max(
+        int(storage_status_counts.get("running") or 0),
+        status_counts.get("running", 0),
+    )
+    total_findings = max(
+        int(storage.get("finding_count") or 0),
+        sum(scan.get("total_vulnerabilities", 0) for scan in scan_summaries),
+    )
     return jsonify({
         "service": {
             "name": "Wraith API",
@@ -1277,10 +1531,24 @@ def get_overview():
             "running": status_counts.get("running", 0),
             "completed": status_counts.get("completed", 0),
             "failed": status_counts.get("failed", 0),
-            "recent": scan_summaries[:8],
+            "recent": [],
+            "recent_redacted": True,
+        },
+        "totals": {
+            "scans": total_scans,
+            "completed_scans": completed_scans,
+            "failed_scans": failed_scans,
+            "running_scans": running_scans,
+            "findings": total_findings,
+            "reports": int(storage.get("report_count") or 0),
+            "artifacts": int(storage.get("artifact_count") or 0),
+            "evidence_requests": int(storage.get("request_count") or 0),
+            "evidence_artifacts": int(storage.get("evidence_count") or 0),
+            "repositories_scanned": int(storage_mode_counts.get("sast") or 0),
+            "web_scans": int(storage_mode_counts.get("dast") or 0),
         },
         "risk": {
-            "total_findings": sum(scan.get("total_vulnerabilities", 0) for scan in scan_summaries),
+            "total_findings": total_findings,
             "severity": severity_totals,
         },
         "capabilities": {
@@ -1297,16 +1565,25 @@ def get_overview():
     })
 
 
-@app.route('/api/scan/<scan_id>', methods=['GET'])
-def get_scan_status(scan_id):
-    if scan_id not in active_scans:
-        return jsonify({'error': 'Scan not found'}), 404
-    scan = active_scans[scan_id]
-    return jsonify({
+def _load_scan_for_response(scan_id):
+    scan = _get_scan_state(scan_id)
+    if scan is None:
+        repo = _storage_repo()
+        if repo is not None and hasattr(repo, "get_scan_state"):
+            scan = repo.get_scan_state(scan_id)
+            if scan:
+                _set_scan_state(scan_id, scan, persist=False)
+    return scan
+
+
+def _scan_status_payload(scan_id, scan, *, include_details=False):
+    findings = scan.get('findings') or []
+    canonical_findings = scan.get('canonical_findings') or []
+    payload = {
         'scan_id':              scan_id,
         'status':               scan.get('status'),
         'target':               scan.get('target'),
-        'total_vulnerabilities': scan.get('total_vulnerabilities', 0),
+        'total_vulnerabilities': scan.get('total_vulnerabilities', len(canonical_findings) or len(findings)),
         'mode':                 scan.get('mode', 'dast'),
         'scan_type':            scan.get('scan_type', 'DAST'),
         'summary':              scan.get('summary', {}),
@@ -1315,47 +1592,75 @@ def get_scan_status(scan_id):
         'oob_mapping_summary':  scan.get('oob_mapping_summary', {}),
         'auth_health':          scan.get('auth_health', {}),
         'api_imports':          scan.get('api_imports', {}),
-        'sequence_workflows':   scan.get('sequence_workflows', []),
         'nuclei_summary':       scan.get('nuclei_summary', {}),
-        'nuclei_runs':          scan.get('nuclei_runs', []),
         'cve_intel_summary':    scan.get('cve_intel_summary', {}),
         'tech_stack':           scan.get('tech_stack', {}),
-        'findings':             scan.get('findings', []),
-        'canonical_findings':   scan.get('canonical_findings', []),
-        'report_path':          scan.get('report_path'),
-        'json_report_path':     scan.get('json_report_path'),
+        'report_ready':         bool(scan.get('report_path') or scan.get('json_report_path')),
         'error':                scan.get('error'),
-    })
+    }
+    if include_details:
+        payload.update({
+            'findings':             findings,
+            'canonical_findings':   canonical_findings,
+            'sequence_workflows':   scan.get('sequence_workflows', []),
+            'nuclei_runs':          scan.get('nuclei_runs', []),
+            'report_path':          scan.get('report_path'),
+            'json_report_path':     scan.get('json_report_path'),
+        })
+    else:
+        payload.update({
+            'finding_count':            len(findings),
+            'canonical_finding_count':  len(canonical_findings),
+            'sequence_workflow_count':  len(scan.get('sequence_workflows') or []),
+            'nuclei_run_count':         len(scan.get('nuclei_runs') or []),
+        })
+    return payload
+
+
+@app.route('/api/scan/<scan_id>/summary', methods=['GET'])
+def get_scan_summary(scan_id):
+    scan = _load_scan_for_response(scan_id)
+    if scan is None:
+        return jsonify({'error': 'Scan not found'}), 404
+    return jsonify(_scan_status_payload(scan_id, scan, include_details=False))
+
+
+@app.route('/api/scan/<scan_id>', methods=['GET'])
+def get_scan_status(scan_id):
+    scan = _load_scan_for_response(scan_id)
+    if scan is None:
+        return jsonify({'error': 'Scan not found'}), 404
+    return jsonify(_scan_status_payload(scan_id, scan, include_details=True))
 
 
 @app.route('/api/download/<scan_id>', methods=['GET'])
 def download_report(scan_id):
-    if scan_id not in active_scans:
+    scan = _get_scan_state(scan_id)
+    if scan is None:
         return jsonify({'error': 'Scan not found'}), 404
-    scan = active_scans[scan_id]
     if scan.get('status') != 'completed':
         return jsonify({'error': 'Scan not completed yet'}), 400
-    report_path = scan.get('report_path')
-    if not report_path or not os.path.exists(report_path):
+    report_path = _validated_report_path(scan.get('report_path'))
+    if not report_path:
         return jsonify({'error': 'Report file not found'}), 404
     return send_file(report_path, as_attachment=True,
-                     download_name=f'vulnerability_report_{scan_id}.pdf')
+                     download_name=_artifact_download_name(scan, scan_id, "pdf"))
 
 
 @app.route('/api/download-json/<scan_id>', methods=['GET'])
 def download_json_report(scan_id):
-    if scan_id not in active_scans:
+    scan = _get_scan_state(scan_id)
+    if scan is None:
         return jsonify({'error': 'Scan not found'}), 404
-    scan = active_scans[scan_id]
     if scan.get('status') != 'completed':
         return jsonify({'error': 'Scan not completed yet'}), 400
-    report_path = scan.get('json_report_path')
-    if not report_path or not os.path.exists(report_path):
+    report_path = _validated_report_path(scan.get('json_report_path'))
+    if not report_path:
         return jsonify({'error': 'JSON report file not found'}), 404
     return send_file(
         report_path,
         as_attachment=True,
-        download_name=f'wraith_scan_{scan_id}.json',
+        download_name=_artifact_download_name(scan, scan_id, "json"),
         mimetype='application/json',
     )
 
@@ -1630,6 +1935,14 @@ def run_nuclei_endpoint():
     valid_policy, policy_error = validate_policy_acknowledgement(policy_profile, policy_acknowledged)
     if not valid_policy:
         return jsonify({'error': policy_error, 'policy_options': policy_options()}), 400
+    for target in targets:
+        valid, reason = _validate_outbound_target(
+            target,
+            safety_mode=policy_profile,
+            allow_private_targets=bool(payload.get('allow_private_targets')),
+        )
+        if not valid:
+            return jsonify({'error': f'Nuclei target blocked: {reason}', 'target': target}), 400
     requested_templates = _parse_list_value(payload.get('templates'))
     trust_result = apply_template_trust(
         templates=requested_templates,
@@ -1672,7 +1985,7 @@ def run_nuclei_endpoint():
     for artifact in result.evidence:
         repo.save_evidence_artifact(artifact)
 
-    active_scan = active_scans.setdefault(scan_id, {})
+    active_scan = _get_scan_state(scan_id) or {}
     result_payload = result.to_dict()
     result_payload['template_trust'] = {
         'warnings': trust_result.get('warnings', []),
@@ -1691,6 +2004,7 @@ def run_nuclei_endpoint():
     existing = active_scan.setdefault('canonical_findings', [])
     existing.extend([finding.to_dict() for finding in result.findings])
     active_scan['total_vulnerabilities'] = len(existing) or active_scan.get('total_vulnerabilities', 0)
+    _set_scan_state(scan_id, active_scan)
     _refresh_scan_artifacts(scan_id)
 
     return jsonify(result_payload)
@@ -1729,7 +2043,7 @@ def enrich_cve_intel_endpoint():
     for finding in findings:
         repo.update_finding(finding)
 
-    active_scan = active_scans.setdefault(scan_id, {})
+    active_scan = _get_scan_state(scan_id) or {}
     active_scan['cve_intel_summary'] = {
         'cve_count': summary.get('cve_count', 0),
         'updated_findings': summary.get('updated_findings', 0),
@@ -1737,6 +2051,7 @@ def enrich_cve_intel_endpoint():
     }
     if not finding_ids:
         active_scan['canonical_findings'] = [finding.to_dict() for finding in findings]
+    _set_scan_state(scan_id, active_scan)
     _refresh_scan_artifacts(scan_id)
     return jsonify({
         'scan_id': scan_id,
@@ -1788,7 +2103,9 @@ def run_authorization_matrix_endpoint():
     except Exception as exc:
         return jsonify({'error': str(exc)}), 400
 
-    active_scans.setdefault(scan_id, {}).setdefault('authz_matrix_runs', []).append(result.to_dict())
+    active_scan = _get_scan_state(scan_id) or {}
+    active_scan.setdefault('authz_matrix_runs', []).append(result.to_dict())
+    _set_scan_state(scan_id, active_scan)
     return jsonify(result.to_dict())
 
 
@@ -2112,6 +2429,13 @@ def manual_replay_request():
     parsed = urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
         return jsonify({'error': 'Manual replay requires an absolute http(s) URL'}), 400
+    valid, reason = _validate_outbound_target(
+        url,
+        safety_mode=safety_mode,
+        allow_private_targets=bool(payload.get('allow_private_targets')),
+    )
+    if not valid:
+        return jsonify({'error': reason}), 400
     if safety_mode == 'safe' and method in {'PUT', 'PATCH', 'DELETE'} and not allow_state_change:
         return jsonify({'error': 'Safe mode blocks PUT, PATCH, and DELETE unless allow_state_change is true'}), 400
     if not isinstance(headers, dict):
@@ -2151,7 +2475,7 @@ def manual_replay_request():
             data=body if method not in {'GET', 'HEAD'} else None,
             timeout=max(1, min(int(payload.get('timeout') or 10), 30)),
             allow_redirects=False,
-            verify=False,
+            verify=bool(payload.get('verify_tls', VERIFY_TLS)),
         )
     except requests.RequestException as exc:
         return jsonify({
@@ -2341,8 +2665,10 @@ def get_mode():
 
 
 @socketio.on('connect')
-def handle_connect():
+def handle_connect(auth=None):
     print('Client connected')
+    emit('backend_status', {'status': 'connected', 'service': 'wraith-api'})
+    return True
 
 
 @socketio.on('disconnect')
@@ -2352,8 +2678,8 @@ def handle_disconnect():
 
 if __name__ == '__main__':
     debug_enabled = os.environ.get("SCANNER_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-    host = os.environ.get("SCANNER_HOST", "0.0.0.0")
-    port = int(os.environ.get("SCANNER_PORT", "5001"))
+    host = os.environ.get("SCANNER_HOST") or ("0.0.0.0" if os.environ.get("RENDER") else "127.0.0.1")
+    port = int(os.environ.get("PORT") or os.environ.get("SCANNER_PORT", "5001"))
 
     print("=" * 60)
     print("Vulnerability Scanner API Server v4.0")
@@ -2365,6 +2691,9 @@ if __name__ == '__main__':
     print("          XXE, SSTI, Headers, Components, WordPress")
     print("Upgrades: Adaptive payload mutation, Deep-state SPA, OOB mapping")
     print(f"Debug:    {'enabled' if debug_enabled else 'disabled'}")
+    print(f"Bind:     {host}:{port}")
+    if host == "0.0.0.0":
+        print("[WARN] API is exposed on all interfaces. Use only on trusted networks.")
     print("=" * 60)
     socketio.run(
         app,

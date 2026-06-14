@@ -1,9 +1,8 @@
 import React from 'react';
-import PageHeader from '../components/layout/PageHeader';
+import WorkflowHero from '../components/layout/WorkflowHero';
 import Button from '../components/ui/Button';
-import Card from '../components/ui/Card';
 import DataTable from '../components/ui/DataTable';
-import MetricCard from '../components/ui/MetricCard';
+import EmptyState from '../components/ui/EmptyState';
 import StatusPill from '../components/ui/StatusPill';
 
 function countTargets(result) {
@@ -38,6 +37,27 @@ function percent(value) {
   return number.toFixed(3);
 }
 
+function parseList(value) {
+  return String(value || '')
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function severityMatrix(records, nucleiResult) {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  const sources = [
+    ...(Array.isArray(records) ? records : []),
+    ...(Array.isArray(nucleiResult?.findings) ? nucleiResult.findings : []),
+  ];
+  sources.forEach((item) => {
+    const severity = String(item.nvd_severity || item.severity || 'info').toLowerCase();
+    if (counts[severity] !== undefined) counts[severity] += 1;
+    else counts.info += 1;
+  });
+  return counts;
+}
+
 export default function NucleiCve({
   latestScanId,
   scanStatus,
@@ -62,13 +82,17 @@ export default function NucleiCve({
   onNavigate,
 }) {
   const engineReady = Boolean(nucleiAssetStatus?.ok || nucleiAssetStatus?.binary_path);
-  const templateCount = nucleiAssetStatus?.metadata?.template_count || 0;
+  const templateCount = nucleiAssetStatus?.metadata?.template_count || nucleiAssetStatus?.template_count || 0;
   const nucleiTargets = countTargets(nucleiResult);
   const nucleiFindings = countFindings(nucleiResult);
   const nucleiErrors = Array.isArray(nucleiResult?.errors) ? nucleiResult.errors : [];
   const records = Array.isArray(cveIntelResult?.records) ? cveIntelResult.records : [];
   const policyOptions = policyOptionsFromStatus(nucleiAssetStatus);
   const activePolicy = policyOptions.find((option) => option.profile === nucleiConfig?.policyProfile) || policyOptions[0];
+  const severities = severityMatrix(records, nucleiResult);
+  const configuredSeverities = parseList(nucleiConfig?.severity);
+  const configuredTags = parseList(nucleiConfig?.tags);
+  const excludedTags = parseList(nucleiConfig?.excludeTags);
 
   const cveColumns = [
     { key: 'cve_id', label: 'CVE', width: '140px' },
@@ -110,137 +134,55 @@ export default function NucleiCve({
   ];
 
   return (
-    <div className="page-stack nuclei-page">
-      <PageHeader
+    <div className="page-stack lab-page workflow-page nuclei-page">
+      <WorkflowHero
+        icon="hub"
         eyebrow="Template Coverage"
         title="Nuclei & CVE Intelligence"
-        description="Manage Nuclei assets, run template coverage against the active Wraith corpus, and enrich CVE-backed findings with public risk context."
+        description="Manage Nuclei assets, run template coverage, and enrich CVE-backed findings."
+        active="nuclei"
+        onNavigate={onNavigate}
         actions={(
           <>
-            <Button variant="secondary" onClick={() => onNavigate('automated-workspace')}>Workspace</Button>
+            <Button variant="secondary" onClick={loadNucleiStatus}>Refresh</Button>
             <Button onClick={runNucleiIntegration} disabled={!latestScanId || !engineReady || nucleiState === 'running'}>
-              {nucleiState === 'running' ? 'Running...' : 'Run Nuclei'}
+              {nucleiState === 'running' ? 'Running' : 'Run Nuclei'}
             </Button>
           </>
         )}
       />
 
-      <div className="metric-grid five">
-        <MetricCard label="Active Scan" value={latestScanId || 'none'} detail={scanStatus?.status || 'idle'} />
-        <MetricCard label="Targets" value={nucleiTargets} detail="Nuclei input set" tone="blue" />
-        <MetricCard label="Matches" value={nucleiResult?.raw_count || 0} detail="raw JSONL matches" tone="amber" />
-        <MetricCard label="Imported" value={nucleiFindings} detail="Wraith findings" tone="emerald" />
-        <MetricCard label="CVEs" value={cveIntelResult?.cve_count || 0} detail={`${cveIntelResult?.kev_count || 0} KEV`} tone="red" />
-      </div>
+      <div className="workflow-route-grid workflow-route-grid-nuclei">
+        <section className="workflow-card workflow-card-command">
+          <header>
+            <h2>4. Nuclei & CVE</h2>
+            <p>Template scanning and CVE enrichment.</p>
+          </header>
 
-      <div className="nuclei-page-grid">
-        <Card
-          title="Managed Assets"
-          eyebrow="Engine"
-          actions={<Button variant="ghost" onClick={loadNucleiStatus}>Refresh</Button>}
-        >
-          <div className="nuclei-result-strip">
-            <div>
-              <span>Engine</span>
-              <strong>{engineReady ? 'ready' : nucleiAssetState}</strong>
+          <div className="workflow-section">
+            <h3>Nuclei Engine</h3>
+            <div className="workflow-mini-grid">
+              <div className="workflow-meta"><span>Engine</span><strong>{engineReady ? 'ready' : nucleiAssetState}</strong></div>
+              <div className="workflow-meta"><span>Version</span><strong>{nucleiAssetStatus?.version || nucleiAssetStatus?.metadata?.version || '-'}</strong></div>
+              <div className="workflow-meta"><span>Templates</span><strong>{formatNumber(templateCount)}</strong></div>
+              <div className="workflow-meta"><span>Active Scan</span><strong>{latestScanId || 'none'}</strong></div>
             </div>
-            <div>
-              <span>Templates</span>
-              <strong>{formatNumber(templateCount)}</strong>
+            <div className="engine-strip">
+              <Button variant="secondary" onClick={installNucleiEngine} disabled={nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}>
+                {nucleiAssetState === 'installing' ? 'Installing' : 'Install Engine'}
+              </Button>
+              <Button variant="secondary" onClick={updateNucleiTemplates} disabled={!engineReady || nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}>
+                {nucleiAssetState === 'updating' ? 'Updating' : 'Update Templates'}
+              </Button>
+              <Button variant="secondary" onClick={loadTemplateTrust}>Reload Policy</Button>
             </div>
-            <div>
-              <span>Asset State</span>
-              <strong>{nucleiAssetState}</strong>
-            </div>
-            <div>
+          </div>
+
+          <div className="workflow-section">
+            <h3>Template Policy</h3>
+            <label className="field">
               <span>Policy</span>
-              <strong>{nucleiConfig?.policyProfile || 'safe'}</strong>
-            </div>
-          </div>
-          <div className="nuclei-asset-card">
-            <div>
-              <span>Binary Path</span>
-              <code>{nucleiAssetStatus?.binary_path || nucleiAssetStatus?.metadata?.managed_binary || 'Not installed yet'}</code>
-            </div>
-            <div>
-              <span>Template Directory</span>
-              <code>{nucleiAssetStatus?.template_dir || 'Managed template directory pending'}</code>
-            </div>
-            <div className="nuclei-asset-actions split">
-              <Button
-                variant="secondary"
-                onClick={installNucleiEngine}
-                disabled={nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
-              >
-                {nucleiAssetState === 'installing' ? 'Installing...' : 'Install / Update Engine'}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={updateNucleiTemplates}
-                disabled={!engineReady || nucleiAssetState === 'installing' || nucleiAssetState === 'updating'}
-              >
-                {nucleiAssetState === 'updating' ? 'Updating...' : 'Update Templates'}
-              </Button>
-            </div>
-          </div>
-          <div className="nuclei-note">
-            <span className="material-symbols-outlined">verified_user</span>
-            <p>
-              Managed installs keep Wraith desktop/web users away from terminal setup while preserving explicit policy controls.
-            </p>
-          </div>
-        </Card>
-
-        <Card title="Run Configuration" eyebrow="Policy">
-          <div className="nuclei-form">
-            <label className="field wide">
-              <span>Targets</span>
-              <textarea
-                value={nucleiConfig?.targets || ''}
-                onChange={(event) => updateNucleiConfig('targets', event.target.value)}
-                placeholder="Leave empty to use active scan target and corpus URLs."
-              />
-            </label>
-            <label className="field wide">
-              <span>Template Paths</span>
-              <textarea
-                value={nucleiConfig?.templates || ''}
-                onChange={(event) => updateNucleiConfig('templates', event.target.value)}
-                placeholder="Optional managed or private template paths, separated by commas or new lines."
-              />
-            </label>
-            <div className="form-grid compact">
-              <label className="field">
-                <span>Severity</span>
-                <input value={nucleiConfig?.severity || ''} onChange={(event) => updateNucleiConfig('severity', event.target.value)} />
-              </label>
-              <label className="field">
-                <span>Tags</span>
-                <input value={nucleiConfig?.tags || ''} onChange={(event) => updateNucleiConfig('tags', event.target.value)} placeholder="Optional" />
-              </label>
-              <label className="field">
-                <span>Exclude Tags</span>
-                <input value={nucleiConfig?.excludeTags || ''} onChange={(event) => updateNucleiConfig('excludeTags', event.target.value)} placeholder="Extra exclusions" />
-              </label>
-              <label className="field">
-                <span>Rate Limit</span>
-                <input type="number" min="1" value={nucleiConfig?.rateLimit || ''} onChange={(event) => updateNucleiConfig('rateLimit', event.target.value)} />
-              </label>
-              <label className="field">
-                <span>HTTP Timeout</span>
-                <input type="number" min="1" value={nucleiConfig?.timeout || ''} onChange={(event) => updateNucleiConfig('timeout', event.target.value)} />
-              </label>
-              <label className="field">
-                <span>Process Timeout</span>
-                <input type="number" min="10" value={nucleiConfig?.processTimeout || ''} onChange={(event) => updateNucleiConfig('processTimeout', event.target.value)} />
-              </label>
-            </div>
-            <label className="check-row nuclei-safety">
-              <span>Policy Profile</span>
-              <select
-                value={nucleiConfig?.policyProfile || 'safe'}
-                onChange={(event) => updateNucleiConfig('policyProfile', event.target.value)}
-              >
+              <select value={nucleiConfig?.policyProfile || 'safe'} onChange={(event) => updateNucleiConfig('policyProfile', event.target.value)}>
                 {policyOptions.map((option) => (
                   <option key={option.profile} value={option.profile}>
                     {option.label || option.profile}
@@ -248,15 +190,35 @@ export default function NucleiCve({
                 ))}
               </select>
             </label>
-            <div className="nuclei-policy-note">
-              <strong>{activePolicy?.label || activePolicy?.profile || 'Safe'} mode</strong>
-              <p>{activePolicy?.description || 'Nuclei policy controls template tag exclusions.'}</p>
-              {activePolicy?.default_exclude_tags?.length > 0 && (
-                <code>Default excludes: {activePolicy.default_exclude_tags.join(', ')}</code>
-              )}
+            <div className="workflow-mini-grid">
+              <label className="field">
+                <span>Severity</span>
+                <input value={nucleiConfig?.severity || ''} onChange={(event) => updateNucleiConfig('severity', event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Rate Limit</span>
+                <input type="number" min="1" value={nucleiConfig?.rateLimit || ''} onChange={(event) => updateNucleiConfig('rateLimit', event.target.value)} />
+              </label>
+            </div>
+            <div className="tag-row">
+              {(configuredSeverities.length ? configuredSeverities : ['all severities']).map((item) => <span key={item}>{item}</span>)}
+            </div>
+            {configuredTags.length > 0 && (
+              <div className="tag-row">
+                {configuredTags.map((item) => <span key={item}>{item}</span>)}
+              </div>
+            )}
+            {excludedTags.length > 0 && (
+              <div className="tag-row danger">
+                {excludedTags.map((item) => <span key={item}>{item}</span>)}
+              </div>
+            )}
+            <div className="workflow-warning-ack">
+              <span className="material-symbols-outlined">warning</span>
+              <span>{activePolicy?.description || 'Nuclei policy controls template tag exclusions.'}</span>
             </div>
             {nucleiConfig?.policyProfile !== 'safe' && (
-              <label className="check-row nuclei-safety nuclei-ack">
+              <label className="workflow-warning-ack">
                 <input
                   type="checkbox"
                   checked={Boolean(nucleiConfig?.policyAcknowledged)}
@@ -266,115 +228,91 @@ export default function NucleiCve({
               </label>
             )}
           </div>
-        </Card>
 
-        <Card
-          title="Template Trust Manager"
-          eyebrow="Local Policy"
-          actions={<Button variant="ghost" onClick={loadTemplateTrust}>Reload</Button>}
-        >
-          <div className="nuclei-form">
-            <div className="nuclei-intel-header">
-              <StatusPill status={templateTrustState || 'idle'} />
-              <span>Applied before every Nuclei run</span>
+          <div className="workflow-section">
+            <h3>CVE Enrichment</h3>
+            <div className="workflow-mini-grid">
+              <div className="workflow-meta"><span>Records</span><strong>{formatNumber(cveIntelResult?.cve_count || records.length)}</strong></div>
+              <div className="workflow-meta"><span>KEV</span><strong>{formatNumber(cveIntelResult?.kev_count || 0)}</strong></div>
+              <div className="workflow-meta"><span>Targets</span><strong>{formatNumber(nucleiTargets)}</strong></div>
+              <div className="workflow-meta"><span>Matches</span><strong>{formatNumber(nucleiResult?.raw_count || 0)}</strong></div>
+              <div className="workflow-meta"><span>Imported</span><strong>{formatNumber(nucleiFindings)}</strong></div>
             </div>
-            <div className="form-grid compact">
+            <Button variant="secondary" onClick={enrichCveIntel} disabled={!latestScanId || cveIntelState === 'running'}>
+              {cveIntelState === 'running' ? 'Enriching CVEs' : 'Enrich CVEs'}
+            </Button>
+          </div>
+        </section>
+
+        <section className="workflow-card workflow-card-support">
+          <header>
+            <h2>Severity Matrix</h2>
+            <p>Populated from real Nuclei findings and CVE enrichment records.</p>
+          </header>
+          <div className="workflow-severity-matrix">
+            {Object.entries(severities).map(([severity, count]) => (
+              <div key={severity}>
+                <span>{severity}</span>
+                <strong className={`severity-text-${severity}`}>{formatNumber(count)}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div className="workflow-section">
+            <h3>Managed Assets</h3>
+            <div className="nuclei-asset-card">
+              <div>
+                <span>Binary Path</span>
+                <code>{nucleiAssetStatus?.binary_path || nucleiAssetStatus?.metadata?.managed_binary || 'Not installed yet'}</code>
+              </div>
+              <div>
+                <span>Template Directory</span>
+                <code>{nucleiAssetStatus?.template_dir || 'Managed template directory pending'}</code>
+              </div>
+            </div>
+          </div>
+
+          <div className="workflow-section">
+            <h3>Trust Policy</h3>
+            <div className="workflow-mini-grid">
               <label className="field">
                 <span>Allowed Tags</span>
-                <input
-                  value={templateTrustConfig?.allowed_tags || ''}
-                  onChange={(event) => updateTemplateTrustConfig('allowed_tags', event.target.value)}
-                  placeholder="Optional allowlist"
-                />
+                <input value={templateTrustConfig?.allowed_tags || ''} onChange={(event) => updateTemplateTrustConfig('allowed_tags', event.target.value)} placeholder="Optional allowlist" />
               </label>
               <label className="field">
                 <span>Denied Tags</span>
-                <input
-                  value={templateTrustConfig?.denied_tags || ''}
-                  onChange={(event) => updateTemplateTrustConfig('denied_tags', event.target.value)}
-                  placeholder="bruteforce, destructive, dos"
-                />
+                <input value={templateTrustConfig?.denied_tags || ''} onChange={(event) => updateTemplateTrustConfig('denied_tags', event.target.value)} placeholder="bruteforce, destructive, dos" />
               </label>
             </div>
-            <label className="field wide">
-              <span>Allowed Template Paths</span>
-              <textarea
-                value={templateTrustConfig?.allowed_template_paths || ''}
-                onChange={(event) => updateTemplateTrustConfig('allowed_template_paths', event.target.value)}
-                placeholder="Optional explicit directories or files. Empty means no path allowlist."
-              />
-            </label>
-            <label className="field wide">
-              <span>Denied Template Paths</span>
-              <textarea
-                value={templateTrustConfig?.denied_template_paths || ''}
-                onChange={(event) => updateTemplateTrustConfig('denied_template_paths', event.target.value)}
-                placeholder="Directories or files to block even in professional mode."
-              />
-            </label>
-            <label className="field wide">
+            <label className="field">
               <span>Trusted Sources</span>
-              <input
-                value={templateTrustConfig?.trusted_sources || ''}
-                onChange={(event) => updateTemplateTrustConfig('trusted_sources', event.target.value)}
-              />
+              <input value={templateTrustConfig?.trusted_sources || ''} onChange={(event) => updateTemplateTrustConfig('trusted_sources', event.target.value)} />
             </label>
-            <label className="field wide">
-              <span>Notes</span>
-              <textarea
-                value={templateTrustConfig?.notes || ''}
-                onChange={(event) => updateTemplateTrustConfig('notes', event.target.value)}
-                placeholder="Operator notes for why these template sources are trusted."
-              />
-            </label>
-            <div className="nuclei-note">
-              <span className="material-symbols-outlined">policy</span>
-              <p>
-                This policy filters template paths and tags before the Nuclei process starts.
-                It does not approve intrusive mode by itself.
-              </p>
-            </div>
             <Button variant="secondary" onClick={saveTemplateTrust} disabled={templateTrustState === 'saving'}>
-              {templateTrustState === 'saving' ? 'Saving...' : 'Save Trust Policy'}
+              {templateTrustState === 'saving' ? 'Saving Policy' : 'Save Trust Policy'}
             </Button>
           </div>
-        </Card>
 
-        <Card
-          title="CVE Intelligence"
-          eyebrow="NVD EPSS KEV"
-          className="dashboard-wide"
-          actions={(
-            <Button variant="secondary" onClick={enrichCveIntel} disabled={!latestScanId || cveIntelState === 'running'}>
-              {cveIntelState === 'running' ? 'Enriching...' : 'Enrich CVEs'}
-            </Button>
-          )}
-        >
-          <div className="nuclei-intel-header">
-            <StatusPill status={cveIntelState} />
-            <span>{cveIntelResult?.updated_findings || 0} findings updated</span>
-            <span>{cveIntelResult?.kev_count || 0} CISA KEV matches</span>
-          </div>
-          <DataTable
-            columns={cveColumns}
-            rows={records}
-            rowKey="cve_id"
-            emptyTitle={latestScanId ? 'No enriched CVE records yet' : 'Run or select a scan first'}
-          />
-        </Card>
-
-        {(nucleiErrors.length > 0 || cveIntelResult?.errors?.length > 0) && (
-          <Card title="Integration Errors" eyebrow="Diagnostics" className="dashboard-wide">
+          {(nucleiErrors.length > 0 || cveIntelResult?.errors?.length > 0) && (
             <div className="nuclei-errors">
-              {nucleiErrors.map((error, index) => (
-                <code key={`nuclei-${index}`}>{error}</code>
-              ))}
-              {(cveIntelResult?.errors || []).map((error, index) => (
-                <code key={`cve-${index}`}>{error}</code>
-              ))}
+              {nucleiErrors.map((error, index) => <code key={`nuclei-${index}`}>{error}</code>)}
+              {(cveIntelResult?.errors || []).map((error, index) => <code key={`cve-${index}`}>{error}</code>)}
             </div>
-          </Card>
-        )}
+          )}
+        </section>
+
+        <section className="workflow-card workflow-card-wide">
+          <header>
+            <h2>CVE Records</h2>
+            <p>Enriched public risk context for the active scan.</p>
+            <StatusPill status={cveIntelState} />
+          </header>
+          {records.length ? (
+            <DataTable columns={cveColumns} rows={records} rowKey="cve_id" emptyTitle="No enriched CVE records yet" />
+          ) : (
+            <EmptyState title={latestScanId ? 'No enriched CVE records yet' : 'Run or select a scan first'} body="CVE records appear after backend enrichment returns data." />
+          )}
+        </section>
       </div>
     </div>
   );

@@ -3,12 +3,19 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Virtual Environment
 venv/
+.venv/
 
 # Node
 node_modules/
+scanner-terminal/build/
+build/
 
 # Environment
 .env
@@ -16,7 +23,12 @@ node_modules/
 # Reports
 reports/
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.pdf
 
 # OS
 .DS_Store

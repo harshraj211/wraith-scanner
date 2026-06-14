@@ -23,7 +23,7 @@ export default function Repeater({
   onNavigate,
 }) {
   return (
-    <div className="page-fill">
+    <div className="page-fill lab-page repeater-page">
       <PageHeader
         eyebrow="Manual"
         title="Repeater"

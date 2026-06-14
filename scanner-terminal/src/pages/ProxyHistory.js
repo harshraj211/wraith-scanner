@@ -36,7 +36,7 @@ export default function ProxyHistory({
   closeWraithBrowser,
 }) {
   return (
-    <div className="page-fill">
+    <div className="page-fill lab-page proxy-page">
       <PageHeader
         eyebrow="Manual Proxy"
         title="Proxy History"

@@ -22,13 +22,32 @@ import ProofMode from './pages/ProofMode';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
+function configuredApiUrl() {
+  const fallback = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
+  if (typeof window === 'undefined') return fallback;
+  return window.localStorage.getItem('wraith.apiUrl') || fallback;
+}
+
+function apiUrlCandidates(currentUrl) {
+  return [
+    currentUrl,
+    process.env.REACT_APP_API_URL,
+    'http://127.0.0.1:5001',
+    'http://localhost:5001',
+  ].filter((url, index, list) => url && list.indexOf(url) === index);
+}
+
+function defaultSafetyMode() {
+  if (typeof window === 'undefined') return 'safe';
+  const stored = window.localStorage.getItem('wraith.defaultSafetyMode');
+  return ['safe', 'intrusive', 'lab'].includes(stored) ? stored : 'safe';
+}
 
 const initialForm = {
-  targetUrl: 'http://127.0.0.1:5000',
+  targetUrl: '',
   depth: '3',
   timeout: '10',
-  safetyMode: 'safe',
+  safetyMode: defaultSafetyMode(),
   authType: 'anonymous',
   authRole: 'anonymous',
   bearerToken: '',
@@ -164,6 +183,7 @@ function pageFromLocation() {
 
 function App() {
   const intruderAbortRef = useRef(false);
+  const [apiUrl, setApiUrl] = useState(configuredApiUrl);
   const [activePage, setActivePage] = useState(pageFromLocation);
   const [socketState, setSocketState] = useState('connecting');
   const [form, setForm] = useState(initialForm);
@@ -189,6 +209,7 @@ function App() {
   const [comparerState, setComparerState] = useState('idle');
   const [comparerResult, setComparerResult] = useState(null);
   const [launchState, setLaunchState] = useState('idle');
+  const [launchError, setLaunchError] = useState('');
   const [latestScanId, setLatestScanId] = useState('');
   const [pollingScanId, setPollingScanId] = useState('');
   const [scanStatus, setScanStatus] = useState(null);
@@ -232,16 +253,37 @@ function App() {
   const [cveIntelResult, setCveIntelResult] = useState(null);
   const [overview, setOverview] = useState(null);
   const [overviewState, setOverviewState] = useState('idle');
+  const progressQueueRef = useRef([]);
+  const progressFlushTimerRef = useRef(null);
+
+  const flushProgressEvents = useCallback(() => {
+    const queued = progressQueueRef.current.splice(0);
+    progressFlushTimerRef.current = null;
+    if (!queued.length) return;
+    setProgressEvents((current) => [...queued.reverse(), ...current].slice(0, 250));
+  }, []);
 
   const addProgress = useCallback((event) => {
-    const item = {
+    progressQueueRef.current.push({
       timestamp: event.timestamp || new Date().toISOString(),
       type: event.type || event.status || 'info',
       message: event.message || event.detail || 'event',
       scan_id: event.scan_id || latestScanId,
-    };
-    setProgressEvents((current) => [item, ...current].slice(0, 250));
-  }, [latestScanId]);
+    });
+    if (typeof window === 'undefined') {
+      flushProgressEvents();
+      return;
+    }
+    if (!progressFlushTimerRef.current) {
+      progressFlushTimerRef.current = window.setTimeout(flushProgressEvents, 300);
+    }
+  }, [flushProgressEvents, latestScanId]);
+
+  useEffect(() => () => {
+    if (progressFlushTimerRef.current && typeof window !== 'undefined') {
+      window.clearTimeout(progressFlushTimerRef.current);
+    }
+  }, []);
 
   const navigate = useCallback((page) => {
     const normalized = page || 'overview';
@@ -254,14 +296,24 @@ function App() {
 
   const loadOverview = useCallback(async () => {
     setOverviewState('loading');
-    try {
-      const response = await axios.get(`${API_URL}/api/overview`);
-      setOverview(response.data);
-      setOverviewState('ready');
-    } catch (_error) {
-      setOverviewState('offline');
+    for (const candidateUrl of apiUrlCandidates(apiUrl)) {
+      try {
+        const response = await axios.get(`${candidateUrl}/api/overview`, { timeout: 4000 });
+        if (candidateUrl !== apiUrl) {
+          setApiUrl(candidateUrl);
+          window.localStorage.setItem('wraith.apiUrl', candidateUrl);
+        }
+        setOverview(response.data);
+        setOverviewState('ready');
+        setSocketState('connected');
+        return;
+      } catch (_error) {
+        // Try the next known local backend before marking the app offline.
+      }
     }
-  }, []);
+    setOverviewState('offline');
+    setSocketState((current) => (current === 'connected' ? current : 'disconnected'));
+  }, [apiUrl]);
 
   useEffect(() => {
     const onHashChange = () => setActivePage(pageFromLocation());
@@ -277,26 +329,29 @@ function App() {
   }, [loadOverview]);
 
   useEffect(() => {
-    const socket = typeof io === 'function' ? io(API_URL, { transports: ['websocket', 'polling'] }) : null;
+    const socket = typeof io === 'function' ? io(apiUrl, {
+      transports: ['polling', 'websocket'],
+      timeout: 5000,
+    }) : null;
     if (!socket || typeof socket.on !== 'function') {
       setSocketState('offline');
       return undefined;
     }
     socket.on('connect', () => setSocketState('connected'));
-    socket.on('disconnect', () => setSocketState('disconnected'));
-    socket.on('connect_error', () => setSocketState('disconnected'));
+    socket.on('disconnect', () => setSocketState((current) => (current === 'connected' ? current : 'disconnected')));
+    socket.on('connect_error', () => setSocketState((current) => (current === 'connected' ? current : 'disconnected')));
     socket.on('scan_progress', (event) => {
       addProgress(event || {});
       if (event?.scan_id) setLatestScanId(event.scan_id);
       if (['completed', 'complete', 'error', 'failed'].includes(String(event?.status || event?.type || '').toLowerCase())) {
-        setTimeout(() => refreshStatus(event.scan_id), 300);
+        setTimeout(() => refreshStatus(event.scan_id, { full: true }), 300);
       }
     });
     return () => socket.disconnect?.();
     // Socket setup intentionally depends only on progress writer to avoid reconnecting
     // when scan status state changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addProgress]);
+  }, [addProgress, apiUrl]);
 
   const scanPayload = useMemo(() => buildScanPayload(form), [form]);
   const statusFindings = useMemo(() => normalizeFindings(scanStatus), [scanStatus]);
@@ -317,6 +372,8 @@ function App() {
   const repeaterDiff = useMemo(() => buildRepeaterDiff(activeRepeaterTab), [activeRepeaterTab]);
 
   const updateForm = (name, value) => {
+    setLaunchError('');
+    if (launchState === 'error') setLaunchState('idle');
     setForm((current) => ({ ...current, [name]: value }));
   };
 
@@ -370,34 +427,49 @@ function App() {
 
   const submitScan = async (event) => {
     if (event?.preventDefault) event.preventDefault();
-    if (!scanPayload.url) return;
+    if (!scanPayload.url) {
+      setLaunchError('Enter the authorized base URL you want to scan.');
+      return;
+    }
     setLaunchState('starting');
+    setLaunchError('');
     setScanStatus(null);
-    navigate('automated-workspace');
     try {
-      const response = await axios.post(`${API_URL}/api/scan`, scanPayload);
+      const response = await axios.post(`${apiUrl}/api/scan`, scanPayload);
       const scanId = response.data.scan_id;
+      if (!scanId) throw new Error('Backend did not return a scan id.');
       setLatestScanId(scanId);
       setPollingScanId(scanId);
       applyManualRequestUpdate((current) => ({ ...current, scanId }));
       addProgress({ scan_id: scanId, type: 'success', message: `Scan started: ${scanId}` });
       setLaunchState('started');
+      navigate('automated-workspace');
       loadOverview();
       setTimeout(() => refreshStatus(scanId), 700);
     } catch (error) {
+      const message = apiError(error);
       setLaunchState('error');
-      addProgress({ type: 'error', message: apiError(error) });
+      setLaunchError(message);
+      addProgress({ type: 'error', message });
     }
   };
 
-  const refreshStatus = async (scanId = latestScanId) => {
+  const refreshStatus = async (scanId = latestScanId, options = {}) => {
     if (!scanId) return;
+    const full = Boolean(options.full);
     try {
-      const response = await axios.get(`${API_URL}/api/scan/${scanId}`);
-      setScanStatus(response.data);
+      const response = await axios.get(`${apiUrl}/api/scan/${scanId}${full ? '' : '/summary'}`);
+      setScanStatus((current) => {
+        const base = current?.scan_id === response.data?.scan_id ? current : {};
+        return full ? response.data : { ...base, ...response.data };
+      });
       if (response.data?.scan_id) setLatestScanId(response.data.scan_id);
       if (['completed', 'failed'].includes(String(response.data?.status || '').toLowerCase())) {
         setPollingScanId('');
+        if (!full) {
+          await refreshStatus(scanId, { full: true });
+          return;
+        }
         loadCorpus(scanId);
         loadFindings(scanId);
         loadProofData();
@@ -418,7 +490,7 @@ function App() {
       if (corpusFilters.source) params.source = corpusFilters.source;
       if (corpusFilters.statusCode) params.status_code = corpusFilters.statusCode;
       if (corpusFilters.pathContains) params.path_contains = corpusFilters.pathContains;
-      const response = await axios.get(`${API_URL}/api/corpus/${scanId}/requests`, { params });
+      const response = await axios.get(`${apiUrl}/api/corpus/${scanId}/requests`, { params });
       const requests = response.data.requests || [];
       setCorpusRequests(requests);
       setCorpusState('loaded');
@@ -435,7 +507,7 @@ function App() {
     if (!scanId) return;
     setFindingsState('loading');
     try {
-      const response = await axios.get(`${API_URL}/api/corpus/${scanId}/findings`);
+      const response = await axios.get(`${apiUrl}/api/corpus/${scanId}/findings`);
       setCorpusFindings(response.data.findings || []);
       setFindingsState('loaded');
     } catch (error) {
@@ -449,8 +521,8 @@ function App() {
     try {
       const params = findingId ? { finding_id: findingId } : {};
       const [tasksResponse, artifactsResponse] = await Promise.all([
-        axios.get(`${API_URL}/api/proof/tasks`, { params }),
-        axios.get(`${API_URL}/api/evidence/artifacts`, { params }),
+        axios.get(`${apiUrl}/api/proof/tasks`, { params }),
+        axios.get(`${apiUrl}/api/evidence/artifacts`, { params }),
       ]);
       setProofTasks(tasksResponse.data.tasks || []);
       setEvidenceArtifacts(artifactsResponse.data.artifacts || []);
@@ -469,7 +541,7 @@ function App() {
     }
     setFindingEvidenceState('loading');
     try {
-      const response = await axios.get(`${API_URL}/api/evidence/artifacts`, { params: { finding_id: findingId } });
+      const response = await axios.get(`${apiUrl}/api/evidence/artifacts`, { params: { finding_id: findingId } });
       setFindingEvidenceArtifacts(response.data.artifacts || []);
       setFindingEvidenceState('loaded');
     } catch (error) {
@@ -477,12 +549,12 @@ function App() {
       setFindingEvidenceState('error');
       addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
     }
-  }, [addProgress, latestScanId]);
+  }, [addProgress, apiUrl, latestScanId]);
 
   const loadExchange = async (requestId) => {
     if (!requestId) return;
     try {
-      const response = await axios.get(`${API_URL}/api/corpus/request/${requestId}`);
+      const response = await axios.get(`${apiUrl}/api/corpus/request/${requestId}`);
       setSelectedExchange(response.data);
     } catch (error) {
       addProgress({ scan_id: latestScanId, type: 'error', message: apiError(error) });
@@ -503,7 +575,7 @@ function App() {
     if (!scanId || !manualFinding.title.trim()) return;
     setManualFindingState('saving');
     try {
-      const response = await axios.post(`${API_URL}/api/corpus/${scanId}/findings/manual`, {
+      const response = await axios.post(`${apiUrl}/api/corpus/${scanId}/findings/manual`, {
         request_id: requestId,
         title: manualFinding.title.trim(),
         vuln_type: manualFinding.vulnType.trim() || 'manual',
@@ -585,7 +657,7 @@ function App() {
       const payload = { url: repoForm.url.trim() };
       if (repoForm.token.trim()) payload.token = repoForm.token.trim();
       if (repoForm.branch.trim()) payload.branch = repoForm.branch.trim();
-      const response = await axios.post(`${API_URL}/api/scan/repo`, payload);
+      const response = await axios.post(`${apiUrl}/api/scan/repo`, payload);
       const scanId = response.data.scan_id;
       setLatestScanId(scanId);
       setPollingScanId(scanId);
@@ -602,7 +674,7 @@ function App() {
     if (!manualRequest.url.trim()) return;
     setManualState('saving');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/save-request`, {
+      const response = await axios.post(`${apiUrl}/api/manual/save-request`, {
         scan_id: manualRequest.scanId || latestScanId,
         method: manualRequest.method,
         url: manualRequest.url.trim(),
@@ -626,7 +698,7 @@ function App() {
     if (!manualRequest.url.trim()) return;
     setManualState('sending');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/replay`, {
+      const response = await axios.post(`${apiUrl}/api/manual/replay`, {
         scan_id: manualRequest.scanId || latestScanId,
         method: manualRequest.method,
         url: manualRequest.url.trim(),
@@ -666,7 +738,7 @@ function App() {
 
   const refreshProxyStatus = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/manual/proxy/status`);
+      const response = await axios.get(`${apiUrl}/api/manual/proxy/status`);
       setProxyStatus(response.data || { running: false });
       setProxyState(response.data?.running ? 'running' : 'idle');
     } catch (error) {
@@ -677,7 +749,7 @@ function App() {
   const refreshProxyCaStatus = async () => {
     setProxyCaState((current) => (current === 'generating' ? current : 'loading'));
     try {
-      const response = await axios.get(`${API_URL}/api/manual/proxy/ca/status`);
+      const response = await axios.get(`${apiUrl}/api/manual/proxy/ca/status`);
       setProxyCaStatus(response.data);
       setProxyCaState('ready');
     } catch (error) {
@@ -687,9 +759,12 @@ function App() {
   };
 
   const generateProxyCa = async () => {
+    if (!confirmDangerousAction('Generate a local Wraith CA certificate? Only install it for authorized testing profiles.')) {
+      return;
+    }
     setProxyCaState('generating');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/proxy/ca/generate`, {});
+      const response = await axios.post(`${apiUrl}/api/manual/proxy/ca/generate`, {});
       setProxyCaStatus(response.data);
       setProxyCaState('generated');
       addProgress({ type: 'success', message: 'Wraith local CA generated for future HTTPS interception setup.' });
@@ -700,11 +775,11 @@ function App() {
   };
 
   const downloadProxyCa = () => {
-    window.open(`${API_URL}/api/manual/proxy/ca/download`, '_blank');
+    window.open(`${apiUrl}/api/manual/proxy/ca/download`, '_blank');
   };
 
   const generateProxyLeafCertificate = async (host) => {
-    const response = await axios.post(`${API_URL}/api/manual/proxy/ca/leaf/generate`, { host });
+    const response = await axios.post(`${apiUrl}/api/manual/proxy/ca/leaf/generate`, { host });
     addProgress({ type: 'success', message: `Generated scoped HTTPS leaf certificate for ${response.data.hostname || host}.` });
     return response.data;
   };
@@ -713,7 +788,7 @@ function App() {
     setProxyState('starting');
     try {
       const origin = safeOrigin(manualRequest.url) || safeOrigin(form.targetUrl) || 'http://127.0.0.1:5000';
-      const response = await axios.post(`${API_URL}/api/manual/proxy/start`, {
+      const response = await axios.post(`${apiUrl}/api/manual/proxy/start`, {
         scan_id: manualRequest.scanId || latestScanId,
         target_base_url: origin,
         scope: [origin],
@@ -737,9 +812,12 @@ function App() {
   };
 
   const stopManualProxy = async () => {
+    if (!confirmDangerousAction('Stop the manual proxy? Pending intercepted requests will be dropped.')) {
+      return;
+    }
     setProxyState('stopping');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/proxy/stop`);
+      const response = await axios.post(`${apiUrl}/api/manual/proxy/stop`);
       setProxyStatus(response.data || { running: false });
       setPendingProxyRequests([]);
       setProxyState('stopped');
@@ -751,7 +829,7 @@ function App() {
 
   const toggleManualProxyIntercept = async (enabled) => {
     try {
-      const response = await axios.post(`${API_URL}/api/manual/proxy/intercept`, { enabled });
+      const response = await axios.post(`${apiUrl}/api/manual/proxy/intercept`, { enabled });
       setProxyStatus(response.data || { running: false });
     } catch (error) {
       addProgress({ type: 'error', message: apiError(error) });
@@ -760,7 +838,7 @@ function App() {
 
   const loadProxyPending = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/manual/proxy/pending`);
+      const response = await axios.get(`${apiUrl}/api/manual/proxy/pending`);
       setPendingProxyRequests(response.data.requests || []);
     } catch (error) {
       addProgress({ type: 'error', message: apiError(error) });
@@ -769,7 +847,7 @@ function App() {
 
   const refreshBrowserStatus = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/manual/browser/status`);
+      const response = await axios.get(`${apiUrl}/api/manual/browser/status`);
       setBrowserStatus(response.data || { running: false });
       setBrowserState(response.data?.running ? 'running' : 'idle');
     } catch (error) {
@@ -790,7 +868,7 @@ function App() {
         return;
       }
       const targetUrl = manualRequest.url || form.targetUrl || 'http://127.0.0.1:5000/';
-      const response = await axios.post(`${API_URL}/api/manual/browser/open`, {
+      const response = await axios.post(`${apiUrl}/api/manual/browser/open`, {
         target_url: targetUrl,
         scan_id: manualRequest.scanId || latestScanId || status.scan_id,
         use_proxy: true,
@@ -809,7 +887,7 @@ function App() {
   const closeWraithBrowser = async () => {
     setBrowserState('closing');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/browser/close`);
+      const response = await axios.post(`${apiUrl}/api/manual/browser/close`);
       setBrowserStatus(response.data || { running: false });
       setBrowserState('idle');
       addProgress({ type: 'success', message: 'Controlled Wraith browser closed.' });
@@ -823,7 +901,7 @@ function App() {
     try {
       const payload = { action };
       if (requestUpdate) payload.request = requestUpdate;
-      await axios.post(`${API_URL}/api/manual/proxy/pending/${requestId}`, payload);
+      await axios.post(`${apiUrl}/api/manual/proxy/pending/${requestId}`, payload);
       await loadProxyPending();
       if (action === 'forward') setTimeout(() => loadCorpus(manualRequest.scanId || latestScanId), 300);
     } catch (error) {
@@ -862,7 +940,7 @@ function App() {
     if (!scanId) return;
     setPassiveState('running');
     try {
-      const response = await axios.post(`${API_URL}/api/manual/passive/${scanId}/run`);
+      const response = await axios.post(`${apiUrl}/api/manual/passive/${scanId}/run`);
       setPassiveState('complete');
       await loadFindings(scanId);
       addProgress({ scan_id: scanId, type: 'success', message: `Passive scan created ${response.data.count || 0} findings.` });
@@ -884,7 +962,7 @@ function App() {
     setComparerState('running');
     setComparerResult(null);
     try {
-      const response = await axios.post(`${API_URL}/api/manual/compare-responses`, {
+      const response = await axios.post(`${apiUrl}/api/manual/compare-responses`, {
         baseline_request_id: comparerSelection.baselineRequestId,
         candidate_request_id: comparerSelection.candidateRequestId,
       });
@@ -927,7 +1005,7 @@ function App() {
       if (intruderAbortRef.current) break;
       const requestForPayload = buildIntruderRequest(manualRequest, marker, payload);
       try {
-        const response = await axios.post(`${API_URL}/api/manual/replay`, {
+        const response = await axios.post(`${apiUrl}/api/manual/replay`, {
           scan_id: scanId,
           method: requestForPayload.method,
           url: requestForPayload.url.trim(),
@@ -969,7 +1047,7 @@ function App() {
     if (!finding?.finding_id) return null;
     setProofState('creating');
     try {
-      const response = await axios.post(`${API_URL}/api/proof/${finding.finding_id}/task`, {
+      const response = await axios.post(`${apiUrl}/api/proof/${finding.finding_id}/task`, {
         safety_mode: 'safe',
       });
       setProofState('created');
@@ -989,7 +1067,7 @@ function App() {
     if (!taskId) return;
     setProofState('running');
     try {
-      const response = await axios.post(`${API_URL}/api/proof/${taskId}/run`);
+      const response = await axios.post(`${apiUrl}/api/proof/${taskId}/run`);
       setProofState(response.data?.result?.result || response.data?.status || 'complete');
       addProgress({ type: 'success', message: `Proof task completed: ${taskId}` });
       if (latestScanId) loadCorpus(latestScanId);
@@ -1022,7 +1100,7 @@ function App() {
     }
     setAuthzMatrixState('running');
     try {
-      const response = await axios.post(`${API_URL}/api/authz/matrix/run`, {
+      const response = await axios.post(`${apiUrl}/api/authz/matrix/run`, {
         scan_id: latestScanId,
         auth_profiles: profiles,
         safety_mode: 'safe',
@@ -1050,7 +1128,7 @@ function App() {
     }
     setNucleiState('running');
     try {
-      const response = await axios.post(`${API_URL}/api/integrations/nuclei/run`, {
+      const response = await axios.post(`${apiUrl}/api/integrations/nuclei/run`, {
         scan_id: latestScanId,
         targets: parseList(nucleiConfig.targets),
         templates: parseList(nucleiConfig.templates),
@@ -1073,7 +1151,7 @@ function App() {
       });
       await loadCorpus(latestScanId);
       await loadFindings(latestScanId);
-      await refreshStatus(latestScanId);
+      await refreshStatus(latestScanId, { full: true });
     } catch (error) {
       setNucleiState('error');
       const payload = error?.response?.data;
@@ -1085,7 +1163,7 @@ function App() {
   const loadNucleiStatus = async () => {
     setNucleiAssetState((current) => (current === 'installing' || current === 'updating' ? current : 'loading'));
     try {
-      const response = await axios.get(`${API_URL}/api/integrations/nuclei/status`);
+      const response = await axios.get(`${apiUrl}/api/integrations/nuclei/status`);
       setNucleiAssetStatus(response.data);
       if (response.data?.template_trust) {
         setTemplateTrustConfig(templateTrustToForm(response.data.template_trust));
@@ -1100,7 +1178,7 @@ function App() {
   const loadTemplateTrust = async () => {
     setTemplateTrustState('loading');
     try {
-      const response = await axios.get(`${API_URL}/api/integrations/nuclei/trust`);
+      const response = await axios.get(`${apiUrl}/api/integrations/nuclei/trust`);
       setTemplateTrustConfig(templateTrustToForm(response.data?.config || {}));
       setTemplateTrustState('ready');
     } catch (error) {
@@ -1112,7 +1190,7 @@ function App() {
   const saveTemplateTrust = async () => {
     setTemplateTrustState('saving');
     try {
-      const response = await axios.post(`${API_URL}/api/integrations/nuclei/trust`, {
+      const response = await axios.post(`${apiUrl}/api/integrations/nuclei/trust`, {
         config: templateTrustFromForm(templateTrustConfig),
       });
       setTemplateTrustConfig(templateTrustToForm(response.data?.config || {}));
@@ -1126,9 +1204,12 @@ function App() {
   };
 
   const installNucleiEngine = async () => {
+    if (!confirmDangerousAction('Install or update the managed Nuclei engine? This downloads and executes external tooling.')) {
+      return;
+    }
     setNucleiAssetState('installing');
     try {
-      const response = await axios.post(`${API_URL}/api/integrations/nuclei/install`, { version: 'latest' });
+      const response = await axios.post(`${apiUrl}/api/integrations/nuclei/install`, { version: 'latest' });
       setNucleiAssetStatus(response.data);
       setNucleiAssetState(response.data?.ok ? 'ready' : 'error');
       addProgress({ type: response.data?.ok ? 'success' : 'error', message: response.data?.ok ? 'Managed Nuclei engine installed.' : (response.data?.error || 'Nuclei install failed.') });
@@ -1142,9 +1223,12 @@ function App() {
   };
 
   const updateNucleiTemplates = async () => {
+    if (!confirmDangerousAction('Update Nuclei templates now? This downloads the latest template set into the managed directory.')) {
+      return;
+    }
     setNucleiAssetState('updating');
     try {
-      const response = await axios.post(`${API_URL}/api/integrations/nuclei/templates/update`, {
+      const response = await axios.post(`${apiUrl}/api/integrations/nuclei/templates/update`, {
         process_timeout: 180,
       });
       setNucleiAssetStatus(response.data);
@@ -1166,7 +1250,7 @@ function App() {
     }
     setCveIntelState('running');
     try {
-      const response = await axios.post(`${API_URL}/api/intel/cve/enrich`, {
+      const response = await axios.post(`${apiUrl}/api/intel/cve/enrich`, {
         scan_id: latestScanId,
       });
       setCveIntelResult(response.data);
@@ -1177,7 +1261,7 @@ function App() {
         message: `CVE intelligence enriched ${response.data?.updated_findings || 0} findings across ${response.data?.cve_count || 0} CVEs.`,
       });
       await loadFindings(latestScanId);
-      await refreshStatus(latestScanId);
+      await refreshStatus(latestScanId, { full: true });
     } catch (error) {
       setCveIntelState('error');
       const payload = error?.response?.data;
@@ -1186,17 +1270,42 @@ function App() {
     }
   };
 
-  const downloadPdf = () => {
-    if (latestScanId) window.open(`${API_URL}/api/download/${latestScanId}`, '_blank');
+  const downloadScanArtifact = async (kind) => {
+    if (!latestScanId) {
+      addProgress({ type: 'error', message: 'No scan selected for download.' });
+      return;
+    }
+    const isJson = kind === 'json';
+    const endpoint = isJson ? `/api/download-json/${latestScanId}` : `/api/download/${latestScanId}`;
+    const filename = artifactFilename(kind, latestScanId, scanStatus?.target || scanPayload.url);
+    try {
+      const response = await axios.get(`${apiUrl}${endpoint}`, { responseType: 'blob' });
+      const blob = response.data;
+      if (!blob || blob.size === 0) {
+        throw new Error(`${isJson ? 'JSON' : 'PDF'} artifact is empty.`);
+      }
+      triggerBrowserDownload(blob, filename);
+      addProgress({
+        scan_id: latestScanId,
+        type: 'success',
+        message: `Downloaded ${filename} (${formatBytes(blob.size)}).`,
+      });
+    } catch (error) {
+      addProgress({
+        scan_id: latestScanId,
+        type: 'error',
+        message: `Download failed: ${apiError(error)}`,
+      });
+    }
   };
 
-  const downloadJson = () => {
-    if (latestScanId) window.open(`${API_URL}/api/download-json/${latestScanId}`, '_blank');
-  };
+  const downloadPdf = () => downloadScanArtifact('pdf');
+
+  const downloadJson = () => downloadScanArtifact('json');
 
   const downloadFindingEvidence = (finding) => {
     const findingId = finding?.finding_id;
-    if (findingId) window.open(`${API_URL}/api/evidence/bundle/${findingId}`, '_blank');
+    if (findingId) window.open(`${apiUrl}/api/evidence/bundle/${findingId}`, '_blank');
   };
 
   useEffect(() => {
@@ -1253,15 +1362,47 @@ function App() {
       case 'mode':
         return <ModeSelect onNavigate={navigate} />;
       case 'automated-setup':
-        return <AutomatedScanSetup form={form} updateForm={updateForm} submitScan={submitScan} launchState={launchState} onNavigate={navigate} />;
+        return (
+          <AutomatedScanSetup
+            form={form}
+            updateForm={updateForm}
+            submitScan={submitScan}
+            launchState={launchState}
+            launchError={launchError}
+            latestScanId={latestScanId}
+            scanStatus={scanStatus}
+            dashboard={dashboard}
+            progressEvents={progressEvents}
+            corpusRequests={corpusRequests}
+            findings={findings}
+            repoForm={repoForm}
+            updateRepoForm={updateRepoForm}
+            submitRepoScan={submitRepoScan}
+            repoState={repoState}
+            nucleiConfig={nucleiConfig}
+            nucleiState={nucleiState}
+            nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
+            nucleiAssetState={nucleiAssetState}
+            nucleiAssetStatus={nucleiAssetStatus}
+            cveIntelState={cveIntelState}
+            cveIntelResult={cveIntelResult || scanStatus?.cve_intel_summary || null}
+            updateNucleiConfig={updateNucleiConfig}
+            runNucleiIntegration={runNucleiIntegration}
+            updateNucleiTemplates={updateNucleiTemplates}
+            enrichCveIntel={enrichCveIntel}
+            onNavigate={navigate}
+          />
+        );
       case 'automated-workspace':
         return (
           <AutomatedWorkspace
             scanStatus={scanStatus}
             latestScanId={latestScanId}
+            scanPayload={scanPayload}
             dashboard={dashboard}
             progressEvents={progressEvents}
             corpusRequests={corpusRequests}
+            findings={findings}
             nucleiConfig={nucleiConfig}
             nucleiState={nucleiState}
             nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
@@ -1281,7 +1422,6 @@ function App() {
             updateNucleiTemplates={updateNucleiTemplates}
             enrichCveIntel={enrichCveIntel}
             refreshStatus={() => refreshStatus(latestScanId)}
-            submitScan={submitScan}
             onNavigate={navigate}
           />
         );
@@ -1291,6 +1431,7 @@ function App() {
             findings={findings}
             findingsState={findingsState}
             latestScanId={latestScanId}
+            corpusRequests={corpusRequests}
             evidenceArtifacts={findingEvidenceArtifacts}
             evidenceState={findingEvidenceState}
             onNavigate={navigate}
@@ -1298,6 +1439,8 @@ function App() {
             onExportEvidence={downloadFindingEvidence}
             onRefresh={() => loadFindings(latestScanId)}
             onLoadEvidence={loadFindingEvidence}
+            loadExchange={loadExchange}
+            sendRequestToRepeater={sendRequestToRepeater}
           />
         );
       case 'evidence':
@@ -1317,7 +1460,19 @@ function App() {
       case 'manual':
         return (
           <ManualTesting
+            latestScanId={latestScanId}
             onNavigate={navigate}
+            manualRequest={manualRequest}
+            updateManualRequest={updateManualRequest}
+            sendManualReplay={sendManualReplay}
+            saveManualRequest={saveManualRequest}
+            manualState={manualState}
+            manualFinding={manualFinding}
+            manualFindingState={manualFindingState}
+            updateManualFinding={updateManualFinding}
+            createManualFinding={createManualFinding}
+            selectedExchange={selectedExchange}
+            activeRepeaterTab={activeRepeaterTab}
             proxyStatus={proxyStatus}
             corpusRequests={corpusRequests}
             proxyCaStatus={proxyCaStatus}
@@ -1403,7 +1558,18 @@ function App() {
           />
         );
       case 'decoder':
-        return <Decoder />;
+        return (
+          <Decoder
+            latestScanId={latestScanId}
+            corpusRequests={corpusRequests}
+            comparerSelection={comparerSelection}
+            comparerState={comparerState}
+            comparerResult={comparerResult}
+            updateComparerSelection={updateComparerSelection}
+            runComparer={runComparer}
+            loadCorpus={loadCorpus}
+          />
+        );
       case 'comparer':
         return (
           <Comparer
@@ -1418,7 +1584,21 @@ function App() {
           />
         );
       case 'repository':
-        return <RepositoryScan repoForm={repoForm} updateRepoForm={updateRepoForm} submitRepoScan={submitRepoScan} repoState={repoState} progressEvents={progressEvents} />;
+        return (
+          <RepositoryScan
+            repoForm={repoForm}
+            updateRepoForm={updateRepoForm}
+            submitRepoScan={submitRepoScan}
+            repoState={repoState}
+            latestScanId={latestScanId}
+            scanStatus={scanStatus}
+            progressEvents={progressEvents}
+            onDownloadPdf={downloadPdf}
+            onDownloadJson={downloadJson}
+            onOpenReports={() => navigate('reports')}
+            onNavigate={navigate}
+          />
+        );
       case 'nuclei':
         return (
           <NucleiCve
@@ -1429,11 +1609,16 @@ function App() {
             nucleiResult={nucleiResult || scanStatus?.nuclei_summary || null}
             nucleiAssetState={nucleiAssetState}
             nucleiAssetStatus={nucleiAssetStatus}
+            templateTrustState={templateTrustState}
+            templateTrustConfig={templateTrustConfig}
             cveIntelState={cveIntelState}
             cveIntelResult={cveIntelResult || scanStatus?.cve_intel_summary || null}
             updateNucleiConfig={updateNucleiConfig}
+            updateTemplateTrustConfig={updateTemplateTrustConfig}
             runNucleiIntegration={runNucleiIntegration}
             loadNucleiStatus={loadNucleiStatus}
+            loadTemplateTrust={loadTemplateTrust}
+            saveTemplateTrust={saveTemplateTrust}
             installNucleiEngine={installNucleiEngine}
             updateNucleiTemplates={updateNucleiTemplates}
             enrichCveIntel={enrichCveIntel}
@@ -1464,9 +1649,9 @@ function App() {
           />
         );
       case 'reports':
-        return <Reports latestScanId={latestScanId} progressEvents={progressEvents} onDownloadPdf={downloadPdf} onDownloadJson={downloadJson} />;
+        return <Reports latestScanId={latestScanId} scanStatus={scanStatus} progressEvents={progressEvents} onDownloadPdf={downloadPdf} onDownloadJson={downloadJson} />;
       case 'settings':
-        return <Settings />;
+        return <Settings apiUrl={apiUrl} />;
       case 'overview':
       default:
         return (
@@ -1855,6 +2040,52 @@ function countImports(imports) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function triggerBrowserDownload(blob, filename) {
+  const href = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = href;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(href);
+}
+
+function formatBytes(bytes) {
+  const size = Number(bytes || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function artifactSlug(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const path = parsed.pathname && parsed.pathname !== '/'
+      ? `_${parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '')}`
+      : '';
+    return `${parsed.hostname}${path}`.replace(/\.git$/i, '');
+  } catch (_error) {
+    return String(value || 'target').replace(/\.git$/i, '');
+  }
+}
+
+function artifactFilename(kind, scanId, target) {
+  const extension = kind === 'json' ? 'json' : 'pdf';
+  const slug = artifactSlug(target)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 80) || 'target';
+  return `wraith_scan_${scanId}_${slug}.${extension}`;
+}
+
+function confirmDangerousAction(message) {
+  if (typeof window === 'undefined') return true;
+  const enabled = window.localStorage.getItem('wraith.confirmDangerousActions') !== 'false';
+  return !enabled || window.confirm(message);
 }
 
 function apiError(error) {

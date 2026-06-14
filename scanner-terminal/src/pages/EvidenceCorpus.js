@@ -17,7 +17,7 @@ export default function EvidenceCorpus({
   sendRequestToIntruder,
 }) {
   return (
-    <div className="page-fill">
+    <div className="page-fill lab-page evidence-page">
       <PageHeader
         eyebrow="Corpus"
         title="Evidence Corpus"

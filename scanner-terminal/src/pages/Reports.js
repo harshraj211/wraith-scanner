@@ -4,16 +4,16 @@ import TerminalPanel from '../components/ui/TerminalPanel';
 import ReportExportPanel from '../components/scanner/ReportExportPanel';
 import ScanTimeline from '../components/scanner/ScanTimeline';
 
-export default function Reports({ latestScanId, progressEvents, onDownloadPdf, onDownloadJson }) {
+export default function Reports({ latestScanId, scanStatus, progressEvents, onDownloadPdf, onDownloadJson }) {
   return (
-    <div className="page-stack">
+    <div className="page-stack lab-page reports-page">
       <PageHeader
         eyebrow="Reports"
         title="Reporting & Logs"
         description="Export client-ready deliverables and inspect execution trails."
       />
       <div className="reports-grid">
-        <ReportExportPanel scanId={latestScanId} onDownloadPdf={onDownloadPdf} onDownloadJson={onDownloadJson} />
+        <ReportExportPanel scanId={latestScanId} scanStatus={scanStatus} onDownloadPdf={onDownloadPdf} onDownloadJson={onDownloadJson} />
         <ScanTimeline events={progressEvents} />
         <TerminalPanel events={progressEvents} />
       </div>

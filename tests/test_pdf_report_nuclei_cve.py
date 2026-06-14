@@ -9,6 +9,8 @@ from scanner.reporting.pdf_generator import (
     _normalize_report_finding,
     generate_pdf_report,
 )
+from scanner.reporting.json_export import write_scan_json
+from scanner.core.models import ScanConfig, findings_from_legacy
 
 
 def canonical_nuclei_finding():
@@ -73,6 +75,48 @@ class PdfReportNucleiCveTests(unittest.TestCase):
 
             self.assertTrue(os.path.exists(output_path))
             self.assertGreater(os.path.getsize(output_path), 1000)
+
+    def test_sast_repository_artifacts_are_non_empty(self):
+        from api_server import _generate_sast_pdf
+
+        findings = [
+            {
+                "type": "hardcoded-secret",
+                "category": "secret",
+                "file": "src/config.js",
+                "line": 12,
+                "source": "sast-scanner",
+                "severity": "High",
+                "confidence": 90,
+                "message": "Hardcoded secret detected.",
+                "code": "const apiKey = 'secret-value';",
+                "remediation": "Move secrets to a managed secret store.",
+            }
+        ]
+        stack = {"primary_language": "javascript", "frameworks": ["react"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = os.path.join(tmpdir, "sast.pdf")
+            json_path = os.path.join(tmpdir, "sast.json")
+            _generate_sast_pdf("https://github.com/example/repo", findings, stack, pdf_path)
+            scan_config = ScanConfig(scan_id="sast-artifact-test", target_base_url="https://github.com/example/repo")
+            canonical_findings = findings_from_legacy(
+                findings,
+                target_url=scan_config.target_base_url,
+                scan_id=scan_config.scan_id,
+                auth_role="source",
+                discovery_method="sast",
+            )
+            write_scan_json(
+                json_path,
+                scan_config=scan_config,
+                findings=canonical_findings,
+                legacy_findings=findings,
+                metadata={"tech_stack": stack},
+            )
+
+            self.assertGreater(os.path.getsize(pdf_path), 1000)
+            self.assertGreater(os.path.getsize(json_path), 500)
 
 
 if __name__ == "__main__":

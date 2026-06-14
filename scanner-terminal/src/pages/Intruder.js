@@ -22,7 +22,7 @@ export default function Intruder({
 }) {
   const running = ['running', 'stopping'].includes(intruderState);
   return (
-    <div className="page-fill">
+    <div className="page-fill lab-page intruder-page">
       <PageHeader
         eyebrow="Manual"
         title="Payload Runner"

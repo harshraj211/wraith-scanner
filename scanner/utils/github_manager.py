@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import subprocess
 import json
+from collections import Counter
 from typing import Optional, Dict
 from urllib.parse import urlparse
 
@@ -30,10 +31,10 @@ class GitHubManager:
 		Token needs 'repo' scope.
 		"""
 		if not token.startswith(('ghp_', 'github_pat_', 'gho_')):
-			print("[!] Token format looks unusual — expected ghp_/github_pat_ prefix")
+			print("[WARN] Token format looks unusual - expected ghp_/github_pat_ prefix")
 
 		self.token = token.strip()
-		print(f"[✓] GitHub token configured ({token[:8]}...)")
+		print(f"[OK] GitHub token configured ({token[:8]}...)")
 		return True
 
 	def clone_repo(self, repo_url: str, branch: str = None) -> Optional[str]:
@@ -73,28 +74,30 @@ class GitHubManager:
 				cmd,
 				capture_output=True,
 				text=True,
+				encoding='utf-8',
+				errors='replace',
 				timeout=120
 			)
 
 			if result.returncode != 0:
 				err = result.stderr.replace(self.token or '', '***') if self.token else result.stderr
-				print(f"[✗] Clone failed: {err[:200]}")
+				print(f"[ERROR] Clone failed: {err[:200]}")
 				self._cleanup_dir(temp_dir)
 				return None
 
-			print(f"[✓] Cloned successfully to {temp_dir}")
+			print(f"[OK] Cloned successfully to {temp_dir}")
 			return temp_dir
 
 		except subprocess.TimeoutExpired:
-			print("[✗] Clone timed out (120s)")
+			print("[ERROR] Clone timed out (120s)")
 			self._cleanup_dir(temp_dir)
 			return None
 		except FileNotFoundError:
-			print("[✗] git not found — install Git and ensure it's in PATH")
+			print("[ERROR] git not found - install Git and ensure it's in PATH")
 			self._cleanup_dir(temp_dir)
 			return None
 		except Exception as exc:
-			print(f"[✗] Clone error: {exc}")
+			print(f"[ERROR] Clone error: {exc}")
 			self._cleanup_dir(temp_dir)
 			return None
 
@@ -174,7 +177,7 @@ class GitHubManager:
 					categories['secrets'].append(filepath)
 
 		total = len(categories['all'])
-		print(f"[✓] File tree: {total} files scanned")
+		print(f"[OK] File tree: {total} files scanned")
 		for lang, files in categories.items():
 			if lang != 'all' and files:
 				print(f"    {lang}: {len(files)} files")
@@ -235,6 +238,10 @@ def detect_tech_stack(repo_path: str) -> Dict[str, object]:
 	"""
 	stack = {
 		'primary_language': 'unknown',
+		'languages': {},
+		'language_counts': {},
+		'total_files': 0,
+		'file_count': 0,
 		'frameworks': [],
 		'has_package_json': False,
 		'has_requirements': False,
@@ -245,9 +252,42 @@ def detect_tech_stack(repo_path: str) -> Dict[str, object]:
 	SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'venv', '.venv',
 				 'dist', 'build', '.next', 'coverage', 'vendor', 'bower_components'}
 	MAX_DEPTH = 3
+	LANGUAGE_EXTENSIONS = {
+		'.js': 'javascript',
+		'.jsx': 'javascript',
+		'.ts': 'typescript',
+		'.tsx': 'typescript',
+		'.py': 'python',
+		'.php': 'php',
+		'.java': 'java',
+		'.kt': 'kotlin',
+		'.kts': 'kotlin',
+		'.go': 'go',
+		'.rb': 'ruby',
+		'.cs': 'csharp',
+		'.c': 'c',
+		'.cc': 'cpp',
+		'.cpp': 'cpp',
+		'.cxx': 'cpp',
+		'.h': 'c_cpp_header',
+		'.hpp': 'c_cpp_header',
+		'.rs': 'rust',
+		'.swift': 'swift',
+		'.dart': 'dart',
+		'.scala': 'scala',
+		'.sh': 'shell',
+		'.ps1': 'powershell',
+		'.html': 'html',
+		'.css': 'css',
+		'.scss': 'css',
+		'.sass': 'css',
+		'.vue': 'vue',
+		'.svelte': 'svelte',
+	}
 
 	# Counters for language heuristic when no manifest found
 	lang_scores: Dict[str, int] = {}
+	language_counts: Counter = Counter()
 
 	for root, dirs, files in os.walk(repo_path):
 		# Enforce max depth
@@ -258,6 +298,19 @@ def detect_tech_stack(repo_path: str) -> Dict[str, object]:
 		dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
 
 		files_lower = {f.lower() for f in files}
+		for filename in files:
+			filepath = os.path.join(root, filename)
+			ext = os.path.splitext(filename)[1].lower()
+			language = LANGUAGE_EXTENSIONS.get(ext)
+			if not language:
+				continue
+			try:
+				if os.path.getsize(filepath) > 5 * 1024 * 1024:
+					continue
+			except OSError:
+				continue
+			language_counts[language] += 1
+			lang_scores[language] = lang_scores.get(language, 0) + 1
 
 		# ── package.json ──────────────────────────────────────────────
 		if 'package.json' in files_lower:
@@ -324,9 +377,22 @@ def detect_tech_stack(repo_path: str) -> Dict[str, object]:
 		if 'gemfile' in files_lower:
 			lang_scores['ruby'] = lang_scores.get('ruby', 0) + 3
 
-	# Pick primary language by highest score
-	if lang_scores:
+	if language_counts:
+		ordered_counts = dict(language_counts.most_common())
+		total_language_files = sum(ordered_counts.values())
+		stack['language_counts'] = ordered_counts
+		stack['total_files'] = total_language_files
+		stack['file_count'] = total_language_files
+		stack['source_file_count'] = total_language_files
+		stack['languages'] = {
+			language: round((count / total_language_files) * 100, 1)
+			for language, count in ordered_counts.items()
+		}
+		stack['primary_language'] = next(iter(ordered_counts))
+	elif lang_scores:
 		stack['primary_language'] = max(lang_scores, key=lang_scores.get)
+		if stack['primary_language'] != 'unknown':
+			stack['languages'] = {stack['primary_language']: 100.0}
 
 	return stack
 

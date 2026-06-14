@@ -126,6 +126,43 @@ class StorageRepository:
             ).fetchone()
         return _loads(row["raw_json"], {}) if row else None
 
+    def save_scan_state(self, scan_id: str, state: Dict[str, Any]) -> None:
+        data = redact(dict(state or {}))
+        updated_at = str(data.get("completed_at") or data.get("updated_at") or utc_now())
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO scan_states (
+                    scan_id, status, target, mode, updated_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    str(data.get("status") or "unknown"),
+                    str(data.get("target") or data.get("target_base_url") or ""),
+                    str(data.get("mode") or data.get("scan_type") or ""),
+                    updated_at,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
+
+    def get_scan_state(self, scan_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM scan_states WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+        return _loads(row["raw_json"], {}) if row else None
+
+    def list_scan_states(self, limit: int = 100) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT scan_id, raw_json FROM scan_states ORDER BY updated_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return {row["scan_id"]: _loads(row["raw_json"], {}) for row in rows}
+
     def save_request(self, request_record: RequestRecord) -> str:
         data = request_record.to_dict()
         parsed = urlparse(request_record.url)
@@ -194,45 +231,46 @@ class StorageRepository:
 
     def save_finding(self, finding: Finding) -> str:
         data = finding.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO findings (
-                finding_id, scan_id, title, vuln_type, severity, confidence,
-                target_url, normalized_endpoint, method, parameter_name,
-                parameter_location, auth_role, discovery_method,
-                discovery_evidence, proof_status, cwe, owasp_category,
-                cvss_score, cvss_vector, remediation, references_json,
-                created_at, updated_at, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                finding.finding_id,
-                finding.scan_id,
-                finding.title,
-                finding.vuln_type,
-                finding.severity,
-                finding.confidence,
-                finding.target_url,
-                finding.normalized_endpoint,
-                finding.method,
-                finding.parameter_name,
-                finding.parameter_location,
-                finding.auth_role,
-                finding.discovery_method,
-                finding.discovery_evidence,
-                finding.proof_status,
-                finding.cwe,
-                finding.owasp_category,
-                finding.cvss_score,
-                finding.cvss_vector,
-                finding.remediation,
-                _json(finding.references),
-                finding.created_at,
-                finding.updated_at,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO findings (
+                    finding_id, scan_id, title, vuln_type, severity, confidence,
+                    target_url, normalized_endpoint, method, parameter_name,
+                    parameter_location, auth_role, discovery_method,
+                    discovery_evidence, proof_status, cwe, owasp_category,
+                    cvss_score, cvss_vector, remediation, references_json,
+                    created_at, updated_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finding.finding_id,
+                    finding.scan_id,
+                    finding.title,
+                    finding.vuln_type,
+                    finding.severity,
+                    finding.confidence,
+                    finding.target_url,
+                    finding.normalized_endpoint,
+                    finding.method,
+                    finding.parameter_name,
+                    finding.parameter_location,
+                    finding.auth_role,
+                    finding.discovery_method,
+                    finding.discovery_evidence,
+                    finding.proof_status,
+                    finding.cwe,
+                    finding.owasp_category,
+                    finding.cvss_score,
+                    finding.cvss_vector,
+                    finding.remediation,
+                    _json(finding.references),
+                    finding.created_at,
+                    finding.updated_at,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return finding.finding_id
 
     def update_finding(self, finding: Finding) -> str:
@@ -241,83 +279,86 @@ class StorageRepository:
 
     def save_evidence_artifact(self, artifact: EvidenceArtifact) -> str:
         data = artifact.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO evidence_artifacts (
-                artifact_id, finding_id, task_id, artifact_type, path,
-                inline_excerpt, redactions_applied_json, created_at, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                artifact.artifact_id,
-                artifact.finding_id,
-                artifact.task_id,
-                artifact.artifact_type,
-                artifact.path,
-                artifact.inline_excerpt,
-                _json(artifact.redactions_applied),
-                artifact.created_at,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO evidence_artifacts (
+                    artifact_id, finding_id, task_id, artifact_type, path,
+                    inline_excerpt, redactions_applied_json, created_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact.artifact_id,
+                    artifact.finding_id,
+                    artifact.task_id,
+                    artifact.artifact_type,
+                    artifact.path,
+                    artifact.inline_excerpt,
+                    _json(artifact.redactions_applied),
+                    artifact.created_at,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return artifact.artifact_id
 
     def save_auth_profile(self, profile: AuthProfile) -> str:
         data = profile.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO auth_profiles (
-                profile_id, name, base_url, role, auth_type, storage_state_path,
-                headers_json, cookies_json, session_health_check_json,
-                refresh_strategy_json, redaction_rules_json, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                profile.profile_id,
-                profile.name,
-                profile.base_url,
-                profile.role,
-                profile.auth_type,
-                profile.storage_state_path,
-                _json(redact_headers(profile.headers)),
-                _json(redact(profile.cookies)),
-                _json(profile.session_health_check),
-                _json(redact(profile.refresh_strategy)),
-                _json(profile.redaction_rules),
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO auth_profiles (
+                    profile_id, name, base_url, role, auth_type, storage_state_path,
+                    headers_json, cookies_json, session_health_check_json,
+                    refresh_strategy_json, redaction_rules_json, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile.profile_id,
+                    profile.name,
+                    profile.base_url,
+                    profile.role,
+                    profile.auth_type,
+                    profile.storage_state_path,
+                    _json(redact_headers(profile.headers)),
+                    _json(redact(profile.cookies)),
+                    _json(profile.session_health_check),
+                    _json(redact(profile.refresh_strategy)),
+                    _json(profile.redaction_rules),
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return profile.profile_id
 
     def save_proof_task(self, task: ProofTask) -> str:
         data = task.to_dict()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO proof_tasks (
-                task_id, finding_id, safety_mode, allowed_techniques_json,
-                max_attempts, requires_human_approval, approved_by, approved_at,
-                status, result, created_at, updated_at, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task.task_id,
-                task.finding_id,
-                task.safety_mode,
-                _json(task.allowed_techniques),
-                task.max_attempts,
-                1 if task.requires_human_approval else 0,
-                task.approved_by,
-                task.approved_at,
-                task.status,
-                task.result,
-                task.created_at,
-                task.updated_at,
-                _json(data),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO proof_tasks (
+                    task_id, finding_id, safety_mode, allowed_techniques_json,
+                    max_attempts, requires_human_approval, approved_by, approved_at,
+                    status, result, created_at, updated_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.task_id,
+                    task.finding_id,
+                    task.safety_mode,
+                    _json(task.allowed_techniques),
+                    task.max_attempts,
+                    1 if task.requires_human_approval else 0,
+                    task.approved_by,
+                    task.approved_at,
+                    task.status,
+                    task.result,
+                    task.created_at,
+                    task.updated_at,
+                    _json(data),
+                ),
+            )
+            self.conn.commit()
         return task.task_id
 
     def get_proof_task(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -362,28 +403,29 @@ class StorageRepository:
     def save_oob_event(self, event: Dict[str, Any]) -> str:
         event = redact(event or {})
         event_id = str(event.get("event_id") or "oob_" + uuid.uuid4().hex[:16])
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO oob_events (
-                event_id, scan_id, finding_id, task_id, protocol, callback_host,
-                remote_address, url, parameter_name, evidence_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_id,
-                str(event.get("scan_id") or ""),
-                str(event.get("finding_id") or ""),
-                str(event.get("task_id") or ""),
-                str(event.get("protocol") or ""),
-                str(event.get("callback_host") or event.get("host") or ""),
-                str(event.get("remote_address") or event.get("remote") or ""),
-                str(event.get("url") or ""),
-                str(event.get("parameter_name") or event.get("param") or ""),
-                _json(event),
-                str(event.get("created_at") or utc_now()),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO oob_events (
+                    event_id, scan_id, finding_id, task_id, protocol, callback_host,
+                    remote_address, url, parameter_name, evidence_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    str(event.get("scan_id") or ""),
+                    str(event.get("finding_id") or ""),
+                    str(event.get("task_id") or ""),
+                    str(event.get("protocol") or ""),
+                    str(event.get("callback_host") or event.get("host") or ""),
+                    str(event.get("remote_address") or event.get("remote") or ""),
+                    str(event.get("url") or ""),
+                    str(event.get("parameter_name") or event.get("param") or ""),
+                    _json(event),
+                    str(event.get("created_at") or utc_now()),
+                ),
+            )
+            self.conn.commit()
         return event_id
 
     def list_requests(self, scan_id: str, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -427,29 +469,32 @@ class StorageRepository:
             where.append("(r.url LIKE ? OR r.body LIKE ?)")
             params.extend([needle, needle])
 
+        where_sql = " AND ".join(where)
+        query = (
+            """
+            SELECT
+                r.raw_json,
+                rsp.status_code,
+                rsp.content_type,
+                rsp.content_length,
+                rsp.response_time_ms,
+                rsp.timestamp AS response_timestamp
+            FROM requests r
+            LEFT JOIN responses rsp ON rsp.response_id = (
+                SELECT response_id
+                FROM responses latest_rsp
+                WHERE latest_rsp.request_id = r.request_id
+                ORDER BY latest_rsp.timestamp DESC
+                LIMIT 1
+            )
+            WHERE """
+            + where_sql
+            + """
+            ORDER BY r.timestamp ASC
+            """
+        )
         with self._lock:
-            rows = self.conn.execute(
-                f"""
-                SELECT
-                    r.raw_json,
-                    rsp.status_code,
-                    rsp.content_type,
-                    rsp.content_length,
-                    rsp.response_time_ms,
-                    rsp.timestamp AS response_timestamp
-                FROM requests r
-                LEFT JOIN responses rsp ON rsp.response_id = (
-                    SELECT response_id
-                    FROM responses latest_rsp
-                    WHERE latest_rsp.request_id = r.request_id
-                    ORDER BY latest_rsp.timestamp DESC
-                    LIMIT 1
-                )
-                WHERE {' AND '.join(where)}
-                ORDER BY r.timestamp ASC
-                """,
-                params,
-            ).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         enriched = []
         for row in rows:
             item = _loads(row["raw_json"], {})
@@ -492,11 +537,13 @@ class StorageRepository:
         if filters.get("auth_role"):
             where.append("auth_role = ?")
             params.append(str(filters["auth_role"]))
+        query = (
+            "SELECT raw_json FROM findings WHERE "
+            + " AND ".join(where)
+            + " ORDER BY severity, title"
+        )
         with self._lock:
-            rows = self.conn.execute(
-                f"SELECT raw_json FROM findings WHERE {' AND '.join(where)} ORDER BY severity, title",
-                params,
-            ).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         return [_loads(row["raw_json"], {}) for row in rows]
 
     def get_finding(self, finding_id: str) -> Optional[Dict[str, Any]]:
@@ -532,6 +579,18 @@ def create_scan(scan_config: ScanConfig) -> None:
 
 def get_scan(scan_id: str) -> Optional[Dict[str, Any]]:
     return get_repository().get_scan(scan_id)
+
+
+def save_scan_state(scan_id: str, state: Dict[str, Any]) -> None:
+    get_repository().save_scan_state(scan_id, state)
+
+
+def get_scan_state(scan_id: str) -> Optional[Dict[str, Any]]:
+    return get_repository().get_scan_state(scan_id)
+
+
+def list_scan_states(limit: int = 100) -> Dict[str, Dict[str, Any]]:
+    return get_repository().list_scan_states(limit)
 
 
 def save_request(request_record: RequestRecord) -> str:

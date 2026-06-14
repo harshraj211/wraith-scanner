@@ -6,7 +6,7 @@ It does not change Wraith into a closed-source product by itself. Python and
 JavaScript desktop bundles can be reverse engineered, so sensitive secrets and
 private offensive logic must stay server-side or behind licensed update channels
 in a future commercial architecture.
-
+ 
 ## Current Model
 
 - `desktop/wraith_desktop.py` starts the Flask API with `api_server.py`.

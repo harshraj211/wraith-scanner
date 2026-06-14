@@ -165,6 +165,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             raw_json TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS scan_states (
+            scan_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            target TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            raw_json TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_requests_scan ON requests(scan_id);
         CREATE INDEX IF NOT EXISTS idx_requests_method ON requests(method);
         CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
@@ -180,6 +189,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_evidence_finding ON evidence_artifacts(finding_id);
         CREATE INDEX IF NOT EXISTS idx_oob_scan ON oob_events(scan_id);
         CREATE INDEX IF NOT EXISTS idx_proof_tasks_finding ON proof_tasks(finding_id);
+        CREATE INDEX IF NOT EXISTS idx_scan_states_status ON scan_states(status);
+        CREATE INDEX IF NOT EXISTS idx_scan_states_updated_at ON scan_states(updated_at);
         """
     )
     conn.commit()

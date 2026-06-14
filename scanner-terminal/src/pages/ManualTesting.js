@@ -3,9 +3,23 @@ import PageHeader from '../components/layout/PageHeader';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
 import MetricCard from '../components/ui/MetricCard';
+import RequestResponseViewer from '../components/scanner/RequestResponseViewer';
+import { ManualRequestFields } from './Repeater';
 
 export default function ManualTesting({
+  latestScanId,
   onNavigate,
+  manualRequest,
+  updateManualRequest,
+  sendManualReplay,
+  saveManualRequest,
+  manualState,
+  manualFinding,
+  manualFindingState,
+  updateManualFinding,
+  createManualFinding,
+  selectedExchange,
+  activeRepeaterTab,
   proxyStatus,
   corpusRequests,
   proxyCaStatus,
@@ -22,11 +36,13 @@ export default function ManualTesting({
   const [leafHost, setLeafHost] = React.useState('');
   const [leafStatus, setLeafStatus] = React.useState(null);
   const [leafState, setLeafState] = React.useState('idle');
+  const latestAttempt = activeRepeaterTab?.attempts?.find((attempt) => attempt.attemptId === activeRepeaterTab?.activeAttemptId)
+    || activeRepeaterTab?.attempts?.[0]
+    || null;
+  const replayExchange = latestAttempt?.exchange || selectedExchange;
 
   const handleGenerateLeaf = async () => {
-    if (!leafHost.trim() || !generateProxyLeafCertificate) {
-      return;
-    }
+    if (!leafHost.trim() || !generateProxyLeafCertificate) return;
     setLeafState('generating');
     try {
       const status = await generateProxyLeafCertificate(leafHost.trim());
@@ -39,141 +55,162 @@ export default function ManualTesting({
   };
 
   return (
-    <div className="page-stack">
+    <div className="page-fill lab-page manual-page manual-workbench-page">
       <PageHeader
-        eyebrow="Manual"
-        title="Manual Testing"
-        description="Proxy capture, Repeater, Intruder, Decoder, Comparer, and report evidence workflows."
+        eyebrow="Manual Testing"
+        title="Workbench"
+        description="Manual request composer, proxy capture, repeater, intruder, decoder, comparer, and evidence workflows."
         actions={(
           <>
             <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
-              {browserState === 'opening' ? 'Opening...' : 'Open Wraith Browser'}
+              {browserState === 'opening' ? 'Opening...' : 'Open Browser'}
             </Button>
-            <Button onClick={() => onNavigate('proxy')}>Open Proxy</Button>
+            <Button variant="secondary" onClick={() => onNavigate('proxy')}>Proxy History</Button>
+            <Button onClick={sendManualReplay} disabled={manualState === 'sending'}>
+              {manualState === 'sending' ? 'Sending' : 'Send'}
+            </Button>
           </>
         )}
       />
-      <div className="metric-grid">
+
+      <div className="metric-grid five manual-command-strip">
         <MetricCard label="Proxy" value={proxyStatus?.running ? 'Running' : 'Stopped'} tone={proxyStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Browser" value={browserStatus?.running ? 'Open' : 'Closed'} tone={browserStatus?.running ? 'emerald' : 'slate'} />
         <MetricCard label="Captured" value={corpusRequests.length} tone="cyan" />
         <MetricCard label="Local CA" value={proxyCaStatus?.generated ? 'Ready' : 'Missing'} tone={proxyCaStatus?.generated ? 'emerald' : 'amber'} />
-        <MetricCard label="Tools" value="5" detail="proxy/repeater/intruder/decoder/comparer" tone="blue" />
+        <MetricCard label="Scan" value={latestScanId || 'None'} detail="active context" tone={latestScanId ? 'blue' : 'slate'} />
       </div>
-      <Card title="Controlled Wraith Browser" eyebrow="Capture">
-        <p>
-          Launch a dedicated headed browser profile through the local Wraith HTTP proxy.
-          This captures browser traffic into the request corpus while keeping HTTPS MITM
-          behind a later explicit certificate setup step.
-        </p>
-        <div className="button-row">
-          <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
-            {browserState === 'opening' ? 'Opening...' : 'Open Through Proxy'}
-          </Button>
-          <Button variant="ghost" onClick={closeWraithBrowser} disabled={!browserStatus?.running || browserState === 'closing'}>
-            {browserState === 'closing' ? 'Closing...' : 'Close Browser'}
-          </Button>
-          <Button variant="ghost" onClick={() => onNavigate('proxy')}>Proxy History</Button>
-        </div>
-        <div className="nuclei-asset-card">
-          <div>
-            <span>Proxy</span>
-            <code>{proxyStatus?.running ? `${proxyStatus.host}:${proxyStatus.port}` : 'not listening'}</code>
-          </div>
-          <div>
-            <span>Profile</span>
-            <code>{browserStatus?.profile_dir || 'created on launch'}</code>
-          </div>
-          {browserStatus?.error && (
-            <div>
-              <span>Error</span>
-              <code>{browserStatus.error}</code>
-            </div>
+
+      <div className="manual-workbench-grid">
+        <Card
+          title="Request"
+          eyebrow="Manual composer"
+          actions={(
+            <>
+              <Button variant="secondary" onClick={saveManualRequest} disabled={manualState === 'saving'}>
+                {manualState === 'saving' ? 'Saving' : 'Save'}
+              </Button>
+              <Button onClick={sendManualReplay} disabled={manualState === 'sending'}>
+                {manualState === 'sending' ? 'Sending' : 'Send'}
+              </Button>
+            </>
           )}
-          {browserStatus?.warning && (
-            <div>
-              <span>Warning</span>
-              <code>{browserStatus.warning}</code>
-            </div>
+        >
+          <ManualRequestFields request={manualRequest} updateRequest={updateManualRequest} compact />
+        </Card>
+
+        <Card
+          title="Response"
+          eyebrow={latestAttempt ? `${latestAttempt.status} / ${latestAttempt.timeMs || 0}ms` : 'Inspector'}
+          actions={(
+            <>
+              <Button variant="ghost" onClick={() => onNavigate('repeater')}>Repeater</Button>
+              <Button variant="ghost" onClick={() => onNavigate('intruder')}>Intruder</Button>
+            </>
           )}
-        </div>
-      </Card>
-      <Card title="HTTPS Interception Prep" eyebrow="Local CA">
-        <p>
-          Prepare the certificate trust layer for a future scoped HTTPS MITM engine.
-          The current proxy still refuses CONNECT interception until that guarded engine is implemented.
-        </p>
-        <div className="button-row">
-          <Button variant="secondary" onClick={refreshProxyCaStatus} disabled={proxyCaState === 'loading'}>{proxyCaState === 'loading' ? 'Checking' : 'Check CA'}</Button>
-          <Button onClick={generateProxyCa} disabled={proxyCaState === 'generating'}>{proxyCaState === 'generating' ? 'Generating' : 'Generate CA'}</Button>
-          <Button variant="ghost" onClick={downloadProxyCa} disabled={!proxyCaStatus?.generated}>Download CA</Button>
-        </div>
-        <div className="nuclei-asset-card">
-          <div>
-            <span>Status</span>
-            <code>{proxyCaStatus?.generated ? 'generated' : proxyCaStatus?.warning || 'not generated'}</code>
+        >
+          <RequestResponseViewer exchange={replayExchange} />
+        </Card>
+
+        <Card title="Manual Finding" eyebrow="Evidence">
+          <div className="manual-finding-form terminal-finding-form">
+            <div className="workflow-mini-grid">
+              <label className="field">
+                <span>Name</span>
+                <input placeholder="Hardcoded Credential" value={manualFinding?.title || ''} onChange={(event) => updateManualFinding?.('title', event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Severity</span>
+                <select value={manualFinding?.severity || 'medium'} onChange={(event) => updateManualFinding?.('severity', event.target.value)}>
+                  <option>critical</option>
+                  <option>high</option>
+                  <option>medium</option>
+                  <option>low</option>
+                  <option>info</option>
+                </select>
+              </label>
+            </div>
+            <div className="workflow-mini-grid">
+              <label className="field">
+                <span>Endpoint</span>
+                <input placeholder="/api/v1/auth/login" value={manualFinding?.vulnType || ''} onChange={(event) => updateManualFinding?.('vulnType', event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Parameter</span>
+                <input placeholder="password" value={manualFinding?.parameterName || ''} onChange={(event) => updateManualFinding?.('parameterName', event.target.value)} />
+              </label>
+            </div>
+            <label className="field">
+              <span>Evidence</span>
+              <textarea rows={3} placeholder="Hardcoded password accepted." value={manualFinding?.evidence || ''} onChange={(event) => updateManualFinding?.('evidence', event.target.value)} />
+            </label>
+            <label className="field">
+              <span>Remediation</span>
+              <textarea rows={2} placeholder="Rotate credentials and remove static secrets." value={manualFinding?.remediation || ''} onChange={(event) => updateManualFinding?.('remediation', event.target.value)} />
+            </label>
+            <Button onClick={createManualFinding} disabled={!latestScanId || !manualFinding?.title || manualFindingState === 'saving'}>
+              {manualFindingState === 'saving' ? 'Saving Finding' : 'Save Finding'}
+            </Button>
           </div>
-          <div>
-            <span>HTTPS MITM</span>
-            <code>{proxyCaStatus?.https_interception_enabled ? 'enabled' : 'disabled'}</code>
-          </div>
-          <div>
-            <span>CONNECT guard</span>
-            <code>{proxyStatus?.https_connect_blocked_count || 0} blocked / scope checked</code>
-          </div>
-          <div>
-            <span>Fingerprint</span>
-            <code>{proxyCaStatus?.fingerprint_sha256 || '-'}</code>
-          </div>
-          <div>
-            <span>Valid until</span>
-            <code>{proxyCaStatus?.valid_until || '-'}</code>
-          </div>
-        </div>
-        <div className="form-grid compact">
-          <label className="field wide">
-            <span>Generate scoped host leaf</span>
-            <input
-              value={leafHost}
-              onChange={(event) => setLeafHost(event.target.value)}
-              placeholder="api.example.test or https://api.example.test:443"
-            />
-          </label>
-        </div>
-        <div className="button-row">
-          <Button
-            variant="secondary"
-            onClick={handleGenerateLeaf}
-            disabled={!proxyCaStatus?.generated || !leafHost.trim() || leafState === 'generating'}
-          >
-            {leafState === 'generating' ? 'Generating Host Cert' : 'Generate Host Cert'}
-          </Button>
-        </div>
-        {leafStatus && (
-          <div className="nuclei-asset-card">
+        </Card>
+
+        <Card title="Capture Controls" eyebrow="Proxy and CA">
+          <div className="capture-control-grid">
             <div>
-              <span>Host certificate</span>
-              <code>{leafStatus.generated ? leafStatus.hostname : leafStatus.warning || 'not generated'}</code>
+              <span>Proxy</span>
+              <code>{proxyStatus?.running ? `${proxyStatus.host}:${proxyStatus.port}` : 'not listening'}</code>
             </div>
             <div>
-              <span>Fingerprint</span>
-              <code>{leafStatus.fingerprint_sha256 || '-'}</code>
+              <span>Browser</span>
+              <code>{browserStatus?.running ? 'profile active' : 'created on launch'}</code>
+            </div>
+            <div>
+              <span>CA</span>
+              <code>{proxyCaStatus?.generated ? 'generated' : proxyCaStatus?.warning || 'not generated'}</code>
+            </div>
+            <div>
+              <span>CONNECT Guard</span>
+              <code>{proxyStatus?.https_connect_blocked_count || 0} blocked</code>
             </div>
           </div>
-        )}
-      </Card>
-      <div className="tool-grid">
+          <div className="button-row">
+            <Button variant="secondary" onClick={openWraithBrowser} disabled={browserState === 'opening'}>
+              {browserState === 'opening' ? 'Opening' : 'Open Through Proxy'}
+            </Button>
+            <Button variant="ghost" onClick={closeWraithBrowser} disabled={!browserStatus?.running || browserState === 'closing'}>
+              {browserState === 'closing' ? 'Closing' : 'Close Browser'}
+            </Button>
+          </div>
+          <div className="button-row">
+            <Button variant="secondary" onClick={refreshProxyCaStatus} disabled={proxyCaState === 'loading'}>{proxyCaState === 'loading' ? 'Checking' : 'Check CA'}</Button>
+            <Button variant="secondary" onClick={generateProxyCa} disabled={proxyCaState === 'generating'}>{proxyCaState === 'generating' ? 'Generating' : 'Generate CA'}</Button>
+            <Button variant="ghost" onClick={downloadProxyCa} disabled={!proxyCaStatus?.generated}>Download CA</Button>
+          </div>
+          <div className="leaf-cert-row">
+            <input value={leafHost} onChange={(event) => setLeafHost(event.target.value)} placeholder="authorized-api-host.test" />
+            <Button variant="secondary" onClick={handleGenerateLeaf} disabled={!proxyCaStatus?.generated || !leafHost.trim() || leafState === 'generating'}>
+              {leafState === 'generating' ? 'Generating' : 'Host Cert'}
+            </Button>
+          </div>
+          {leafStatus && (
+            <code className="leaf-status">{leafStatus.generated ? leafStatus.hostname : leafStatus.warning || 'not generated'}</code>
+          )}
+        </Card>
+      </div>
+
+      <div className="manual-tool-rail">
         {[
-          ['proxy', 'HTTP Proxy', 'Capture, pause, forward, drop, and edit requests.'],
-          ['repeater', 'Repeater', 'Edit and replay individual requests with response diffs.'],
-          ['intruder', 'Intruder', 'Run capped payload lists with clustering and safe-mode controls.'],
-          ['decoder', 'Decoder', 'Chain URL/Base64/JWT/JSON transformations.'],
-          ['comparer', 'Comparer', 'Compare response headers, JSON values, body hashes, size, and timing.'],
-        ].map(([id, title, body]) => (
-          <Card title={title} eyebrow="Manual Tool" key={id}>
-            <p>{body}</p>
-            <Button variant="secondary" onClick={() => onNavigate(id)}>{title}</Button>
-          </Card>
+          ['proxy', 'account_tree', 'Proxy History', 'Inspect intercepted traffic'],
+          ['repeater', 'repeat', 'Repeater', 'Replay and diff responses'],
+          ['intruder', 'target', 'Intruder', 'Cluster payload results'],
+          ['decoder', 'data_object', 'Decoder', 'Transform encoded data'],
+          ['comparer', 'difference', 'Comparer', 'Compare response deltas'],
+        ].map(([id, icon, title, detail]) => (
+          <button type="button" key={id} onClick={() => onNavigate(id)}>
+            <span className="material-symbols-outlined">{icon}</span>
+            <strong>{title}</strong>
+            <em>{detail}</em>
+          </button>
         ))}
       </div>
     </div>

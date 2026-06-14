@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import datetime
 import html as html_mod
 import math
+from pathlib import Path
 from urllib.parse import urlparse
 from functools import partial
 from collections import defaultdict
@@ -12,7 +13,7 @@ from collections import defaultdict
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Preformatted,
+    PageBreak, Preformatted, Image as RLImage,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
@@ -277,7 +278,28 @@ SEVERITY_COLORS = {
     "informational": colors.HexColor("#6CB4EE"),
 }
 
-SCANNER_VERSION = "vuln-scanner/1.0"
+SCANNER_VERSION = "WRAITH Vulnerability Scanner"
+
+
+def _logo_path() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root / "scanner-terminal" / "src" / "assets" / "wraith-signal-phantom-mark.png",
+        repo_root / "scanner-terminal" / "public" / "logo192.png",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def _brand_logo(width: float = 0.62 * inch):
+    path = _logo_path()
+    if not path:
+        return None
+    logo = RLImage(path, width=width, height=width)
+    logo.hAlign = "LEFT"
+    return logo
 
 
 def _is_sast_finding(f: Dict[str, Any]) -> bool:
@@ -309,7 +331,7 @@ def _page_footer(canvas, doc, target_url):
     if page_num > 1:
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.grey)
-        canvas.drawString(inch, h - 0.5 * inch, f"Vulnerability Report: {target_url}")
+        canvas.drawString(inch, h - 0.5 * inch, f"WRAITH Security Report: {target_url}")
     canvas.restoreState()
 
 
@@ -527,7 +549,7 @@ def _get_http_evidence_block(finding: Dict[str, Any]) -> str:
         request_block = (
             f"GET {url} HTTP/1.1\n"
             f"Host: {urlparse(url).netloc}\n"
-            f"User-Agent: vuln-scanner/1.0\n"
+            f"User-Agent: WRAITH/1.0\n"
             f"Accept: */*\n"
         )
         evidence = finding.get('evidence', '')
@@ -547,7 +569,7 @@ def _get_http_evidence_block(finding: Dict[str, Any]) -> str:
     request_block = (
         f"GET {url}?{param}={payload} HTTP/1.1\n"
         f"Host: {urlparse(url).netloc}\n"
-        f"User-Agent: vuln-scanner/1.0\n"
+        f"User-Agent: WRAITH/1.0\n"
         f"Accept: */*\n\n"
     )
     evidence         = finding.get('evidence', '')
@@ -703,7 +725,38 @@ def generate_pdf_report(
     story: List[Any] = []
 
     # ── Page 1: Executive Summary ──────────────────────────────────────────
-    story.append(Paragraph("Vulnerability Assessment Report", heading))
+    brand_title = ParagraphStyle(
+        "WraithBrandTitle",
+        parent=styles["Heading1"],
+        fontSize=22,
+        leading=24,
+        textColor=colors.HexColor("#0F172A"),
+        spaceAfter=0,
+    )
+    brand_subtitle = ParagraphStyle(
+        "WraithBrandSubtitle",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#0E7490"),
+    )
+    logo = _brand_logo()
+    brand_copy = [
+        Paragraph("WRAITH", brand_title),
+        Paragraph("VULNERABILITY SCANNER", brand_subtitle),
+    ]
+    if logo:
+        brand_table = Table([[logo, brand_copy]], colWidths=[0.78 * inch, 5.2 * inch], hAlign="LEFT")
+        brand_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(brand_table)
+    else:
+        story.extend(brand_copy)
+    story.append(Paragraph("WRAITH Security Assessment Report", heading))
     story.append(Spacer(1, 12))
 
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
