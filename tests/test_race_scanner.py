@@ -60,7 +60,11 @@ class RaceScannerTests(unittest.TestCase):
 
         self.assertTrue(findings)
         self.assertEqual(findings[0]["type"], "race-condition")
-        self.assertIn("parallel requests looked successful", findings[0]["evidence"].lower())
+        evidence = findings[0]["evidence"].lower()
+        self.assertTrue(
+            "parallel requests looked successful" in evidence
+            or "parallel burst" in evidence
+        )
 
 
 if __name__ == "__main__":

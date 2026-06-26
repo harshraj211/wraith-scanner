@@ -1,5 +1,6 @@
 import aiohttp
 import copy
+from typing import Any, Dict, List
 
 class MassAssignmentScanner:
     """Detects Mass Assignment vulnerabilities by injecting privileged fields."""

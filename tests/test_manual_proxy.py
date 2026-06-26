@@ -47,6 +47,43 @@ def proxied_session() -> requests.Session:
     return session
 
 
+def get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def create_scan(repo: StorageRepository, scan_id: str, target_url: str):
+    import json
+    with repo._lock:
+        repo.conn.execute(
+            """
+            INSERT OR REPLACE INTO scans (
+                scan_id, target_base_url, scope_json, excluded_hosts_json,
+                safety_mode, max_depth, max_requests, rate_limit,
+                auth_profiles_json, enabled_modules_json, output_dir,
+                created_at, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scan_id,
+                target_url,
+                "[]",
+                "[]",
+                "safe",
+                3,
+                0,
+                0.0,
+                "[]",
+                "[]",
+                "reports",
+                "2026-06-26T00:00:00Z",
+                json.dumps({"scan_id": scan_id, "target_base_url": target_url}),
+            ),
+        )
+        repo.conn.commit()
+
+
 def send_connect(proxy_status, target: str) -> str:
     with socket.create_connection((proxy_status["host"], proxy_status["port"]), timeout=5) as sock:
         payload = (
@@ -70,12 +107,14 @@ class ManualProxyTests(unittest.TestCase):
     def test_http_proxy_captures_and_persists_exchange(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-scan", base_url)
             proxy = WraithProxyController()
             try:
                 status = proxy.start(
                     repo,
                     ProxyConfig(
                         scan_id="proxy-scan",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[base_url],
                         auth_role="user_a",
@@ -103,12 +142,14 @@ class ManualProxyTests(unittest.TestCase):
     def test_proxy_blocks_out_of_scope_urls(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-scope", base_url)
             proxy = WraithProxyController()
             try:
                 status = proxy.start(
                     repo,
                     ProxyConfig(
                         scan_id="proxy-scope",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[f"{base_url}/allowed"],
                     ),
@@ -129,12 +170,14 @@ class ManualProxyTests(unittest.TestCase):
     def test_https_connect_is_scope_checked_before_mitm_rejection(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-connect", base_url)
             proxy = WraithProxyController()
             try:
                 status = proxy.start(
                     repo,
                     ProxyConfig(
                         scan_id="proxy-connect",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[base_url],
                     ),
@@ -152,12 +195,14 @@ class ManualProxyTests(unittest.TestCase):
     def test_https_connect_blocks_out_of_scope_hosts(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-connect-scope", base_url)
             proxy = WraithProxyController()
             try:
                 status = proxy.start(
                     repo,
                     ProxyConfig(
                         scan_id="proxy-connect-scope",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[base_url],
                     ),
@@ -174,6 +219,7 @@ class ManualProxyTests(unittest.TestCase):
     def test_intercept_can_hold_and_forward_pending_request(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-intercept", base_url)
             proxy = WraithProxyController()
             executor = ThreadPoolExecutor(max_workers=1)
             try:
@@ -181,6 +227,7 @@ class ManualProxyTests(unittest.TestCase):
                     repo,
                     ProxyConfig(
                         scan_id="proxy-intercept",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[base_url],
                         intercept_enabled=True,
@@ -216,6 +263,7 @@ class ManualProxyTests(unittest.TestCase):
     def test_intercept_can_modify_request_before_forward(self):
         with tempfile.TemporaryDirectory() as tmpdir, run_app(build_target_app()) as base_url:
             repo = StorageRepository(str(Path(tmpdir) / "wraith.sqlite3"))
+            create_scan(repo, "proxy-edit", base_url)
             proxy = WraithProxyController()
             executor = ThreadPoolExecutor(max_workers=1)
             try:
@@ -223,6 +271,7 @@ class ManualProxyTests(unittest.TestCase):
                     repo,
                     ProxyConfig(
                         scan_id="proxy-edit",
+                        port=get_free_port(),
                         target_base_url=base_url,
                         scope=[base_url],
                         intercept_enabled=True,

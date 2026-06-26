@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install semgrep
 RUN pip install psycopg2-binary celery redis gunicorn
 RUN playwright install chromium
 

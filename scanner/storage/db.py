@@ -25,6 +25,16 @@ def init_db(path: Optional[str] = None) -> Any:
             port=url.port
         )
         print("[storage] Connected to PostgreSQL.")
+        try:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open'")
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[storage] Postgres migration status column: {e}")
         return conn
     else:
         db_path = path or DEFAULT_DB_PATH
@@ -36,6 +46,11 @@ def init_db(path: Optional[str] = None) -> Any:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         _create_schema(conn)
+        try:
+            conn.execute("ALTER TABLE findings ADD COLUMN status TEXT DEFAULT 'open'")
+            conn.commit()
+        except Exception:
+            pass
         return conn
 
 
@@ -119,6 +134,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             references_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            status TEXT DEFAULT 'open',
             raw_json TEXT NOT NULL,
             FOREIGN KEY(scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE
         );

@@ -574,6 +574,28 @@ class StorageRepository:
         return _loads(row["raw_json"], {}) if row else None
 
 
+    def update_finding_status(self, finding_id: str, status: str) -> bool:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT raw_json FROM findings WHERE finding_id = ?",
+                (finding_id,),
+            ).fetchone()
+            if not row:
+                return False
+            self.conn.execute(
+                "UPDATE findings SET status = ? WHERE finding_id = ?",
+                (status, finding_id),
+            )
+            data = _loads(row["raw_json"], {})
+            data["status"] = status
+            self.conn.execute(
+                "UPDATE findings SET raw_json = ? WHERE finding_id = ?",
+                (_json(data), finding_id),
+            )
+            self.conn.commit()
+            return True
+
+
 _default_repo: Optional[StorageRepository] = None
 
 
@@ -666,3 +688,8 @@ def list_proof_tasks(finding_id: str = "") -> List[Dict[str, Any]]:
 
 def list_evidence_artifacts(finding_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
     return get_repository().list_evidence_artifacts(finding_id, task_id)
+
+
+def update_finding_status(finding_id: str, status: str) -> bool:
+    return get_repository().update_finding_status(finding_id, status)
+

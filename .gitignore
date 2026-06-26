@@ -33,13 +33,7 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
-# Add unnecessary files to .gitignore
-echo "*.log" >> .gitignore
-echo "all_code.txt" >> .gitignore
-echo "scanner-terminal/*.png" >> .gitignore
-
-# Stage the updated .gitignore
-git add .gitignore*.log
+# Logs and temp files
+*.log
 all_code.txt
 scanner-terminal/*.png
-*.log
