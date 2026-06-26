@@ -18,3 +18,4 @@ redis>=5.0.0
 gunicorn>=21.2.0
 psycopg2-binary>=2.9.9
 prometheus-client>=0.20.0
+mitmproxy>=10.0.0
