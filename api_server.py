@@ -217,9 +217,23 @@ def get_findings_paginated():
         conn = repo.conn
         where = []
         params = []
+        
+        tenant_id = getattr(g, 'tenant_id', 'org_wraith_hq')
+        import sqlite3
+        if isinstance(conn, sqlite3.Connection):
+            where.append("json_extract(raw_json, '$.tenant_id') = ?")
+            params.append(tenant_id)
+        else:
+            where.append("raw_json->>'tenant_id' = %s")
+            params.append(tenant_id)
+            
         if severity_filter:
-            where.append("severity = ?")
+            if isinstance(conn, sqlite3.Connection):
+                where.append("severity = ?")
+            else:
+                where.append("severity = %s")
             params.append(severity_filter)
+            
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         total_count = conn.execute(
             f"SELECT COUNT(*) FROM findings {where_sql}",
@@ -1147,6 +1161,7 @@ def start_scan():
         'target': target_url,
         'mode': 'dast',
         'scan_type': 'DAST',
+        'tenant_id': getattr(g, 'tenant_id', 'org_wraith_hq'),
         'started_at': _utc_timestamp(),
     })
 

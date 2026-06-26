@@ -237,6 +237,19 @@ class StorageRepository:
 
     def save_finding(self, finding: Finding) -> str:
         data = finding.to_dict()
+        try:
+            scan = self.get_scan(finding.scan_id)
+            if scan and "tenant_id" in scan:
+                data["tenant_id"] = scan["tenant_id"]
+            else:
+                row = self.conn.execute("SELECT raw_json FROM scan_states WHERE scan_id = ?", (finding.scan_id,)).fetchone()
+                if row:
+                    import json as _json_lib
+                    state_data = _json_lib.loads(row["raw_json"])
+                    if "tenant_id" in state_data:
+                        data["tenant_id"] = state_data["tenant_id"]
+        except Exception:
+            pass
         with self._lock:
             self.conn.execute(
                 """
