@@ -1,10 +1,3 @@
-Here is your **fully updated `api_server.py`**. 
-
-I have taken your existing code and integrated all the new Enterprise features we discussed: the **Exploitation Orchestrator (Proof Mode)**, the **Advanced DAST Scanners** (gRPC, GraphQL DoS, Cloud Exposure), and the **Advanced SAST Scanners** (Cloud Secrets, K8s/IaC). 
-
-Simply replace the entire contents of your `api_server.py` with this code.
-
-```python
 """Flask API server with WordPress scanner, authentication support, and multi-mode scanning."""
 
 import asyncio
@@ -66,6 +59,10 @@ from scanner.modules.timing_sqli_scanner import TimingSQLiScanner
 from scanner.modules.cloud_exposure_scanner import CloudExposureScanner
 from scanner.modules.graphql_advanced_scanner import GraphQLAdvancedScanner
 from scanner.modules.grpc_scanner import GRPCScanner
+
+# --- NEW SCANNERS (Mass Assignment & HPP) ---
+from scanner.modules.mass_assignment_scanner import MassAssignmentScanner
+from scanner.modules.hpp_scanner import HPPScanner
 
 from scanner.importers.common import (
     candidates_to_scan_targets,
@@ -268,7 +265,9 @@ DAST_MODULES = [
     "path-traversal", "csrf", "crypto", "ssrf", "xxe", "ssti", 
     "headers", "components", "graphql", "race", "websocket",
     # Advanced DAST Modules added
-    "timing-sqli", "cloud-exposure", "graphql-advanced", "grpc"
+    "timing-sqli", "cloud-exposure", "graphql-advanced", "grpc",
+    # New modules
+    "mass-assignment", "hpp"
 ]
 
 
@@ -850,8 +849,13 @@ def run_scan(
         graphql_adv = GraphQLAdvancedScanner(timeout=timeout, session=authenticated_session)
         grpc_scanner = GRPCScanner(target_host=urlparse(target_url).hostname, target_port=50051)
         
+        # --- NEW SCANNERS ---
+        mass_assign = MassAssignmentScanner(timeout=timeout, session=authenticated_session)
+        hpp = HPPScanner(timeout=timeout, session=authenticated_session)
+        
         live_scanner = LiveDiscoveryScanner(
-            form_scanners=[sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe, graphql, race],
+            form_scanners=[sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe, graphql, race, mass_assign],
+            url_scanners=[hpp],   # HPP is primarily a URL/GET scanner
             websocket_scanner=websocket,
             progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
         )
@@ -1290,7 +1294,25 @@ def scan_repo():
                 emit_progress(scan_id, "Running secrets/dependency scanner...", "phase")
                 scanner = SASTScanner()
                 results = scanner.scan_repo(repo_path, file_tree)
-                emit_progress(scan_id, f"Secrets/deps: {len(results)} findings", "info")
+                
+                try:
+                    from scanner.modules.dependency_scanner import LockFileScanner
+                    lock_scanner = LockFileScanner()
+                    dependencies = lock_scanner.scan_directory(repo_path)
+                    for dep in dependencies:
+                        results.append({
+                            "type": "Dependency",
+                            "category": "dependency",
+                            "file": "lockfile",
+                            "severity": "INFO",
+                            "confidence": 100,
+                            "message": f"{dep['package']}@{dep['version']}",
+                            "ecosystem": dep["ecosystem"]
+                        })
+                    emit_progress(scan_id, f"Secrets/deps: {len(results)} findings (incl. {len(dependencies)} lockfile deps)", "info")
+                except Exception as exc:
+                    print(f"LockFileScanner failed: {exc}")
+                    emit_progress(scan_id, f"Secrets/deps: {len(results)} findings", "info")
                 return results
 
             # --- ENTERPRISE SAST ADDITIONS: IaC & K8s Manifest Scanning ---
@@ -3006,4 +3028,3 @@ if __name__ == '__main__':
         use_reloader=debug_enabled,
         allow_unsafe_werkzeug=True,
     )
-```
