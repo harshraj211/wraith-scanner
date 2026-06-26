@@ -118,6 +118,11 @@ class AsyncHTTPSession:
         **kwargs,
     ) -> Optional["AsyncResponse"]:
         """Core request method with retry + exponential backoff + politeness."""
+        from scanner.security.ssrf_protection import SSRFProtector
+        if not SSRFProtector.is_safe_url(url, allow_private=False):
+            print(f"[!] SSRF Protection: Blocked attempt to fetch internal/local URL: {url}")
+            return None
+
         if not self._session:
             return None
 

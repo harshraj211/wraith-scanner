@@ -841,6 +841,11 @@ class WebCrawler:
 
             visited.add(url)
 
+            from scanner.security.ssrf_protection import SSRFProtector
+            if not SSRFProtector.is_safe_url(url, allow_private=False):
+                print(f"[!] SSRF Protection: Blocked attempt to crawl internal/local URL: {url}")
+                continue
+
             try:
                 resp = self.session.get(url, timeout=self.timeout)
                 if "text/html" not in resp.headers.get("content-type", ""):
