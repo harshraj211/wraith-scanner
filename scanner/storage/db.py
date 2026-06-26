@@ -4,24 +4,39 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 DEFAULT_DB_PATH = os.environ.get("WRAITH_DB_PATH", os.path.join("reports", "wraith.sqlite3"))
 
 
-def init_db(path: Optional[str] = None) -> sqlite3.Connection:
-    """Open and migrate a local SQLite database."""
-    db_path = path or DEFAULT_DB_PATH
-    parent = Path(db_path).expanduser().resolve().parent
-    parent.mkdir(parents=True, exist_ok=True)
+def init_db(path: Optional[str] = None) -> Any:
+    """Open and migrate a local SQLite or PostgreSQL database."""
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        import psycopg2
+        from urllib.parse import urlparse
+        url = urlparse(database_url)
+        conn = psycopg2.connect(
+            dbname=url.path[1:],
+            user=url.username,
+            password=url.password,
+            host=url.hostname,
+            port=url.port
+        )
+        print("[storage] Connected to PostgreSQL.")
+        return conn
+    else:
+        db_path = path or DEFAULT_DB_PATH
+        parent = Path(db_path).expanduser().resolve().parent
+        parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    _create_schema(conn)
-    return conn
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        _create_schema(conn)
+        return conn
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:

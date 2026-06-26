@@ -132,6 +132,9 @@ _check_semgrep()
 setup_logging()
 
 app = Flask(__name__)
+from scanner.routes.manual_routes import manual_bp
+app.register_blueprint(manual_bp)
+
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
@@ -160,21 +163,35 @@ VERIFY_TLS = os.environ.get("WRAITH_VERIFY_TLS", "true").strip().lower() not in 
 
 @app.before_request
 def _enforce_enterprise_api_key():
+    # Only protect API routes
     if not request.path.startswith("/api/"):
         return None
-    if request.path.startswith("/api/manual/proxy/ca/guide"):
+        
+    # Allow health checks and metrics without auth (needed for Kubernetes/Docker)
+    if request.path.startswith("/api/health") or request.path.startswith("/api/metrics"):
         return None
-    if request.path.startswith("/api/manual/proxy/ca/status"):
+        
+    # Allow specific manual proxy CA endpoints needed for browser setup
+    if request.path.startswith("/api/manual/proxy/ca/guide") or request.path.startswith("/api/manual/proxy/ca/status") or request.path.startswith("/api/manual/proxy/ca/leaf/status"):
         return None
-    if request.path.startswith("/api/manual/proxy/ca/leaf/status"):
-        return None
+        
+    # Allow API mode route
     if request.path.startswith("/api/mode"):
         return None
 
+    # Read valid API keys from environment variables (comma-separated)
+    # Example in .env: WRAITH_API_KEYS=super_secret_admin_key_999,cicd_pipeline_key_456
+    valid_keys_str = os.environ.get("WRAITH_API_KEYS", "")
+    valid_keys = {key.strip() for key in valid_keys_str.split(",") if key.strip()}
+    
+    # If no keys are configured in .env, deny all access (Fail-safe)
+    if not valid_keys:
+        return jsonify({"error": "Server misconfigured: No API keys set in environment."}), 500
+
     api_key = request.headers.get("X-API-KEY")
-    allowed = {"wraith_sec_key_123", "cicd_pipeline_key_456"}
-    if not api_key or api_key not in allowed:
+    if not api_key or api_key not in valid_keys:
         return jsonify({"error": "Invalid or missing API Key"}), 401
+        
     return None
 
 
