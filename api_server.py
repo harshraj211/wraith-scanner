@@ -1126,7 +1126,10 @@ def run_scan(
         })
 
 
+from scanner.security.rate_limiter import rate_limit
+
 @app.route('/api/scan', methods=['POST'])
+@rate_limit(limit=5, window=60)
 def start_scan():
     """Start scan with optional authentication and mode."""
     raw_data = request.get_json(silent=True) or {}
@@ -1187,6 +1190,7 @@ def start_scan():
 
 
 @app.route('/api/scan/repo', methods=['POST'])
+@rate_limit(limit=3, window=60)
 def scan_repo():
     """SAST scan of a GitHub repository."""
     data = request.get_json(silent=True) or {}

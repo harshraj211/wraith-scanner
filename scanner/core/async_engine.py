@@ -2,7 +2,7 @@
 async_engine.py - Fully Async Vulnerability Scanning Engine
 ============================================================
 
-Architecture (v5 - anti-Self-DOS):
+Architecture (v5 - anti-Self-DOS + WAF Evasion):
   - aiohttp.ClientSession for all HTTP I/O (connection pooling, keep-alive)
   - Batched task dispatch (8 tasks at a time with 0.3s cooldown)
     instead of asyncio.gather(*all_tasks) to prevent traffic bursts
@@ -13,11 +13,7 @@ Architecture (v5 - anti-Self-DOS):
   - Scanners with scan_url_async() / scan_form_async() run natively
     on the event loop - zero thread overhead
   - Legacy sync scanners fall back to asyncio.to_thread()
-
-Performance:
-  - Controlled pacing recovers all Critical findings (SQLi, XSS)
-  - No GIL contention - pure async coroutines
-  - Resilient retries + batch cooldown = zero silent drops
+  - Phase 2.1: Integrated WAF Fingerprinting & Context-Aware Mutation
 """
 from __future__ import annotations
 
@@ -28,6 +24,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from scanner.core.models import RequestRecord, ResponseRecord
+
+# Phase 2.1: Import PayloadMutator
+from scanner.utils.payload_mutator import PayloadMutator
 
 try:
     import aiohttp
@@ -41,7 +40,6 @@ except ImportError:
 # Shared async HTTP session — passed into async scanner modules
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Retry-able HTTP status codes (server overloaded / rate-limited)
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 
@@ -49,14 +47,10 @@ class AsyncHTTPSession:
     """
     Async HTTP session with connection pooling, concurrency limiting,
     automatic retry with exponential backoff, and a politeness delay.
-
-    Anti-Self-DOS design:
-      - limit_per_host=5  -> max 5 TCP connections to one target
-      - 50ms politeness delay after each request -> prevents burst flooding
-      - Retry on 429/502/503/504 / timeout -> recovers dropped payloads
     """
 
-    POLITENESS_DELAY = 0.05   # 50 ms between requests (smooths bursts)
+    POLITENESS_DELAY = 0.05   # 50 ms between requests
+    MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10 MB limit to prevent OOM
 
     def __init__(
         self,
@@ -91,7 +85,7 @@ class AsyncHTTPSession:
         connector = aiohttp.TCPConnector(
             ssl=False,
             limit=self._max_concurrent,
-            limit_per_host=5,             # gentle on single-server targets
+            limit_per_host=5,
             keepalive_timeout=30,
             enable_cleanup_closed=True,
         )
@@ -108,7 +102,6 @@ class AsyncHTTPSession:
         if self._session:
             await self._session.close()
 
-    # -- retry helper --
     async def _do(
         self,
         method: str,
@@ -137,15 +130,33 @@ class AsyncHTTPSession:
                     resp = await self._session.request(
                         method, url, timeout=t, **kwargs
                     )
-                    # If the server is overwhelmed, back off and retry
                     if resp.status in _RETRYABLE_STATUSES:
-                        backoff = 1.0 * (2 ** attempt)   # 1s, 2s, 4s
+                        backoff = 1.0 * (2 ** attempt)
                         await asyncio.sleep(backoff)
                         continue
-                    text = await resp.text(errors="replace")
+                    
+                    # --- PHASE 6: MEMORY MANAGEMENT ---
+                    # Check Content-Length before downloading body
+                    content_length = int(resp.headers.get("Content-Length", 0))
+                    if content_length > self.MAX_RESPONSE_SIZE:
+                        print(f"[!] Memory Protection: Skipping response from {url} (Too large: {content_length} bytes)")
+                        resp.close()
+                        return None
+
+                    # Read body in chunks to prevent OOM on chunked responses without Content-Length
+                    body_chunks = []
+                    total_read = 0
+                    async for chunk in resp.content.iter_chunked(8192):
+                        total_read += len(chunk)
+                        if total_read > self.MAX_RESPONSE_SIZE:
+                            print(f"[!] Memory Protection: Aborted reading {url} (Exceeded {self.MAX_RESPONSE_SIZE} bytes limit)")
+                            break
+                        body_chunks.append(chunk)
+                    
+                    text = b"".join(body_chunks).decode("utf-8", errors="replace")
+                    # -----------------------------------
                     elapsed_ms = int((time.perf_counter() - start) * 1000)
                     self._record_exchange(request_record, resp.status, dict(resp.headers), text, elapsed_ms)
-                    # Politeness delay - prevents burst flooding
                     await asyncio.sleep(self.POLITENESS_DELAY)
                     return AsyncResponse(resp.status, text, dict(resp.headers))
                 except (asyncio.TimeoutError, aiohttp.ClientError):
@@ -154,7 +165,6 @@ class AsyncHTTPSession:
                     continue
                 except Exception:
                     return None
-            # All retries exhausted
             return None
 
     def _build_request_record(self, method: str, url: str, kwargs: Dict[str, Any]) -> Optional[RequestRecord]:
@@ -204,7 +214,6 @@ class AsyncHTTPSession:
         except Exception:
             pass
 
-    # -- public convenience methods --
     async def get(self, url: str, params: Optional[Dict] = None,
                   timeout: Optional[int] = None,
                   retries: Optional[int] = None,
@@ -237,22 +246,16 @@ class AsyncResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Async scan engine (v3 — native aiohttp for async scanners)
+# Async scan engine (v3 — native aiohttp + WAF Fingerprinting)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AsyncScanEngine:
     """
-    Native async scan engine.
-
-    Scanners with scan_url_async(url, params, session) → run natively
-    Scanners without (legacy sync) → run via asyncio.to_thread() fallback
-
-    This hybrid approach allows incremental migration: hot-path scanners
-    (SQLi, XSS) go fully async while others migrate over time.
+    Native async scan engine with WAF detection and payload mutation.
     """
 
-    BATCH_SIZE    = 8    # scanner tasks per batch (prevents traffic bursts)
-    BATCH_DELAY  = 0.3  # seconds between batches (target recovery time)
+    BATCH_SIZE    = 8    # scanner tasks per batch
+    BATCH_DELAY  = 0.3  # seconds between batches
 
     def __init__(
         self,
@@ -272,14 +275,10 @@ class AsyncScanEngine:
         self._traffic_source = traffic_source
         self._auth_profile_id = auth_profile_id
         self._auth_role = auth_role
-        # Extract auth state from a requests.Session so async requests
-        # carry the same cookies / headers as the authenticated sync session.
         self._auth_headers: Dict[str, str] = {}
         self._auth_cookies: Dict[str, str] = {}
         if auth_session is not None:
-            # Merge default + per-session headers
             self._auth_headers = dict(auth_session.headers or {})
-            # Convert requests CookieJar → plain dict for aiohttp
             try:
                 self._auth_cookies = {
                     c.name: c.value
@@ -289,19 +288,42 @@ class AsyncScanEngine:
                 self._auth_cookies = dict(auth_session.cookies or {})
 
     # ------------------------------------------------------------------
+    # WAF Fingerprinting (Phase 2.1)
+    # ------------------------------------------------------------------
+
+    async def _detect_waf(self, http: AsyncHTTPSession, url: str) -> str:
+        """Probes the target to identify the WAF. Returns WAF name or 'None'."""
+        probe_payload = "<script>alert(1)</script>' OR 1=1-- -"
+        resp = await http.get(url, params={"q": probe_payload}, timeout=5, retries=1)
+        if not resp:
+            return "None"
+            
+        headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
+        body_lower = resp.text.lower()
+        
+        if resp.status_code in [403, 406, 429, 503]:
+            if "cloudflare" in headers.get("server", "") or "cf-chl-bypass" in body_lower:
+                return "Cloudflare"
+            if "x-amzn-waf-action" in headers or "aws waf" in body_lower:
+                return "AWS WAF"
+            if "mod_security" in headers.get("server", "") or "mod_security" in body_lower:
+                return "ModSecurity"
+            if "x-iinfo" in headers or "incapsula" in body_lower:
+                return "Imperva Incapsula"
+                
+        return "None"
+
+    def _prepare_scanners(self, scanners: List[Any], waf: str):
+        """Injects WAF context and Mutator into scanner instances."""
+        for scanner in scanners:
+            scanner.detected_waf = waf
+            scanner.mutator = PayloadMutator()
+
+    # ------------------------------------------------------------------
     # Public API (sync entry points for api_server.py)
     # ------------------------------------------------------------------
 
     def _run_sync_entrypoint(self, coro_factory):
-        """
-        Run an async scan entrypoint from sync code.
-
-        Some callers reach these wrappers after Playwright- or asyncio-backed
-        crawl phases have already executed in the same thread. If a loop is
-        still active, delegate the coroutine to a worker thread with its own
-        event loop instead of raising "asyncio.run() cannot be called from a
-        running event loop".
-        """
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -318,7 +340,6 @@ class AsyncScanEngine:
         form_scanners:   List[Any],
         progress_cb:     Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
-        """Run URL *and* form scanning in one event-loop — full I/O overlap."""
         return self._run_sync_entrypoint(
             lambda: self._scan_all(
                 url_param_pairs,
@@ -362,7 +383,6 @@ class AsyncScanEngine:
         progress_cb:     Optional[Callable],
     ) -> List[Dict[str, Any]]:
 
-        # Explicit large thread-pool for any remaining to_thread() fallbacks
         loop = asyncio.get_running_loop()
         loop.set_default_executor(
             ThreadPoolExecutor(max_workers=self.max_concurrent)
@@ -382,7 +402,18 @@ class AsyncScanEngine:
             auth_profile_id=self._auth_profile_id,
             auth_role=self._auth_role,
         ) as http:
-            # Build task coroutines (not started yet)
+            
+            # ── Phase 2.1: WAF Fingerprinting ──────────────────────────
+            probe_url = url_param_pairs[0][0] if url_param_pairs else (forms[0].get("action") if forms else "")
+            detected_waf = "None"
+            if probe_url:
+                detected_waf = await self._detect_waf(http, probe_url)
+                if detected_waf != "None" and progress_cb:
+                    progress_cb(f"[!] WAF Detected: {detected_waf}. Enabling evasion mutations.")
+            
+            self._prepare_scanners(url_scanners, detected_waf)
+            self._prepare_scanners(form_scanners, detected_waf)
+
             tasks     = []
             url_count = len(url_param_pairs)
             form_count = len(forms)
@@ -391,51 +422,30 @@ class AsyncScanEngine:
                 if not params:
                     continue
                 if progress_cb:
-                    progress_cb(
-                        f"[URL {url_idx + 1}/{url_count}] Queuing "
-                        f"{len(url_scanners)} scanners for: {url}"
-                    )
+                    progress_cb(f"[URL {url_idx + 1}/{url_count}] Queuing {len(url_scanners)} scanners for: {url}")
                 for scanner in url_scanners:
-                    tasks.append(
-                        self._run_url_scanner(http, url, params, scanner)
-                    )
+                    tasks.append(self._run_url_scanner(http, url, params, scanner))
 
             for form_idx, form in enumerate(forms):
                 action = form.get("action", "")
                 if progress_cb:
-                    progress_cb(
-                        f"[Form {form_idx + 1}/{form_count}] Queuing "
-                        f"{len(form_scanners)} scanners for form: {action}"
-                    )
+                    progress_cb(f"[Form {form_idx + 1}/{form_count}] Queuing {len(form_scanners)} scanners for form: {action}")
                 for scanner in form_scanners:
-                    tasks.append(
-                        self._run_form_scanner(http, form, scanner)
-                    )
+                    tasks.append(self._run_form_scanner(http, form, scanner))
 
             total = len(tasks)
             if progress_cb:
-                progress_cb(
-                    f"Dispatching {total} tasks in batches of "
-                    f"{self.BATCH_SIZE} (max {self.max_concurrent} concurrent)..."
-                )
+                progress_cb(f"Dispatching {total} tasks in batches of {self.BATCH_SIZE} (max {self.max_concurrent} concurrent)...")
 
-            # ── Batched dispatch ──────────────────────────────────────
-            # Process in small batches with cooldown between them.
-            # This prevents traffic bursts that overwhelm the target.
             findings = []
             for i in range(0, total, self.BATCH_SIZE):
                 batch = tasks[i : i + self.BATCH_SIZE]
-                batch_results = await asyncio.gather(
-                    *batch, return_exceptions=True
-                )
+                batch_results = await asyncio.gather(*batch, return_exceptions=True)
                 for r in batch_results:
                     if isinstance(r, list):
                         findings.extend(r)
                 if progress_cb and (i + self.BATCH_SIZE) < total:
-                    progress_cb(
-                        f"  Completed {min(i + self.BATCH_SIZE, total)}/{total} tasks..."
-                    )
-                # Brief cooldown so target server can recover
+                    progress_cb(f"  Completed {min(i + self.BATCH_SIZE, total)}/{total} tasks...")
                 if (i + self.BATCH_SIZE) < total:
                     await asyncio.sleep(self.BATCH_DELAY)
 
@@ -453,9 +463,7 @@ class AsyncScanEngine:
     ) -> List[Dict[str, Any]]:
 
         loop = asyncio.get_running_loop()
-        loop.set_default_executor(
-            ThreadPoolExecutor(max_workers=self.max_concurrent)
-        )
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=self.max_concurrent))
 
         merged_headers = {"User-Agent": "Mozilla/5.0 (VulnScanner)"}
         merged_headers.update(self._auth_headers)
@@ -471,6 +479,17 @@ class AsyncScanEngine:
             auth_profile_id=self._auth_profile_id,
             auth_role=self._auth_role,
         ) as http:
+            
+            # ── Phase 2.1: WAF Fingerprinting ──────────────────────────
+            probe_url = url_param_pairs[0][0] if url_param_pairs else ""
+            detected_waf = "None"
+            if probe_url:
+                detected_waf = await self._detect_waf(http, probe_url)
+                if detected_waf != "None" and progress_cb:
+                    progress_cb(f"[!] WAF Detected: {detected_waf}. Enabling evasion mutations.")
+            
+            self._prepare_scanners(scanners, detected_waf)
+
             tasks     = []
             url_count = len(url_param_pairs)
 
@@ -478,22 +497,15 @@ class AsyncScanEngine:
                 if not params:
                     continue
                 if progress_cb:
-                    progress_cb(
-                        f"[{url_idx + 1}/{url_count}] Queuing {len(scanners)} "
-                        f"scanners for: {url}"
-                    )
+                    progress_cb(f"[{url_idx + 1}/{url_count}] Queuing {len(scanners)} scanners for: {url}")
                 for scanner in scanners:
-                    tasks.append(
-                        self._run_url_scanner(http, url, params, scanner)
-                    )
+                    tasks.append(self._run_url_scanner(http, url, params, scanner))
 
             findings = []
             total = len(tasks)
             for i in range(0, total, self.BATCH_SIZE):
                 batch = tasks[i : i + self.BATCH_SIZE]
-                batch_results = await asyncio.gather(
-                    *batch, return_exceptions=True
-                )
+                batch_results = await asyncio.gather(*batch, return_exceptions=True)
                 for r in batch_results:
                     if isinstance(r, list):
                         findings.extend(r)
@@ -510,7 +522,6 @@ class AsyncScanEngine:
         scanner:   Any,
     ) -> List[Dict[str, Any]]:
         scanner_name = type(scanner).__name__
-        # Native async scanner?
         if hasattr(scanner, 'scan_url_async'):
             try:
                 results = await scanner.scan_url_async(url, params, http)
@@ -521,11 +532,8 @@ class AsyncScanEngine:
                 print(f"[AsyncEngine] {scanner_name}.scan_url_async failed on {url}: {exc}")
                 return []
         else:
-            # Legacy sync scanner -> thread fallback
             try:
-                results = await asyncio.to_thread(
-                    scanner.scan_url, url, params
-                )
+                results = await asyncio.to_thread(scanner.scan_url, url, params)
                 for f in results:
                     f["url"] = url
                 return results
@@ -545,9 +553,7 @@ class AsyncScanEngine:
     ) -> List[Dict[str, Any]]:
 
         loop = asyncio.get_running_loop()
-        loop.set_default_executor(
-            ThreadPoolExecutor(max_workers=self.max_concurrent)
-        )
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=self.max_concurrent))
 
         merged_headers = {"User-Agent": "Mozilla/5.0 (VulnScanner)"}
         merged_headers.update(self._auth_headers)
@@ -563,28 +569,32 @@ class AsyncScanEngine:
             auth_profile_id=self._auth_profile_id,
             auth_role=self._auth_role,
         ) as http:
+            
+            # ── Phase 2.1: WAF Fingerprinting ──────────────────────────
+            probe_url = forms[0].get("action", "") if forms else ""
+            detected_waf = "None"
+            if probe_url:
+                detected_waf = await self._detect_waf(http, probe_url)
+                if detected_waf != "None" and progress_cb:
+                    progress_cb(f"[!] WAF Detected: {detected_waf}. Enabling evasion mutations.")
+            
+            self._prepare_scanners(scanners, detected_waf)
+
             tasks      = []
             form_count = len(forms)
 
             for form_idx, form in enumerate(forms):
                 action = form.get("action", "")
                 if progress_cb:
-                    progress_cb(
-                        f"[{form_idx + 1}/{form_count}] Queuing {len(scanners)} "
-                        f"scanners for form: {action}"
-                    )
+                    progress_cb(f"[{form_idx + 1}/{form_count}] Queuing {len(scanners)} scanners for form: {action}")
                 for scanner in scanners:
-                    tasks.append(
-                        self._run_form_scanner(http, form, scanner)
-                    )
+                    tasks.append(self._run_form_scanner(http, form, scanner))
 
             findings = []
             total = len(tasks)
             for i in range(0, total, self.BATCH_SIZE):
                 batch = tasks[i : i + self.BATCH_SIZE]
-                batch_results = await asyncio.gather(
-                    *batch, return_exceptions=True
-                )
+                batch_results = await asyncio.gather(*batch, return_exceptions=True)
                 for r in batch_results:
                     if isinstance(r, list):
                         findings.extend(r)
@@ -612,9 +622,7 @@ class AsyncScanEngine:
                 return []
         else:
             try:
-                results = await asyncio.to_thread(
-                    scanner.scan_form, form
-                )
+                results = await asyncio.to_thread(scanner.scan_form, form)
                 for f in results:
                     f["url"] = action
                 return results
@@ -630,10 +638,6 @@ class AsyncScanEngine:
 def build_url_param_pairs(urls: List[str]) -> List[Tuple[str, Dict[str, str]]]:
     """
     Build scanner-ready URL targets from crawler output.
-
-    The returned URL is normalized without its query string so scanners can
-    mutate parameters without duplicating them. REST-style object paths like
-    /users/1 are retained even when they do not carry query parameters.
     """
     pairs = []
     seen = set()
