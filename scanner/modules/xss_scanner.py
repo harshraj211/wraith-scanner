@@ -28,6 +28,7 @@ from scanner.utils.request_metadata import (
     send_request_async,
     send_request_sync,
 )
+from scanner.utils.payload_mutator import PayloadMutator
 from scanner.utils.response_intelligence import ResponseIntelligenceAgent
 from scanner.utils.waf_evasion import (
     generate_xss_evasion_payloads,
@@ -321,6 +322,7 @@ class XSSScanner:
         # Pool is lazy-initialized on first DOM XSS check
         self._pool: Optional[_PlaywrightPool] = None
         self._response_agent = ResponseIntelligenceAgent()
+        self._mutator = PayloadMutator()
         self.intelligence_stats: Dict[str, Any] = {
             "mode": self._response_agent.mode,
             "mutation_attempts": 0,
@@ -332,6 +334,17 @@ class XSSScanner:
         if self._pool is None:
             self._pool = _PlaywrightPool.get_instance(pool_size=3)
         return self._pool
+
+    def _expanded_xss_payloads(self, payloads: List[str]) -> List[str]:
+        expanded = []
+        seen = set()
+        for payload in payloads:
+            for candidate in self._mutator.mutate_xss(payload):
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                expanded.append(candidate)
+        return expanded
 
     # ------------------------------------------------------------------
     # Public scan methods (sync — kept for standalone / fallback use)
@@ -417,7 +430,7 @@ class XSSScanner:
                               target_param: str) -> List[Dict[str, Any]]:
         findings = []
 
-        for payload_template in REFLECTED_PAYLOADS:
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS):
             marker = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -485,7 +498,7 @@ class XSSScanner:
                                            target_param: str, http) -> List[Dict[str, Any]]:
         findings = []
         # Phase 1: Standard payloads
-        for payload_template in REFLECTED_PAYLOADS:
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS):
             marker  = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -553,7 +566,7 @@ class XSSScanner:
                                            http) -> List[Dict[str, Any]]:
         findings = []
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
-        for payload_template in REFLECTED_PAYLOADS[:6]:
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6]):
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -595,7 +608,7 @@ class XSSScanner:
         findings = []
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
 
-        for payload_template in REFLECTED_PAYLOADS[:6]:  # fewer for forms
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6]):  # fewer for forms
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -842,7 +855,7 @@ class XSSScanner:
 
         findings = []
 
-        for payload_template in DOM_PAYLOADS:
+        for payload_template in self._expanded_xss_payloads(DOM_PAYLOADS):
             marker  = f"DOMXSS{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 

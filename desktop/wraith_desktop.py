@@ -22,6 +22,12 @@ from typing import Optional
 
 DEFAULT_API_PORT = 5001
 DEFAULT_UI_PORT = 3000
+CURRENT_VERSION = "4.0.0"
+
+try:
+    from desktop.updater import DesktopUpdater
+except Exception:  # pragma: no cover
+    DesktopUpdater = None
 
 
 def project_root() -> Path:
@@ -132,6 +138,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         signal.signal(signal.SIGBREAK, shutdown)
 
     try:
+        if DesktopUpdater is not None:
+            updater = DesktopUpdater(current_version=CURRENT_VERSION)
+            update_available = updater.check_for_updates()
+            if update_available:
+                print("New version found. Applying update...")
+                updater.apply_update(update_available)
+                return 0
         api_process = start_api(root, args.api_port)
         ui_url = frontend.start()
         print(f"Wraith API: http://127.0.0.1:{args.api_port}")

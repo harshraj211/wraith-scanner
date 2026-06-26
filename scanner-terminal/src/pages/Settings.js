@@ -10,12 +10,14 @@ function getStoredValue(key, fallback) {
 
 export default function Settings({ apiUrl }) {
   const [apiUrlDraft, setApiUrlDraft] = useState(() => getStoredValue('wraith.apiUrl', apiUrl || 'http://127.0.0.1:5001'));
+  const [apiKeyDraft, setApiKeyDraft] = useState(() => getStoredValue('wraith.apiKey', ''));
   const [defaultSafetyMode, setDefaultSafetyMode] = useState(() => getStoredValue('wraith.defaultSafetyMode', 'safe'));
   const [confirmDangerousActions, setConfirmDangerousActions] = useState(() => getStoredValue('wraith.confirmDangerousActions', 'true') !== 'false');
   const [saveState, setSaveState] = useState('idle');
 
   const saveSettings = () => {
     window.localStorage.setItem('wraith.apiUrl', apiUrlDraft.trim() || 'http://127.0.0.1:5001');
+    window.localStorage.setItem('wraith.apiKey', apiKeyDraft.trim());
     window.localStorage.setItem('wraith.defaultSafetyMode', defaultSafetyMode);
     window.localStorage.setItem('wraith.confirmDangerousActions', String(confirmDangerousActions));
     setSaveState('saved');
@@ -59,6 +61,15 @@ export default function Settings({ apiUrl }) {
               placeholder="http://127.0.0.1:5001"
             />
             <em className="field-hint">Saved API URL is used the next time the frontend loads.</em>
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              value={apiKeyDraft}
+              onChange={(event) => setApiKeyDraft(event.target.value)}
+              placeholder="wraith_sec_key_123"
+            />
+            <em className="field-hint">Stored locally and sent as `X-API-KEY` for protected endpoints.</em>
           </label>
           <div className="summary-list">
             <div><span>Current session</span><strong>{apiUrl}</strong></div>

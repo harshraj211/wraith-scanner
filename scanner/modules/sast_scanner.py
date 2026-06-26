@@ -24,6 +24,8 @@ import time
 import requests
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
+from scanner.modules.cloud_secret_scanner import CloudSecretScanner
+from scanner.modules.k8s_manifest_scanner import K8sManifestScanner
 
 try:
     import tomllib
@@ -357,6 +359,8 @@ class SASTScanner:
         findings: List[Dict[str, Any]] = []
         all_files = file_tree.get("all", [])
         print(f"[SASTScanner] Scanning {len(all_files)} files for secrets/misconfigs")
+        cloud_scanner = CloudSecretScanner()
+        k8s_scanner = K8sManifestScanner()
 
         for filepath in all_files:
             if not self._should_scan(filepath):
@@ -372,6 +376,9 @@ class SASTScanner:
             rel = self._relative(filepath, repo_path)
             findings.extend(self._scan_secrets(content, rel))
             findings.extend(self._scan_misconfigs(content, rel))
+            findings.extend(cloud_scanner.scan_file(rel, content))
+            if rel.endswith((".yml", ".yaml")):
+                findings.extend(k8s_scanner.scan_yaml(filepath))
 
         findings.extend(self._scan_dependencies(repo_path))
         print(f"[SASTScanner] Total: {len(findings)} findings")

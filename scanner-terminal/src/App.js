@@ -21,11 +21,17 @@ import NucleiCve from './pages/NucleiCve';
 import ProofMode from './pages/ProofMode';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
+import RiskPostureDashboard from './pages/RiskPostureDashboard';
 
 function configuredApiUrl() {
   const fallback = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
   if (typeof window === 'undefined') return fallback;
   return window.localStorage.getItem('wraith.apiUrl') || fallback;
+}
+
+function configuredApiKey() {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem('wraith.apiKey') || '';
 }
 
 function apiUrlCandidates(currentUrl) {
@@ -153,6 +159,7 @@ const hashToPage = {
   '#reports': 'reports',
   '#reporting': 'reports',
   '#terminal': 'reports',
+  '#risk-posture': 'risk-posture',
   '#settings': 'settings',
 };
 
@@ -173,6 +180,7 @@ const pageToHash = {
   nuclei: '#nuclei-cve',
   proof: '#proof-mode',
   reports: '#reports',
+  'risk-posture': '#risk-posture',
   settings: '#settings',
 };
 
@@ -184,6 +192,7 @@ function pageFromLocation() {
 function App() {
   const intruderAbortRef = useRef(false);
   const [apiUrl, setApiUrl] = useState(configuredApiUrl);
+  const [ticketingState, setTicketingState] = useState('idle');
   const [activePage, setActivePage] = useState(pageFromLocation);
   const [socketState, setSocketState] = useState('connecting');
   const [form, setForm] = useState(initialForm);
@@ -1308,6 +1317,33 @@ function App() {
     if (findingId) window.open(`${apiUrl}/api/evidence/bundle/${findingId}`, '_blank');
   };
 
+  const pushFindingToTicketing = async (finding) => {
+    const findingId = finding?.finding_id;
+    if (!findingId) return;
+    setTicketingState('loading');
+    try {
+      const apiKey = configuredApiKey();
+      await axios.post(
+        `${apiUrl}/api/v1/findings/${findingId}/push-to-ticketing`,
+        {},
+        apiKey ? { headers: { 'X-API-KEY': apiKey } } : undefined,
+      );
+      addProgress({
+        scan_id: latestScanId,
+        type: 'success',
+        message: `Pushed ${finding.title || findingId} to ticketing`,
+      });
+    } catch (error) {
+      addProgress({
+        scan_id: latestScanId,
+        type: 'error',
+        message: `Ticketing push failed: ${apiError(error)}`,
+      });
+    } finally {
+      setTicketingState('idle');
+    }
+  };
+
   useEffect(() => {
     if (!pollingScanId) return undefined;
     refreshStatus(pollingScanId);
@@ -1359,6 +1395,8 @@ function App() {
 
   const renderPage = () => {
     switch (activePage) {
+      case 'risk-posture':
+        return <RiskPostureDashboard />;
       case 'mode':
         return <ModeSelect onNavigate={navigate} />;
       case 'automated-setup':
@@ -1437,6 +1475,8 @@ function App() {
             onNavigate={navigate}
             onRunProof={runProofTask}
             onExportEvidence={downloadFindingEvidence}
+            onPushToTicketing={pushFindingToTicketing}
+            pushToTicketingState={ticketingState}
             onRefresh={() => loadFindings(latestScanId)}
             onLoadEvidence={loadFindingEvidence}
             loadExchange={loadExchange}

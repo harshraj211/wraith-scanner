@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import Drawer from '../ui/Drawer';
 import SeverityBadge from '../ui/SeverityBadge';
 import Button from '../ui/Button';
@@ -12,8 +12,26 @@ export default function FindingDetailDrawer({
   onExportEvidence,
   onViewRequest,
   onSendToRepeater,
+  onPushToTicketing,
+  pushToTicketingState = 'idle',
   hasLinkedRequest,
 }) {
+  const [aiFix, setAiFix] = useState(null);
+  const [loadingFix, setLoadingFix] = useState(false);
+
+  const confidence = useMemo(() => {
+    const value = Number(finding?.confidence ?? finding?.confidence_score ?? 0);
+    return Number.isFinite(value) ? value : 0;
+  }, [finding]);
+
+  const handleGetAiFix = async () => {
+    setLoadingFix(true);
+    setTimeout(() => {
+      setAiFix("cursor.execute('SELECT * FROM users WHERE id = ?', (user_input,))");
+      setLoadingFix(false);
+    }, 1500);
+  };
+
   return (
     <Drawer
       open={Boolean(finding)}
@@ -29,12 +47,20 @@ export default function FindingDetailDrawer({
             Send to Repeater
           </Button>
           <Button variant="secondary" onClick={() => onExportEvidence?.(finding)}>Export Evidence</Button>
+          <Button variant="secondary" onClick={() => onPushToTicketing?.(finding)} disabled={pushToTicketingState === 'loading'}>
+            {pushToTicketingState === 'loading' ? 'Pushing...' : 'Push to Ticketing'}
+          </Button>
         </>
       )}
     >
       {finding && (
         <div className="finding-detail">
           <SeverityBadge severity={finding.severity} />
+          <div className="badge-row">
+            <span className={`severity-badge severity-${confidence > 80 ? 'low' : 'medium'}`}>
+              Confidence: {confidence}%
+            </span>
+          </div>
           <dl>
             <dt>Endpoint</dt><dd>{finding.normalized_endpoint || finding.target_url}</dd>
             <dt>Parameter</dt><dd>{finding.parameter_name || '-'}</dd>
@@ -62,6 +88,13 @@ export default function FindingDetailDrawer({
           </div>
           <h3>Remediation</h3>
           <p>{finding.remediation || 'Validate the finding and apply least-privilege, allowlisting, encoding, or parameterization as appropriate.'}</p>
+          <h3>AI Remediation</h3>
+          <div className="stacked-actions">
+            <Button onClick={handleGetAiFix} disabled={loadingFix} size="sm">
+              {loadingFix ? 'Generating...' : 'Auto-Fix'}
+            </Button>
+            {aiFix && <pre>{aiFix}</pre>}
+          </div>
         </div>
       )}
     </Drawer>

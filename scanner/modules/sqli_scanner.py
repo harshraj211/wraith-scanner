@@ -33,6 +33,7 @@ from scanner.utils.request_metadata import (
     send_request_async,
     send_request_sync,
 )
+from scanner.utils.payload_mutator import PayloadMutator
 from scanner.utils.waf_evasion import (
     detect_waf,
     is_waf_blocked,
@@ -266,6 +267,18 @@ class SQLiScanner:
         # Lazy-init OOB client only if needed
         self._oob: Optional[_InteractshClient] = None
         self._oob_lock = threading.Lock()
+        self._mutator = PayloadMutator()
+
+    def _expanded_sqli_payloads(self, payloads: List[str]) -> List[str]:
+        expanded = []
+        seen = set()
+        for payload in payloads:
+            for candidate in self._mutator.mutate_sqli(payload):
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                expanded.append(candidate)
+        return expanded
 
     def _check_waf(self, headers=None, status: int = 0, text: str = ""):
         """Detect WAF on first blocked response and auto-escalate evasion."""
@@ -388,7 +401,7 @@ class SQLiScanner:
 
     async def _error_based_async(self, url: str, params: Dict[str, str],
                                   target: str, http) -> Optional[Dict[str, Any]]:
-        for payload in ERROR_PAYLOADS:
+        for payload in self._expanded_sqli_payloads(ERROR_PAYLOADS):
             test = dict(params)
             test[target] = payload
             resp = await http.get(url, params=test)
@@ -510,7 +523,7 @@ class SQLiScanner:
 
         # Phase 1: Mutated error payloads from evasion engine
         for payload, technique in generate_sqli_evasion_payloads(
-            ERROR_PAYLOADS[:6], max_variants=5
+            self._expanded_sqli_payloads(ERROR_PAYLOADS[:6]), max_variants=5
         ):
             if technique == "none":
                 continue  # already tested in _error_based_async
@@ -622,7 +635,7 @@ class SQLiScanner:
         if not baseline:
             return None
 
-        for payload in ERROR_PAYLOADS[:6]:
+        for payload in self._expanded_sqli_payloads(ERROR_PAYLOADS[:6]):
             test_body, test_headers, test_cookies = build_request_context(
                 body_fields,
                 header_fields,
@@ -704,7 +717,7 @@ class SQLiScanner:
         if not baseline:
             return None
 
-        for payload in ERROR_PAYLOADS[:6]:
+        for payload in self._expanded_sqli_payloads(ERROR_PAYLOADS[:6]):
             test_body, test_headers, test_cookies = build_request_context(
                 body_fields,
                 header_fields,
@@ -737,7 +750,7 @@ class SQLiScanner:
 
     def _error_based(self, url: str, params: Dict[str, str],
                      target: str) -> Optional[Dict[str, Any]]:
-        for payload in ERROR_PAYLOADS:
+        for payload in self._expanded_sqli_payloads(ERROR_PAYLOADS):
             test = dict(params)
             test[target] = payload
             try:

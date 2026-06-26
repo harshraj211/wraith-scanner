@@ -1,0 +1,33 @@
+name: Wraith DevSecOps Scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  wraith-security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Wraith Scanner
+        run: |
+          pip install -r requirements.txt
+          pip install playwright && playwright install chromium
+
+      - name: Run Wraith SAST Scan (SARIF Output)
+        run: |
+          python cli.py --target . --mode SAST --output-format sarif --output-file wraith-results.sarif
+
+      - name: Upload SARIF to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: wraith-results.sarif
