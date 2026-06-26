@@ -1125,32 +1125,30 @@ def run_scan(
 @app.route('/api/scan', methods=['POST'])
 def start_scan():
     """Start scan with optional authentication and mode."""
-    data = request.get_json(silent=True) or {}
-    target_url = data.get('url')
-    depth = data.get('depth')
-    timeout = data.get('timeout')
-    auth_config = data.get('auth')
-    import_config = data.get('imports') or data.get('api_imports') or {}
-    sequence_config = (
-        data.get('sequence_workflows')
-        or data.get('sequence_workflow')
-        or data.get('api_workflows')
-        or []
-    )
+    raw_data = request.get_json(silent=True) or {}
+    
+    # 1. Strict Payload Validation
+    from scanner.security.api_validation import ScanRequestSchema, ValidationError
+    try:
+        scan_data = ScanRequestSchema(**raw_data)
+    except ValidationError as e:
+        return jsonify({"error": "Invalid request payload", "details": e.errors()}), 400
+
+    # 2. Extract validated data
+    target_url = str(scan_data.url)
+    depth = scan_data.depth
+    timeout = scan_data.timeout
+    safety_mode = scan_data.safety_mode.value
+    allow_private = scan_data.allow_private_targets
+    auth_config = scan_data.auth
+    import_config = scan_data.imports or {}
+    sequence_config = scan_data.sequence_workflows or []
     scan_mode = 'scan'
 
-    if not target_url:
-        return jsonify({'error': 'URL is required'}), 400
-
-    safety_mode = (
-        (auth_config or {}).get("safety_mode")
-        or data.get("safety_mode")
-        or "safe"
-    )
     valid, reason = _validate_outbound_target(
         target_url,
         safety_mode=safety_mode,
-        allow_private_targets=bool(data.get("allow_private_targets")),
+        allow_private_targets=allow_private,
     )
     if not valid:
         return jsonify({'error': reason}), 400
@@ -2962,6 +2960,24 @@ def handle_connect(auth=None):
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Client disconnected')
+
+@app.errorhandler(404)
+def not_found_error(error):
+    return jsonify({"error": "Resource not found", "status_code": 404}), 404
+
+@app.errorhandler(405)
+def method_not_allowed_error(error):
+    return jsonify({"error": "Method not allowed", "status_code": 405}), 405
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    return jsonify({"error": "Internal server error", "status_code": 500}), 500
+
+@app.errorhandler(Exception)
+def unhandled_exception(error):
+    import traceback
+    print(f"[CRASH] Unhandled exception: {traceback.format_exc()}")
+    return jsonify({"error": "An unexpected error occurred", "status_code": 500}), 500
 
 
 if __name__ == '__main__':
