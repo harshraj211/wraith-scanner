@@ -2,7 +2,7 @@
 xss_scanner.py — Async XSS Scanner with Playwright Browser Pool
 =================================================================
 
-Architecture (v3 — native aiohttp):
+Architecture (v3 — native aiohttp + Phase 2.1 WAF Evasion):
   - scan_url_async() / scan_form_async() use AsyncHTTPSession directly
   - Reflected XSS: fully async — all payloads use aiohttp coroutines
   - DOM XSS: Playwright remains sync (browser API), wrapped in to_thread()
@@ -168,140 +168,6 @@ class _PlaywrightPool:
         _PlaywrightPool._instance = None
 
 
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Payloads
-# ─────────────────────────────────────────────────────────────────────────────
-
-REFLECTED_PAYLOADS = [
-    '<script>alert("{MARKER}")</script>',
-    '"><script>alert("{MARKER}")</script>',
-    "'><script>alert('{MARKER}')</script>",
-    '<img src=x onerror=alert("{MARKER}")>',
-    '"><img src=x onerror=alert("{MARKER}")>',
-    '<svg onload=alert("{MARKER}")>',
-    '<details open ontoggle=alert("{MARKER}")>',
-    '<iframe srcdoc="<script>alert(\'{MARKER}\')</script>">',
-    'javascript:alert("{MARKER}")',
-    '"><body onload=alert("{MARKER}")>',
-    # HTML entity bypass
-    '&lt;script&gt;alert("{MARKER}")&lt;/script&gt;',
-    # Polyglot
-    'jaVasCript:/*-/*`/*\\`/*\'/*"/**/(/* */oNcliCk=alert("{MARKER}") )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert("{MARKER}")//>>',
-]
-
-DOM_PAYLOADS = [
-    '<img src=x onerror=alert("{MARKER}")>',
-    '"><script>alert("{MARKER}")</script>',
-]
-
-STORED_MARKER_PREFIX = "XSSTEST"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Playwright browser pool
-# ─────────────────────────────────────────────────────────────────────────────
-
-class _PlaywrightPool:
-    """
-    Single shared Playwright browser with a pool of reusable contexts.
-
-    Previous code launched a new browser for EVERY DOM XSS check — this is
-    extremely slow (~2-3s startup per check) and OOM-prone at scale.
-
-    This pool keeps one browser alive for the lifetime of the scan and
-    recycles contexts (each context = isolated cookies/storage/sessions).
-    """
-
-    _instance: Optional["_PlaywrightPool"] = None
-    _lock = threading.Lock()
-
-    def __init__(self, pool_size: int = 3):
-        self._pool_size   = pool_size
-        self._playwright  = None
-        self._browser     = None
-        self._contexts: List[Any] = []
-        self._available   = threading.Semaphore(pool_size)
-        self._ctx_lock    = threading.Lock()
-        self._started     = False
-        self._unavailable = False
-
-    @classmethod
-    def get_instance(cls, pool_size: int = 3) -> "_PlaywrightPool":
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls(pool_size)
-                cls._instance._start()
-            return cls._instance
-
-    def _start(self):
-        try:
-            from playwright.sync_api import sync_playwright
-            self._pw_cm       = sync_playwright()
-            self._playwright  = self._pw_cm.start()
-            self._browser     = self._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-extensions",
-                    "--disable-background-networking",
-                ],
-            )
-            # Pre-create pool_size contexts
-            for _ in range(self._pool_size):
-                ctx = self._browser.new_context(
-                    ignore_https_errors=True,
-                    java_script_enabled=True,
-                    bypass_csp=True,  # needed to catch CSP-blocked XSS
-                )
-                self._contexts.append(ctx)
-            self._started = True
-            print(f"[XSSScanner] Playwright pool started ({self._pool_size} contexts)")
-        except ImportError:
-            print("[XSSScanner] Playwright not installed — DOM XSS disabled")
-            print("             Install: pip install playwright && playwright install chromium")
-            self._unavailable = True
-        except Exception as e:
-            print(f"[XSSScanner] Playwright pool start failed: {e}")
-            self._unavailable = True
-
-    def acquire_context(self) -> Optional[Any]:
-        """Acquire a context from the pool (blocks until one is available)."""
-        if self._unavailable or not self._started:
-            return None
-        self._available.acquire()
-        with self._ctx_lock:
-            return self._contexts.pop()
-
-    def release_context(self, ctx: Any):
-        """Return a context to the pool. Clears cookies/storage for isolation."""
-        if ctx is None:
-            return
-        try:
-            ctx.clear_cookies()
-        except Exception:
-            pass
-        with self._ctx_lock:
-            self._contexts.append(ctx)
-        self._available.release()
-
-    def shutdown(self):
-        """Call once when scan is complete."""
-        try:
-            for ctx in self._contexts:
-                ctx.close()
-            if self._browser:
-                self._browser.close()
-            if self._playwright:
-                self._playwright.stop()
-        except Exception:
-            pass
-        _PlaywrightPool._instance = None
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # XSS Scanner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,7 +188,11 @@ class XSSScanner:
         # Pool is lazy-initialized on first DOM XSS check
         self._pool: Optional[_PlaywrightPool] = None
         self._response_agent = ResponseIntelligenceAgent()
+        
+        # Phase 2.1: WAF Context & Mutator
+        self.detected_waf = "None"
         self._mutator = PayloadMutator()
+        
         self.intelligence_stats: Dict[str, Any] = {
             "mode": self._response_agent.mode,
             "mutation_attempts": 0,
@@ -335,11 +205,13 @@ class XSSScanner:
             self._pool = _PlaywrightPool.get_instance(pool_size=3)
         return self._pool
 
-    def _expanded_xss_payloads(self, payloads: List[str]) -> List[str]:
+    def _expanded_xss_payloads(self, payloads: List[str], context: str = "url") -> List[str]:
+        """Phase 2.1: Mutates payloads based on detected WAF and injection context."""
         expanded = []
         seen = set()
         for payload in payloads:
-            for candidate in self._mutator.mutate_xss(payload):
+            # Use the injected WAF name and context
+            for candidate in self._mutator.mutate_xss(payload, context=context, waf=self.detected_waf):
                 if candidate in seen:
                     continue
                 seen.add(candidate)
@@ -430,7 +302,7 @@ class XSSScanner:
                               target_param: str) -> List[Dict[str, Any]]:
         findings = []
 
-        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS):
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS, context="url"):
             marker = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -497,8 +369,8 @@ class XSSScanner:
     async def _scan_param_reflected_async(self, url: str, params: Dict[str, str],
                                            target_param: str, http) -> List[Dict[str, Any]]:
         findings = []
-        # Phase 1: Standard payloads
-        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS):
+        # Phase 1: Standard payloads (Phase 2.1: passing context="url")
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS, context="url"):
             marker  = STORED_MARKER_PREFIX + uuid.uuid4().hex[:8]
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -566,7 +438,11 @@ class XSSScanner:
                                            http) -> List[Dict[str, Any]]:
         findings = []
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
-        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6]):
+        
+        # Determine injection context for Phase 2.1
+        context = "json" if body_format == "json" else "url"
+        
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6], context=context):
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -607,8 +483,11 @@ class XSSScanner:
                                request_parts, target_location: str, target_field: str) -> List[Dict[str, Any]]:
         findings = []
         body_fields, header_fields, cookie_fields, extra_headers, extra_cookies, body_format = request_parts
+        
+        # Determine injection context for Phase 2.1
+        context = "json" if body_format == "json" else "url"
 
-        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6]):  # fewer for forms
+        for payload_template in self._expanded_xss_payloads(REFLECTED_PAYLOADS[:6], context=context):
             marker  = f"{STORED_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -855,7 +734,7 @@ class XSSScanner:
 
         findings = []
 
-        for payload_template in self._expanded_xss_payloads(DOM_PAYLOADS):
+        for payload_template in self._expanded_xss_payloads(DOM_PAYLOADS, context="url"):
             marker  = f"DOMXSS{uuid.uuid4().hex[:8]}"
             payload = payload_template.replace("{MARKER}", marker)
 
@@ -1019,7 +898,7 @@ class XSSScanner:
             except Exception:
                 pass
 
-            # Check 2: marker flowed into an actually dangerous DOM sink
+            # Check 3: marker flowed into an actually dangerous DOM sink
             try:
                 sink = page.evaluate(
                     """

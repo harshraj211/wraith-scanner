@@ -42,3 +42,4 @@ echo "scanner-terminal/*.png" >> .gitignore
 git add .gitignore*.log
 all_code.txt
 scanner-terminal/*.png
+*.log
