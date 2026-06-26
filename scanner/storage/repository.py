@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -20,6 +21,7 @@ from scanner.core.models import (
     utc_now,
 )
 from scanner.storage.db import DEFAULT_DB_PATH, init_db as open_db
+from scanner.storage.pg_database import PostgresManager
 from scanner.utils.redaction import redact, redact_headers
 
 
@@ -64,7 +66,11 @@ class StorageRepository:
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or DEFAULT_DB_PATH
-        self.conn = open_db(self.path)
+        database_url = os.environ.get("DATABASE_URL")
+        if database_url:
+            self.conn = PostgresManager.get_conn()
+        else:
+            self.conn = open_db(self.path)
         self._lock = threading.RLock()
 
     def close(self) -> None:

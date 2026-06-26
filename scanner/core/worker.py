@@ -1,37 +1,31 @@
-from __future__ import annotations
-
+import os
 import asyncio
-
 from celery import Celery
+from scanner.core.redis_state import RedisStateManager
+from scanner.storage.pg_database import PostgresManager
 
-from scanner.core.async_engine import AsyncScanEngine
+# Initialize Celery
+redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+app = Celery('wraith_worker', broker=redis_url, backend=redis_url)
 
-app = Celery(
-    "wraith_scanner",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
-)
-
+# Import the heavy scanning logic
+from api_server import run_scan
 
 @app.task(bind=True)
-def run_dast_scan_task(self, target_url, scan_config):
+def run_dast_scan_task(self, scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config, sequence_config):
+    """Celery task for distributed DAST scanning."""
+    state_mgr = RedisStateManager()
+    
     try:
-        engine = AsyncScanEngine()
-        _ = self
-        _ = target_url
-        _ = scan_config
-
-        run_full_scan = getattr(engine, "run_full_scan", None)
-        if not callable(run_full_scan):
-            return {
-                "status": "FAILED",
-                "error": "AsyncScanEngine.run_full_scan is not implemented in this repo",
-            }
-
-        async def _run():
-            return await run_full_scan(target_url)
-
-        results = asyncio.run(_run())
-        return {"status": "SUCCESS", "findings": results}
+        # Postgres connection is established inside the worker process
+        PostgresManager.initialize_pool()
+        
+        state_mgr.set_scan_state(scan_id, {"status": "running", "target": target_url})
+        
+        # Execute the actual scan
+        asyncio.run(run_scan(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config, sequence_config))
+        
+        return {"status": "SUCCESS", "scan_id": scan_id}
     except Exception as e:
+        state_mgr.set_scan_state(scan_id, {"status": "failed", "error": str(e)})
         return {"status": "FAILED", "error": str(e)}

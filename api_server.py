@@ -151,8 +151,9 @@ socketio = SocketIO(
     manage_session=False,
 )
 
-active_scans = {}
-_scan_lock = threading.RLock()
+from scanner.core.redis_state import RedisStateManager
+state_mgr = RedisStateManager()
+
 manual_proxy = WraithProxyController()
 wraith_browser = WraithBrowserController()
 manual_ca = WraithCAManager()
@@ -280,47 +281,42 @@ def _persist_scan_state(scan_id, state):
 
 def _set_scan_state(scan_id, state, *, persist=True):
     snapshot = dict(state or {})
-    with _scan_lock:
-        active_scans[scan_id] = snapshot
+    state_mgr.set_scan_state(scan_id, snapshot)
     if persist:
         _persist_scan_state(scan_id, snapshot)
     return snapshot
 
 
 def _update_scan_state(scan_id, updates, *, persist=True):
-    with _scan_lock:
-        snapshot = {**active_scans.get(scan_id, {}), **dict(updates or {})}
-        active_scans[scan_id] = snapshot
+    current = state_mgr.get_scan_state(scan_id) or {}
+    snapshot = {**current, **dict(updates or {})}
+    state_mgr.set_scan_state(scan_id, snapshot)
     if persist:
         _persist_scan_state(scan_id, snapshot)
     return snapshot
 
 
 def _get_scan_state(scan_id):
-    with _scan_lock:
-        scan = active_scans.get(scan_id)
-        return dict(scan) if scan else None
+    return state_mgr.get_scan_state(scan_id)
 
 
 def _active_scan_items():
-    with _scan_lock:
-        return [(scan_id, dict(scan)) for scan_id, scan in active_scans.items()]
+    scans = state_mgr.get_all_scans()
+    return [(s.get("scan_id") or "", s) for s in scans if s]
 
 
 def _restore_scan_states(repo=None):
-    repo = repo or _storage_repo()
-    if repo is None or not hasattr(repo, "list_scan_states"):
-        return
-    try:
-        states = repo.list_scan_states()
-    except Exception as exc:
-        print(f"[storage] scan state restore failed: {exc}")
-        return
-    if not states:
-        return
-    with _scan_lock:
-        for scan_id, state in states.items():
-            active_scans.setdefault(scan_id, state)
+    scans = state_mgr.get_all_scans()
+    if not scans:
+        repo = repo or _storage_repo()
+        if repo is None or not hasattr(repo, "list_scan_states"):
+            return
+        try:
+            states = repo.list_scan_states()
+            for scan_id, state in states.items():
+                state_mgr.set_scan_state(scan_id, state)
+        except Exception as exc:
+            print(f"[storage] scan state restore failed: {exc}")
 
 
 def _validated_report_path(path):
@@ -1147,25 +1143,30 @@ def start_scan():
 
     scan_id = str(uuid.uuid4())
     _set_scan_state(scan_id, {
-        'status': 'running',
+        'status': 'queued',
         'target': target_url,
         'mode': 'dast',
         'scan_type': 'DAST',
         'started_at': _utc_timestamp(),
     })
 
-    thread = threading.Thread(
-        target=run_scan,
-        args=(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config, sequence_config),
+    from scanner.core.worker import run_dast_scan_task
+    run_dast_scan_task.delay(
+        scan_id=scan_id,
+        target_url=target_url,
+        depth=depth,
+        timeout=timeout,
+        auth_config=auth_config,
+        scan_mode=scan_mode,
+        import_config=import_config,
+        sequence_config=sequence_config
     )
-    thread.daemon = True
-    thread.start()
 
     return jsonify({
         'scan_id': scan_id,
-        'status': 'started',
-        'message': 'Scan started successfully'
-    })
+        'status': 'queued',
+        'message': 'Scan dispatched to distributed worker queue'
+    }), 202
 
 
 @app.route('/api/scan/repo', methods=['POST'])
