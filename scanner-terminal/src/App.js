@@ -43,6 +43,23 @@ function apiUrlCandidates(currentUrl) {
   ].filter((url, index, list) => url && list.indexOf(url) === index);
 }
 
+async function postWithApiFallback(currentUrl, path, payload, options = {}) {
+  let lastError = null;
+  for (const candidateUrl of apiUrlCandidates(currentUrl)) {
+    try {
+      const response = await axios.post(`${candidateUrl}${path}`, payload, options);
+      return { response, apiUrl: candidateUrl };
+    } catch (error) {
+      lastError = error;
+      const status = error?.response?.status;
+      if (status && status < 500) {
+        throw error;
+      }
+    }
+  }
+  throw lastError || new Error('Backend is not reachable.');
+}
+
 function defaultSafetyMode() {
   if (typeof window === 'undefined') return 'safe';
   const stored = window.localStorage.getItem('wraith.defaultSafetyMode');
@@ -444,7 +461,11 @@ function App() {
     setLaunchError('');
     setScanStatus(null);
     try {
-      const response = await axios.post(`${apiUrl}/api/scan`, scanPayload);
+      const { response, apiUrl: workingApiUrl } = await postWithApiFallback(apiUrl, '/api/scan', scanPayload, { timeout: 12000 });
+      if (workingApiUrl !== apiUrl) {
+        setApiUrl(workingApiUrl);
+        window.localStorage.setItem('wraith.apiUrl', workingApiUrl);
+      }
       const scanId = response.data.scan_id;
       if (!scanId) throw new Error('Backend did not return a scan id.');
       setLatestScanId(scanId);

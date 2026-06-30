@@ -4,7 +4,38 @@ import json
 import logging
 
 from flask import Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+try:
+    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+except ImportError:
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+    class _NoopMetric:
+        def labels(self, *args, **kwargs):
+            return self
+
+        def inc(self, *args, **kwargs):
+            return None
+
+        def observe(self, *args, **kwargs):
+            return None
+
+        def time(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def Counter(*args, **kwargs):
+        return _NoopMetric()
+
+    def Histogram(*args, **kwargs):
+        return _NoopMetric()
+
+    def generate_latest():
+        return b"# prometheus_client not installed\n"
 
 SCAN_REQUESTS = Counter("wraith_scans_total", "Total number of scans initiated", ["scan_type", "status"])
 SCAN_DURATION = Histogram("wraith_scan_duration_seconds", "Time spent running scans", ["scan_type"])

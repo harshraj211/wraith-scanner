@@ -1,8 +1,13 @@
 import threading
 import asyncio
-from mitmproxy.tools.dump import DumpMaster
-from mitmproxy.options import Options
-from scanner.manual.mitm_addon import WraithMITMAddon
+try:
+    from mitmproxy.tools.dump import DumpMaster
+    from mitmproxy.options import Options
+    from scanner.manual.mitm_addon import WraithMITMAddon
+except ImportError:
+    DumpMaster = None
+    Options = None
+    WraithMITMAddon = None
 from typing import Any, Dict, List, Optional
 from scanner.storage.repository import StorageRepository
 
@@ -33,10 +38,20 @@ class WraithProxyController:
             "running": False,
             "host": "127.0.0.1",
             "port": 8080,
-            "https_interception": True
+            "https_interception": True,
+            "available": DumpMaster is not None,
+            "error": "" if DumpMaster is not None else "mitmproxy is not installed"
         }
 
     def start(self, repo: StorageRepository, config: Optional[ProxyConfig] = None) -> Dict[str, Any]:
+        if DumpMaster is None or Options is None or WraithMITMAddon is None:
+            self.status_data.update({
+                "running": False,
+                "available": False,
+                "error": "Manual proxy is unavailable because mitmproxy is not installed."
+            })
+            return self.status()
+
         if self.status_data["running"]:
             return self.status()
 
@@ -136,6 +151,8 @@ class WraithProxyController:
             "host": self.status_data["host"],
             "port": self.status_data["port"],
             "scan_id": self.config.scan_id if getattr(self, "config", None) else "",
+            "available": self.status_data.get("available", True),
+            "error": self.status_data.get("error", ""),
             "https_interception_enabled": True,
             "intercept_enabled": self.intercept_enabled,
             "https_connect_blocked_count": self.https_connect_blocked_count,

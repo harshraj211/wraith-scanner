@@ -13,6 +13,10 @@ DEFAULT_DB_PATH = os.environ.get("WRAITH_DB_PATH", os.path.join("reports", "wrai
 def init_db(path: Optional[str] = None) -> Any:
     """Open and migrate a local SQLite or PostgreSQL database."""
     database_url = os.environ.get("DATABASE_URL")
+    postgres_enabled = os.environ.get("WRAITH_ENABLE_POSTGRES", "").strip().lower() in {"1", "true", "yes", "on"}
+    if database_url and not postgres_enabled:
+        print("[storage] DATABASE_URL ignored because WRAITH_ENABLE_POSTGRES is not enabled; using SQLite.")
+        database_url = ""
     if database_url:
         import psycopg2
         from urllib.parse import urlparse

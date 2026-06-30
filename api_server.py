@@ -1,7 +1,7 @@
 """Flask API server with WordPress scanner, authentication support, and multi-mode scanning."""
 
 import asyncio
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
@@ -163,6 +163,10 @@ VERIFY_TLS = os.environ.get("WRAITH_VERIFY_TLS", "true").strip().lower() not in 
 
 @app.before_request
 def _enforce_enterprise_api_key():
+    enterprise_auth_enabled = os.environ.get("WRAITH_ENTERPRISE_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enterprise_auth_enabled:
+        return None
+
     # Only protect API routes
     if not request.path.startswith("/api/"):
         return None
@@ -863,9 +867,9 @@ def run_scan(
         websocket = WebSocketScanner(timeout=timeout, session=authenticated_session)
         
         # Initialize Advanced DAST Scanners
-        timing_sqli = TimingSQLiScanner(timeout=timeout, session=authenticated_session)
-        cloud_exposure = CloudExposureScanner(timeout=timeout, session=authenticated_session)
-        graphql_adv = GraphQLAdvancedScanner(timeout=timeout, session=authenticated_session)
+        timing_sqli = TimingSQLiScanner(session=authenticated_session)
+        cloud_exposure = CloudExposureScanner(session=authenticated_session)
+        graphql_adv = GraphQLAdvancedScanner(session=authenticated_session)
         grpc_scanner = GRPCScanner(target_host=urlparse(target_url).hostname, target_port=50051)
         
         # --- NEW SCANNERS ---
@@ -874,7 +878,6 @@ def run_scan(
         
         live_scanner = LiveDiscoveryScanner(
             form_scanners=[sqli, xss, cmdi, path, csrf, crypto, ssrf, ssti, xxe, graphql, race, mass_assign],
-            url_scanners=[hpp],   # HPP is primarily a URL/GET scanner
             websocket_scanner=websocket,
             progress_cb=lambda msg: emit_progress(scan_id, msg, "info"),
         )
@@ -1019,14 +1022,17 @@ def run_scan(
         emit_progress(scan_id, "Running Advanced DAST: Cloud Exposure, gRPC, GraphQL DoS...", "info")
         try:
             # Timing SQLi (Run on first 20 URL pairs to prevent extreme scan delays)
-            for pair in url_param_pairs[:20]:
-                t_findings = timing_sqli.scan_timing_sqli(pair['url'], pair['param'])
-                if t_findings:
-                    all_findings.append(t_findings)
+            if hasattr(timing_sqli, "scan_timing_sqli"):
+                for pair in url_param_pairs[:20]:
+                    t_findings = timing_sqli.scan_timing_sqli(pair['url'], pair['param'])
+                    if t_findings:
+                        all_findings.append(t_findings)
             
             # Cloud Exposure & Advanced GraphQL
-            all_findings.extend(cloud_exposure.scan_target(target_url))
-            all_findings.extend(graphql_adv.scan_target(target_url))
+            if hasattr(cloud_exposure, "scan_target"):
+                all_findings.extend(cloud_exposure.scan_target(target_url))
+            if hasattr(graphql_adv, "scan_target"):
+                all_findings.extend(graphql_adv.scan_target(target_url))
             
             # gRPC Reflection
             grpc_finding = grpc_scanner.scan_grpc_reflection()
@@ -1189,22 +1195,36 @@ def start_scan():
         'started_at': _utc_timestamp(),
     })
 
-    from scanner.core.worker import run_dast_scan_task
-    run_dast_scan_task.delay(
-        scan_id=scan_id,
-        target_url=target_url,
-        depth=depth,
-        timeout=timeout,
-        auth_config=auth_config,
-        scan_mode=scan_mode,
-        import_config=import_config,
-        sequence_config=sequence_config
-    )
+    celery_enabled = os.environ.get("WRAITH_ENABLE_CELERY", "").strip().lower() in {"1", "true", "yes", "on"}
+    if celery_enabled:
+        from scanner.core.worker import run_dast_scan_task
+        run_dast_scan_task.delay(
+            scan_id=scan_id,
+            target_url=target_url,
+            depth=depth,
+            timeout=timeout,
+            auth_config=auth_config,
+            scan_mode=scan_mode,
+            import_config=import_config,
+            sequence_config=sequence_config
+        )
+        status = "queued"
+        message = "Scan dispatched to distributed worker queue"
+    else:
+        _update_scan_state(scan_id, {'status': 'running'})
+        thread = threading.Thread(
+            target=run_scan,
+            args=(scan_id, target_url, depth, timeout, auth_config, scan_mode, import_config, sequence_config),
+            daemon=True,
+        )
+        thread.start()
+        status = "started"
+        message = "Scan started locally"
 
     return jsonify({
         'scan_id': scan_id,
-        'status': 'queued',
-        'message': 'Scan dispatched to distributed worker queue'
+        'status': status,
+        'message': message
     }), 202
 
 

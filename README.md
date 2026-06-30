@@ -6,7 +6,6 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![React](https://img.shields.io/badge/React-19+-61DAFB.svg)](https://reactjs.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](docker-compose.yml)
 
 **A full-stack, DevSecOps-ready SAST/DAST vulnerability scanner designed to rival commercial platforms like Burp Suite Enterprise and Snyk.**
 
@@ -20,15 +19,15 @@ Wraith is not just a script—it is a distributed microservices architecture bui
 From Cloud IaC misconfigurations and Entropy-based secret detection to Boolean-based SQLi exploitation and HTTPS MITM interception, Wraith provides end-to-end vulnerability management.
 
 ## 🏗️ Architecture
-Wraith is built as a containerized microservices stack, designed for horizontal scaling.
+Wraith runs as a simple local Flask API plus React frontend for demos and single-machine usage.
 
 | Component | Technology | Description |
 |-----------|------------|-------------|
 | **Frontend** | React 19, TailwindCSS | Burp-style workbench, executive dashboards, real-time scan progress. |
-| **API Gateway** | Flask, Pydantic | Strict schema validation, RBAC, multi-tenant isolation, Redis rate-limiting. |
+| **API Gateway** | Flask, Pydantic | Schema validation, optional API-key auth, and local rate limiting. |
 | **Scan Engine** | Python, aiohttp, Playwright | Async DAST engine, DOM rendering, WAF fingerprinting, deterministic exploitation. |
 | **SAST Engine** | Semgrep, Custom Taint | AST analysis, Shannon entropy secret detection, IaC/K8s manifest scanning. |
-| **Infrastructure** | PostgreSQL, Redis, Celery | Distributed task queue, connection pooling, state management. |
+| **Storage** | SQLite | Local scan state, corpus, findings, and report artifacts. |
 
 ## 🛡️ Core Capabilities
 
@@ -52,25 +51,28 @@ Wraith is built as a containerized microservices stack, designed for horizontal 
 - **SARIF v2.1.0 Compliant:** Generates fully compliant SARIF reports with `partialFingerprints` for direct integration into the GitHub Security tab.
 - **Ticketing Automation:** Automatically pushes triaged findings to Jira (creating formatted bug tickets) and sends color-coded Slack alerts for CRITICAL vulnerabilities.
 
-## ⚙️ Quick Start (Docker)
+## ⚙️ Quick Start (Local)
 
-Wraith requires Docker Desktop for the enterprise microservices stack.
+Wraith does not require Docker, Redis, or PostgreSQL for the local demo setup.
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/yourusername/wraith-scanner.git
 cd wraith-scanner
 
-# 2. Configure environment variables
-cp .env.example .env
-# Add your Jira/Slack tokens and generate API keys here
+# 2. Install backend dependencies
+pip install -r requirements.txt
 
-# 3. Spin up the distributed architecture
-docker-compose up -d --build
+# 3. Start the API
+python api_server.py
 
-# 4. Access the platform
+# 4. Start the frontend in another terminal
+cd scanner-terminal
+npm install
+npm start
+
 # Frontend UI: http://localhost:3000
-# API Server: http://localhost:5000/health
+# API Server: http://localhost:5001/api/overview
 ```
 
 ## 🔒 Security & Self-Defense
@@ -104,10 +106,10 @@ jobs:
 ```
 
 ## 📈 The Tech Stack
-- **Backend:** Python 3.11, Flask, Celery, aiohttp, Pydantic
+- **Backend:** Python 3.11, Flask, aiohttp, Pydantic
 - **Frontend:** React 19, TailwindCSS, Socket.IO
-- **Security Tools:** Semgrep, Nuclei, Playwright, mitmproxy
-- **Database:** PostgreSQL, Redis
+- **Security Tools:** Semgrep, Nuclei, Playwright
+- **Database:** SQLite
 
 ## 📄 License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

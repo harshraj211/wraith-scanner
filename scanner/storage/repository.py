@@ -21,7 +21,6 @@ from scanner.core.models import (
     utc_now,
 )
 from scanner.storage.db import DEFAULT_DB_PATH, init_db as open_db
-from scanner.storage.pg_database import PostgresManager
 from scanner.utils.redaction import redact, redact_headers
 
 
@@ -67,7 +66,14 @@ class StorageRepository:
     def __init__(self, path: Optional[str] = None):
         self.path = path or DEFAULT_DB_PATH
         database_url = os.environ.get("DATABASE_URL")
+        postgres_enabled = os.environ.get("WRAITH_ENABLE_POSTGRES", "").strip().lower() in {"1", "true", "yes", "on"}
         if database_url:
+            if not postgres_enabled:
+                print("[storage] DATABASE_URL ignored because WRAITH_ENABLE_POSTGRES is not enabled; using SQLite.")
+                self.conn = open_db(self.path)
+                self._lock = threading.RLock()
+                return
+            from scanner.storage.pg_database import PostgresManager
             self.conn = PostgresManager.get_conn()
         else:
             self.conn = open_db(self.path)
