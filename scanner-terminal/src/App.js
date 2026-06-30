@@ -360,12 +360,16 @@ function App() {
       timeout: 5000,
     }) : null;
     if (!socket || typeof socket.on !== 'function') {
-      setSocketState('offline');
+      setSocketState((current) => (current === 'connected' ? current : 'offline'));
       return undefined;
     }
     socket.on('connect', () => setSocketState('connected'));
-    socket.on('disconnect', () => setSocketState((current) => (current === 'connected' ? current : 'disconnected')));
-    socket.on('connect_error', () => setSocketState((current) => (current === 'connected' ? current : 'disconnected')));
+    socket.on('disconnect', () => {
+      addProgress({ type: 'warning', message: 'Live socket disconnected; REST polling is still active.' });
+    });
+    socket.on('connect_error', () => {
+      addProgress({ type: 'warning', message: 'Live socket unavailable; REST polling is still active.' });
+    });
     socket.on('scan_progress', (event) => {
       addProgress(event || {});
       if (event?.scan_id) setLatestScanId(event.scan_id);
