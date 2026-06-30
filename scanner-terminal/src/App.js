@@ -494,6 +494,23 @@ function App() {
         return full ? response.data : { ...base, ...response.data };
       });
       if (response.data?.scan_id) setLatestScanId(response.data.scan_id);
+      if (Array.isArray(response.data?.events) && response.data.events.length) {
+        setProgressEvents((current) => {
+          const merged = new Map();
+          [...response.data.events, ...current].forEach((event) => {
+            const key = `${event.scan_id || scanId}:${event.timestamp || ''}:${event.message || ''}`;
+            merged.set(key, {
+              timestamp: event.timestamp || new Date().toISOString(),
+              type: event.type || event.status || 'info',
+              message: event.message || event.detail || 'event',
+              scan_id: event.scan_id || scanId,
+            });
+          });
+          return Array.from(merged.values())
+            .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+            .slice(0, 250);
+        });
+      }
       if (['completed', 'failed'].includes(String(response.data?.status || '').toLowerCase())) {
         setPollingScanId('');
         if (!full) {
@@ -506,6 +523,22 @@ function App() {
         loadOverview();
       }
     } catch (error) {
+      const missingScan = error?.response?.status === 404;
+      if (missingScan) {
+        const message = 'Scan state expired on the backend. Start a fresh scan for the live demo.';
+        setPollingScanId('');
+        setScanStatus((current) => ({
+          ...(current || {}),
+          scan_id: scanId,
+          target: current?.target || scanPayload.url,
+          status: 'failed',
+          error: message,
+          report_ready: false,
+        }));
+        addProgress({ scan_id: scanId, type: 'error', message });
+        loadOverview();
+        return;
+      }
       addProgress({ scan_id: scanId, type: 'error', message: apiError(error) });
     }
   };

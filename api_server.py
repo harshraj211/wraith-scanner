@@ -304,6 +304,8 @@ def _persist_scan_state(scan_id, state):
 
 def _set_scan_state(scan_id, state, *, persist=True):
     snapshot = dict(state or {})
+    snapshot["scan_id"] = scan_id
+    snapshot["updated_at"] = _utc_timestamp()
     state_mgr.set_scan_state(scan_id, snapshot)
     if persist:
         _persist_scan_state(scan_id, snapshot)
@@ -313,6 +315,8 @@ def _set_scan_state(scan_id, state, *, persist=True):
 def _update_scan_state(scan_id, updates, *, persist=True):
     current = state_mgr.get_scan_state(scan_id) or {}
     snapshot = {**current, **dict(updates or {})}
+    snapshot["scan_id"] = scan_id
+    snapshot["updated_at"] = _utc_timestamp()
     state_mgr.set_scan_state(scan_id, snapshot)
     if persist:
         _persist_scan_state(scan_id, snapshot)
@@ -562,11 +566,22 @@ def _targets_for_nuclei(repo, scan_id, payload, scan_payload):
 
 def emit_progress(scan_id, message, type="info"):
     """Send real-time progress updates."""
-    socketio.emit('scan_progress', {
+    event = {
         'scan_id': scan_id,
         'message': message,
         'type': type,
         'timestamp': datetime.now().isoformat()
+    }
+    current = state_mgr.get_scan_state(scan_id) or {}
+    events = list(current.get("events") or [])[-80:]
+    events.append(event)
+    _update_scan_state(scan_id, {
+        "events": events,
+        "last_event": event,
+        "last_heartbeat_at": _utc_timestamp(),
+    })
+    socketio.emit('scan_progress', {
+        **event
     })
 
 
@@ -1218,6 +1233,12 @@ def start_scan():
             daemon=True,
         )
         thread.start()
+        watchdog = threading.Thread(
+            target=_watch_scan_timeout,
+            args=(scan_id, _scan_timeout_seconds()),
+            daemon=True,
+        )
+        watchdog.start()
         status = "started"
         message = "Scan started locally"
 
@@ -1925,6 +1946,34 @@ def _load_scan_for_response(scan_id):
     return scan
 
 
+def _scan_timeout_seconds():
+    raw = os.environ.get("WRAITH_SCAN_TIMEOUT_SECONDS", "900")
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _watch_scan_timeout(scan_id, timeout_seconds):
+    time.sleep(timeout_seconds)
+    scan = _load_scan_for_response(scan_id)
+    if not scan:
+        return
+    status = str(scan.get("status") or "").lower()
+    if status in {"completed", "failed", "cancelled", "timed_out"}:
+        return
+    message = (
+        f"Scan timed out after {round(timeout_seconds / 60)} minutes. "
+        "Start a fresh scan with lower depth or a smaller scope for the live demo."
+    )
+    emit_progress(scan_id, message, "error")
+    _update_scan_state(scan_id, {
+        "status": "failed",
+        "error": message,
+        "completed_at": _utc_timestamp(),
+    })
+
+
 def _scan_status_payload(scan_id, scan, *, include_details=False):
     findings = scan.get('findings') or []
     canonical_findings = scan.get('canonical_findings') or []
@@ -1944,6 +1993,9 @@ def _scan_status_payload(scan_id, scan, *, include_details=False):
         'nuclei_summary':       scan.get('nuclei_summary', {}),
         'cve_intel_summary':    scan.get('cve_intel_summary', {}),
         'tech_stack':           scan.get('tech_stack', {}),
+        'events':               scan.get('events', [])[-100:],
+        'last_heartbeat_at':    scan.get('last_heartbeat_at'),
+        'updated_at':           scan.get('updated_at'),
         'report_ready':         bool(scan.get('report_path') or scan.get('json_report_path')),
         'error':                scan.get('error'),
     }
