@@ -23,8 +23,10 @@ import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import RiskPostureDashboard from './pages/RiskPostureDashboard';
 
+const DEFAULT_REMOTE_API_URL = 'https://wraith-scanner-api.onrender.com';
+
 function configuredApiUrl() {
-  const fallback = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
+  const fallback = process.env.REACT_APP_API_URL || DEFAULT_REMOTE_API_URL;
   if (typeof window === 'undefined') return fallback;
   return window.localStorage.getItem('wraith.apiUrl') || fallback;
 }
@@ -38,6 +40,7 @@ function apiUrlCandidates(currentUrl) {
   return [
     currentUrl,
     process.env.REACT_APP_API_URL,
+    DEFAULT_REMOTE_API_URL,
     'http://127.0.0.1:5001',
     'http://localhost:5001',
   ].filter((url, index, list) => url && list.indexOf(url) === index);
