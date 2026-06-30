@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: wraith-scanner-api
+    runtime: python
+    rootDir: .
+    buildCommand: bash scripts/render_build.sh
+    startCommand: bash scripts/render_start.sh
+    envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
