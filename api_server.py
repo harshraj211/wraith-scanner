@@ -137,7 +137,7 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
         "WRAITH_ALLOWED_ORIGINS",
-        "http://127.0.0.1:3000,http://localhost:3000",
+        "https://wraith-sec.vercel.app,https://scanner-terminal.vercel.app,http://127.0.0.1:3000,http://localhost:3000",
     ).split(",")
     if origin.strip()
 ]
