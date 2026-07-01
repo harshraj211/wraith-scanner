@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections import deque
@@ -58,6 +59,21 @@ OPENAPI_CANDIDATE_PATHS = (
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 class WebCrawler:
 
     def __init__(self, base_url: str, max_depth: int = 3, timeout: int = 10,
@@ -84,6 +100,8 @@ class WebCrawler:
             )
         self._workflow_traces: List[Dict[str, Any]] = []
         self._deep_state_mutator = DeepStateMutator()
+        self.max_pages = _bounded_int_env("WRAITH_MAX_CRAWL_PAGES", 12, 1, 100)
+        self.max_api_requests = _bounded_int_env("WRAITH_MAX_CRAWL_API_REQUESTS", 40, 1, 500)
 
         self.session = session or requests.Session()
         self.session.verify = False
@@ -101,7 +119,10 @@ class WebCrawler:
         """
         callback = discovery_callback or self.discovery_callback
         self._workflow_traces = []
-        if self._playwright_available():
+        if _env_bool("WRAITH_DAST_STATIC_CRAWL", False):
+            print("[Crawler] Hosted static crawl mode enabled")
+            results = self._crawl_bs4(callback)
+        elif self._playwright_available():
             print("[Crawler] Using async Playwright engine (JS rendering enabled)")
             results = asyncio.run(self._crawl_playwright_async(callback))
         else:
@@ -152,7 +173,7 @@ class WebCrawler:
 
             await self._sync_cookies_async(context)
 
-            while queue:
+            while queue and len(visited) < self.max_pages:
                 url, depth = queue.popleft()
 
                 if url in visited or depth > self.max_depth:
@@ -181,7 +202,7 @@ class WebCrawler:
                         res_type = req.resource_type
                         if res_type in ("fetch", "xhr"):
                             dedup_key = f"{req.method} {base_req_url}"
-                            if dedup_key not in api_seen:
+                            if dedup_key not in api_seen and len(api_requests) < self.max_api_requests:
                                 api_seen.add(dedup_key)
                                 api_req = {
                                     "url": req_url,
@@ -310,7 +331,8 @@ class WebCrawler:
                             pass
 
                 all_forms.extend(page_forms)
-                for link in page_urls:
+                remaining_slots = max(0, self.max_pages - len(visited) - len(queue))
+                for link in list(page_urls)[:remaining_slots]:
                     if "#/" in link:
                         continue
                     if link not in visited:
@@ -831,7 +853,7 @@ class WebCrawler:
         queue: deque = deque()
         queue.append((self.base_url, 0))
 
-        while queue:
+        while queue and len(visited) < self.max_pages:
             url, depth = queue.popleft()
 
             if url in visited or depth > self.max_depth:
@@ -863,7 +885,7 @@ class WebCrawler:
                     and not self._skip_url(link)
                     and not self._is_logout_url(link)
                 ):
-                    if link not in visited:
+                    if link not in visited and (len(visited) + len(queue)) < self.max_pages:
                         queue.append((link, depth + 1))
                     self._notify_discovery(discovery_callback, "url", link)
 
