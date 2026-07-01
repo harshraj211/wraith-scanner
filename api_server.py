@@ -734,6 +734,8 @@ def run_scan(
             depth = mode_config['max_depth']
         if timeout is None:
             timeout = mode_config['timeout']
+        depth = min(int(depth or 1), _bounded_int_env("WRAITH_MAX_SCAN_DEPTH", 2, 0, 5))
+        timeout = min(int(timeout or 10), _bounded_int_env("WRAITH_MAX_REQUEST_TIMEOUT", 10, 3, 60))
 
         emit_progress(scan_id, f"Mode: {scan_mode.upper()} | Depth: {depth} | Timeout: {timeout}s", "info")
         storage_repo = _storage_repo()
@@ -987,16 +989,19 @@ def run_scan(
         all_findings = wp_findings.copy()
         all_findings.extend(live_scanner.findings)
         emit_progress(scan_id, "Running passive checks (headers, components, crypto)...", "info")
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
             f_header    = pool.submit(header_scan.scan_url, target_url)
             f_comp_url  = pool.submit(component_scan.scan_url, target_url)
             f_comp_base = pool.submit(component_scan.scan_base_url, target_url)
             f_crypto    = pool.submit(crypto.scan_url, target_url)
-        for fut in [f_header, f_comp_url, f_comp_base, f_crypto]:
-            try:
-                all_findings.extend(fut.result(timeout=30))
-            except Exception:
-                pass
+            for fut in [f_header, f_comp_url, f_comp_base, f_crypto]:
+                try:
+                    all_findings.extend(fut.result(timeout=15))
+                except Exception:
+                    pass
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         emit_progress(scan_id, "Phase 2: Testing URL targets while forms are scanned during crawl...", "phase")
         engine = AsyncScanEngine(
@@ -1009,7 +1014,11 @@ def run_scan(
             auth_profile_id=auth_profile.profile_id,
             auth_role=auth_role,
         )
-        url_param_pairs = build_url_param_pairs(urls)
+        discovered_pairs = build_url_param_pairs(urls)
+        max_pairs = _bounded_int_env("WRAITH_MAX_DAST_TARGETS", 40, 1, 500)
+        url_param_pairs = discovered_pairs[:max_pairs]
+        if len(discovered_pairs) > max_pairs:
+            emit_progress(scan_id, f"Demo safety cap: scanning first {max_pairs} URL parameter targets", "warning")
         dast_scanners = [sqli, xss, idor, cmdi, path, ssrf, ssti, xxe, redir]
 
         # Single event loop — URLs + forms scan concurrently (full I/O overlap)
@@ -1049,10 +1058,13 @@ def run_scan(
             if hasattr(graphql_adv, "scan_target"):
                 all_findings.extend(graphql_adv.scan_target(target_url))
             
-            # gRPC Reflection
-            grpc_finding = grpc_scanner.scan_grpc_reflection()
-            if grpc_finding:
-                all_findings.append(grpc_finding)
+            # gRPC probing can hang on hosted platforms that silently drop non-HTTP traffic.
+            if os.environ.get("WRAITH_ENABLE_GRPC_DAST", "").strip().lower() in {"1", "true", "yes", "on"}:
+                grpc_finding = grpc_scanner.scan_grpc_reflection()
+                if grpc_finding:
+                    all_findings.append(grpc_finding)
+            else:
+                emit_progress(scan_id, "Skipping gRPC reflection probe in hosted demo mode", "info")
         except Exception as adv_exc:
             emit_progress(scan_id, f"Advanced DAST module error: {adv_exc}", "warning")
         # --------------------------------
@@ -1330,6 +1342,14 @@ def scan_repo():
             emit_progress(scan_id, "Indexing repository files...", "info")
             file_tree   = github_mgr.get_file_tree(repo_path)
             total_files = len(file_tree.get("all", []))
+            max_sast_files = _bounded_int_env("WRAITH_MAX_SAST_FILES", 500, 50, 5000)
+            if total_files > max_sast_files:
+                allowed = set(file_tree.get("all", [])[:max_sast_files])
+                for category, paths in list(file_tree.items()):
+                    if isinstance(paths, list):
+                        file_tree[category] = [p for p in paths if p in allowed]
+                emit_progress(scan_id, f"Demo safety cap: analyzing first {max_sast_files} repository files", "warning")
+                total_files = len(file_tree.get("all", []))
             stack["scannable_files"] = total_files
             emit_progress(scan_id, f"Indexed {total_files} files", "success")
             _update_scan_state(scan_id, {"status": "running", "tech_stack": stack})
@@ -1489,7 +1509,7 @@ def scan_repo():
                         text=True,
                         encoding="utf-8",
                         errors="replace",
-                        timeout=300,
+                        timeout=_bounded_int_env("WRAITH_SEMGREP_TIMEOUT_SECONDS", 120, 30, 300),
                         env=_utf8_env,
                     )
 
@@ -1552,7 +1572,7 @@ def scan_repo():
                         emit_progress(scan_id, f"Semgrep parsed: {semgrep_count} findings", "success")
 
                 except subprocess.TimeoutExpired:
-                    emit_progress(scan_id, "Semgrep timed out (>5 min)", "error")
+                    emit_progress(scan_id, "Semgrep timed out; continuing with other repo analyzers", "warning")
                 except _json.JSONDecodeError as e:
                     emit_progress(scan_id, f"Failed to parse Semgrep JSON: {e}", "error")
                 except Exception as e:
@@ -1565,22 +1585,23 @@ def scan_repo():
 
             # ── PHASE 2: repo analyzers complete in parallel with Semgrep ──
             emit_progress(scan_id, "Collecting parallel analyzer results...", "phase")
+            analyzer_timeout = _bounded_int_env("WRAITH_SAST_ANALYZER_TIMEOUT_SECONDS", 75, 10, 300)
             try:
-                taint_findings = taint_future.result()
+                taint_findings = taint_future.result(timeout=analyzer_timeout)
             except Exception as exc:
                 taint_findings = []
-                emit_progress(scan_id, f"Taint analysis failed: {exc}", "error")
+                emit_progress(scan_id, f"Taint analysis skipped or timed out: {exc}", "warning")
             try:
-                regex_findings = regex_future.result()
+                regex_findings = regex_future.result(timeout=analyzer_timeout)
             except Exception as exc:
                 regex_findings = []
-                emit_progress(scan_id, f"Secrets/deps scan failed: {exc}", "error")
+                emit_progress(scan_id, f"Secrets/deps scan skipped or timed out: {exc}", "warning")
             try:
-                iac_findings = iac_future.result()
+                iac_findings = iac_future.result(timeout=analyzer_timeout)
             except Exception as exc:
                 iac_findings = []
-                emit_progress(scan_id, f"IaC/K8s scan failed: {exc}", "error")
-            analysis_executor.shutdown(wait=False)
+                emit_progress(scan_id, f"IaC/K8s scan skipped or timed out: {exc}", "warning")
+            analysis_executor.shutdown(wait=False, cancel_futures=True)
 
             existing_keys = {(f.get("file"), f.get("line"), f.get("type"), f.get("source")) for f in findings}
             taint_added = 0
@@ -1688,6 +1709,12 @@ def scan_repo():
     thread = threading.Thread(target=run_sast, args=(scan_id, repo_url, token, branch))
     thread.daemon = True
     thread.start()
+    watchdog = threading.Thread(
+        target=_watch_scan_timeout,
+        args=(scan_id, _scan_timeout_seconds()),
+        daemon=True,
+    )
+    watchdog.start()
 
     return jsonify({'scan_id': scan_id, 'status': 'started', 'mode': 'sast'})
 
@@ -1952,6 +1979,15 @@ def _scan_timeout_seconds():
         return max(60, int(raw))
     except (TypeError, ValueError):
         return 900
+
+
+def _bounded_int_env(name, default, minimum=1, maximum=10000):
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
 
 
 def _watch_scan_timeout(scan_id, timeout_seconds):
