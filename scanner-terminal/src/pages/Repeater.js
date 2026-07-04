@@ -16,6 +16,12 @@ export default function Repeater({
   selectRepeaterTab,
   createRepeaterTab,
   closeRepeaterTab,
+  repeaterCollections,
+  repeaterCollectionName,
+  setRepeaterCollectionName,
+  saveRepeaterCollection,
+  loadRepeaterCollection,
+  deleteRepeaterCollection,
   activeRepeaterTab,
   selectRepeaterAttempt,
   repeaterDiff,
@@ -54,6 +60,14 @@ export default function Repeater({
             ))}
             <Button variant="ghost" onClick={createRepeaterTab}>New</Button>
           </div>
+          <RepeaterCollections
+            collections={repeaterCollections}
+            name={repeaterCollectionName}
+            setName={setRepeaterCollectionName}
+            onSave={saveRepeaterCollection}
+            onLoad={loadRepeaterCollection}
+            onDelete={deleteRepeaterCollection}
+          />
           <ManualRequestFields request={manualRequest} updateRequest={updateManualRequest} />
         </Card>
         <Card title="Response" eyebrow="Inspector">
@@ -64,6 +78,38 @@ export default function Repeater({
       </div>
     </div>
   );
+}
+
+function RepeaterCollections({ collections = [], name, setName, onSave, onLoad, onDelete }) {
+  return (
+    <div className="repeater-collections">
+      <div className="collection-save-row">
+        <input placeholder="Collection name" value={name || ''} onChange={(event) => setName?.(event.target.value)} />
+        <Button variant="secondary" onClick={onSave}>Save collection</Button>
+      </div>
+      <div className="collection-list">
+        {collections.length === 0 && <span>No saved collections yet.</span>}
+        {collections.map((item) => (
+          <div className="collection-row" key={item.id}>
+            <button onClick={() => onLoad?.(item.id)} title={item.request?.url || ''}>
+              <strong>{item.name}</strong>
+              <small>{item.request?.method || 'GET'} {safeCollectionPath(item.request?.url)}</small>
+            </button>
+            <Button variant="ghost" onClick={() => onDelete?.(item.id)}>Delete</Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function safeCollectionPath(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return parsed.pathname || '/';
+  } catch (_error) {
+    return String(url || '').slice(0, 80);
+  }
 }
 
 function RepeaterAttempts({ tab, selectedAttemptId, onSelect, diff }) {

@@ -5070,6 +5070,62 @@ textarea:focus {
   gap: 8px;
 }
 
+.repeater-collections {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid rgba(90, 90, 90, 0.28);
+  border-radius: 9px;
+  background: rgba(2, 2, 2, 0.38);
+}
+
+.collection-save-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.collection-list {
+  display: grid;
+  gap: 7px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.collection-list > span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.collection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.collection-row > button:first-child {
+  display: grid;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid rgba(90, 90, 90, 0.32);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.42);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.collection-row small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .repeater-attempts {
   display: flex;
   flex-direction: column;

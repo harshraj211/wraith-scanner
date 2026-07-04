@@ -143,6 +143,7 @@ const initialTemplateTrustConfig = {
 };
 
 const DEFAULT_REPEATER_TAB_ID = 'repeater_default';
+const REPEATER_COLLECTIONS_KEY = 'wraith.repeater.collections.v1';
 
 const hashToPage = {
   '#': 'overview',
@@ -226,6 +227,8 @@ function App() {
     activeAttemptId: '',
   }]);
   const [activeRepeaterTabId, setActiveRepeaterTabId] = useState(DEFAULT_REPEATER_TAB_ID);
+  const [repeaterCollections, setRepeaterCollections] = useState(loadRepeaterCollections);
+  const [repeaterCollectionName, setRepeaterCollectionName] = useState('');
   const [manualState, setManualState] = useState('idle');
   const [passiveState, setPassiveState] = useState('idle');
   const [manualFindingState, setManualFindingState] = useState('idle');
@@ -702,6 +705,56 @@ function App() {
     setActiveRepeaterTabId(tab.tabId);
     setManualRequest(request);
     navigate('repeater');
+  };
+
+  const saveRepeaterCollection = () => {
+    if (!activeRepeaterTab?.request) return;
+    const name = (repeaterCollectionName || activeRepeaterTab.title || repeaterTitle(activeRepeaterTab.request)).trim();
+    if (!name) return;
+    const collection = {
+      id: activeRepeaterTab.collectionId || `col_${Date.now().toString(36)}`,
+      name,
+      title: activeRepeaterTab.title || name,
+      sourceRequestId: activeRepeaterTab.sourceRequestId || '',
+      request: activeRepeaterTab.request,
+      savedAt: new Date().toISOString(),
+    };
+    setRepeaterCollections((current) => {
+      const next = [collection, ...current.filter((item) => item.id !== collection.id)].slice(0, 100);
+      persistRepeaterCollections(next);
+      return next;
+    });
+    setRepeaterTabs((tabs) => tabs.map((tab) => (
+      tab.tabId === activeRepeaterTabId ? { ...tab, collectionId: collection.id, title: collection.title } : tab
+    )));
+    setRepeaterCollectionName('');
+    addProgress({ scan_id: latestScanId, type: 'success', message: `Saved Repeater collection: ${name}` });
+  };
+
+  const loadRepeaterCollection = (collectionId) => {
+    const collection = repeaterCollections.find((item) => item.id === collectionId);
+    if (!collection?.request) return;
+    const tab = {
+      tabId: `rep_${collection.id}_${Date.now().toString(36)}`,
+      title: collection.title || collection.name || repeaterTitle(collection.request),
+      request: collection.request,
+      sourceRequestId: collection.sourceRequestId || '',
+      collectionId: collection.id,
+      attempts: [],
+      activeAttemptId: '',
+    };
+    setRepeaterTabs((current) => [...current, tab]);
+    setActiveRepeaterTabId(tab.tabId);
+    setManualRequest(tab.request);
+    navigate('repeater');
+  };
+
+  const deleteRepeaterCollection = (collectionId) => {
+    setRepeaterCollections((current) => {
+      const next = current.filter((item) => item.id !== collectionId);
+      persistRepeaterCollections(next);
+      return next;
+    });
   };
 
   const closeRepeaterTab = (tabId) => {
@@ -1634,6 +1687,12 @@ function App() {
             selectRepeaterTab={selectRepeaterTab}
             createRepeaterTab={createRepeaterTab}
             closeRepeaterTab={closeRepeaterTab}
+            repeaterCollections={repeaterCollections}
+            repeaterCollectionName={repeaterCollectionName}
+            setRepeaterCollectionName={setRepeaterCollectionName}
+            saveRepeaterCollection={saveRepeaterCollection}
+            loadRepeaterCollection={loadRepeaterCollection}
+            deleteRepeaterCollection={deleteRepeaterCollection}
             activeRepeaterTab={activeRepeaterTab}
             selectRepeaterAttempt={selectRepeaterAttempt}
             repeaterDiff={repeaterDiff}
@@ -2141,6 +2200,25 @@ function countImports(imports) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function loadRepeaterCollections() {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(REPEATER_COLLECTIONS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((item) => item?.id && item?.request).slice(0, 100) : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function persistRepeaterCollections(collections) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(REPEATER_COLLECTIONS_KEY, JSON.stringify(collections || []));
+  } catch (_error) {
+    // Ignore localStorage quota/private-mode failures; collection persistence is best-effort.
+  }
 }
 
 function triggerBrowserDownload(blob, filename) {
