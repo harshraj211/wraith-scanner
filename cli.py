@@ -58,15 +58,22 @@ def run_ci_mode():
         from scanner.modules.sast_scanner import SASTScanner
         from scanner.utils.github_manager import get_github_manager
         github_mgr = get_github_manager()
-        repo_path = github_mgr.clone_repo(args.target)
-        if not repo_path:
-            print("[-] Clone failed. Exiting.")
-            sys.exit(1)
+        target_path = os.path.abspath(args.target)
+        if os.path.isdir(target_path):
+            # CI jobs commonly scan the checkout they already have. Avoid
+            # treating a local path as a Git hosting URL and cloning it.
+            repo_path = target_path
+        else:
+            repo_path = github_mgr.clone_repo(args.target)
+            if not repo_path:
+                print("[-] Clone failed. Exiting.")
+                sys.exit(1)
         file_tree = github_mgr.get_file_tree(repo_path)
-        
+
         scanner = SASTScanner()
         findings = scanner.scan_repo(repo_path, file_tree)
-        github_mgr.cleanup()
+        if repo_path != target_path:
+            github_mgr.cleanup()
 
     print(f"[*] Scan complete. Found {len(findings)} vulnerabilities.")
     
