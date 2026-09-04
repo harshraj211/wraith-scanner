@@ -38,11 +38,17 @@ class SARIFExporter:
                 line_num = max(1, int(raw_line_num or 1))
             except (TypeError, ValueError):
                 line_num = 1
+            message_text = (
+                finding.get("evidence")
+                or finding.get("description")
+                or finding.get("title")
+                or rule_id
+            )
             
             results.append({
                 "ruleId": rule_id,
                 "level": self.SEVERITY_MAP.get(finding.get("severity", "MEDIUM").upper(), "warning"),
-                "message": {"text": finding.get("evidence", finding.get("description", ""))},
+                "message": {"text": str(message_text)},
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": {"uri": location_uri},
