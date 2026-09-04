@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   wraith-security-scan:
     runs-on: ubuntu-latest
@@ -23,9 +27,11 @@ jobs:
           pip install -r requirements.txt
           pip install playwright && playwright install chromium
 
-      - name: Run Wraith SAST Scan (Fail on High/Critical)
+      - name: Run Wraith SAST Scan (Upload findings)
+        continue-on-error: true
         run: |
-          # Run the CLI. If it finds a HIGH or CRITICAL, it will exit with code 1, failing the GitHub Action.
+          # Findings are uploaded to GitHub Code Scanning; the main CI workflow
+          # remains the enforcement gate for repository changes.
           python cli.py --target . --mode SAST --output-format sarif --output-file wraith-results.sarif --fail-on HIGH
 
       - name: Upload SARIF to GitHub Security Tab

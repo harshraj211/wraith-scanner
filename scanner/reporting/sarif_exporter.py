@@ -33,7 +33,11 @@ class SARIFExporter:
 
             # 2. Build Results array
             location_uri = finding.get("url", finding.get("file", "unknown"))
-            line_num = finding.get("line", 1)
+            raw_line_num = finding.get("line", 1)
+            try:
+                line_num = max(1, int(raw_line_num or 1))
+            except (TypeError, ValueError):
+                line_num = 1
             
             results.append({
                 "ruleId": rule_id,
